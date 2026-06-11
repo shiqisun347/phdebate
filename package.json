@@ -1,0 +1,22 @@
+{
+  "name": "phdebate",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "dev:backend": "cd apps/backend && PYTHONPATH=. ../../.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app",
+    "dev:agent": "cd apps/mock_agent && PYTHONPATH=. ../../.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8100 --reload",
+    "dev:frontend": "cd apps/frontend && npm run dev -- --host 0.0.0.0 --port 5174",
+    "serve": "npm run build:frontend && cd apps/backend && PYTHONPATH=. ../../.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000",
+    "install:frontend": "npm --prefix apps/frontend install",
+    "build:frontend": "cd apps/frontend && npm run build",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:backend": "PYTHONPATH=apps/backend .venv/bin/python -m pytest apps/backend/tests",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:browser": "node scripts/browser-smoke.mjs",
+    "check": "npm run check:docs && npm run check:backend && npm run build:frontend"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.1"
+  }
+}

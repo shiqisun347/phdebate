@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理端 · 原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0d1117; color: #e6edf3; font-size: 13px;
+    min-height: 100vh;
+  }
+  button { font-family: inherit; cursor: pointer; }
+
+  /* ===== 顶栏 ===== */
+  .topbar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 18px;
+    background: #161b22; border-bottom: 1px solid #21262d;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .topbar .title { font-size: 15px; font-weight: 700; }
+  .topbar .sub { color: #7d8590; font-size: 12px; }
+  .badge {
+    font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 99px;
+  }
+  .badge.running { color: #3fb950; background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.35); }
+  .tabs { display: flex; gap: 4px; margin-left: 26px; }
+  .tabs button {
+    background: none; border: none; color: #7d8590; font-size: 13px;
+    padding: 7px 13px; border-radius: 8px;
+  }
+  .tabs button.on { background: #1f6feb22; color: #58a6ff; font-weight: 600; }
+  .top-actions { margin-left: auto; display: flex; gap: 8px; }
+  .btn {
+    border: 1px solid #30363d; background: #21262d; color: #e6edf3;
+    padding: 6px 14px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+  }
+  .btn:hover { background: #30363d; }
+  .btn.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .btn.warn { color: #d29922; border-color: #9e6a03; background: rgba(187,128,9,.1); }
+  .btn.danger { background: #da3633; border-color: #da3633; color: #fff; }
+  .btn.ghost-danger { color: #f85149; border-color: #f8514966; background: rgba(248,81,73,.08); }
+  .btn.sm { padding: 3px 9px; font-size: 11.5px; font-weight: 500; }
+
+  .view { display: none; }
+  .view.on { display: block; }
+
+  /* ===== 监控视图：三栏 ===== */
+  .monitor {
+    display: grid; grid-template-columns: 240px 1fr 320px;
+    gap: 12px; padding: 12px 18px;
+    align-items: start;
+  }
+  .card {
+    background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+    overflow: hidden;
+  }
+  .card .hd {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; border-bottom: 1px solid #21262d;
+    font-size: 12.5px; font-weight: 700; color: #adbac7;
+  }
+  .card .hd .extra { margin-left: auto; font-weight: 400; color: #7d8590; font-size: 11.5px; }
+  .card .bd { padding: 10px 14px; }
+
+  /* 流程时间线 */
+  .phase-item {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 14px; border-left: 3px solid transparent;
+    color: #7d8590; font-size: 12.5px;
+  }
+  .phase-item .dot { width: 7px; height: 7px; border-radius: 50%; background: #30363d; flex: 0 0 auto; }
+  .phase-item.done { color: #8b949e; }
+  .phase-item.done .dot { background: #3fb950; }
+  .phase-item.cur {
+    color: #e6edf3; font-weight: 700; background: #1f6feb14; border-left-color: #1f6feb;
+  }
+  .phase-item.cur .dot { background: #58a6ff; box-shadow: 0 0 0 3px #1f6feb33; }
+  .phase-item .dur { margin-left: auto; font-size: 11px; color: #57606a; }
+
+  /* 当前环节控制 */
+  .now-line { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .now-line .ph { font-size: 19px; font-weight: 800; }
+  .now-line .sp { color: #7d8590; }
+  .now-line .sp b { color: #58a6ff; }
+  .clock-row { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .clock {
+    flex: 1; min-width: 120px; border: 1px solid #21262d; border-radius: 10px;
+    padding: 10px 12px; background: #0d1117;
+  }
+  .clock .c { font-size: 11px; color: #7d8590; margin-bottom: 3px; }
+  .clock .v { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .clock.aff .v { color: #58a6ff; }
+  .clock.neg .v { color: #f78166; }
+  .clock.turn .v { color: #3fb950; }
+  .clock .v small { font-size: 11px; color: #57606a; font-weight: 400; margin-left: 4px; }
+  .ctrl-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .divider { height: 1px; background: #21262d; margin: 14px 0; }
+  .sec-label { font-size: 11.5px; font-weight: 700; color: #7d8590; margin-bottom: 8px; letter-spacing: .05em; }
+
+  /* 发言人指定 */
+  .spk-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .spk-btn {
+    border: 1px solid #30363d; background: #0d1117; color: #adbac7;
+    border-radius: 8px; padding: 7px 4px; font-size: 11.5px; text-align: center;
+  }
+  .spk-btn small { display: block; color: #57606a; font-size: 10px; margin-top: 2px; }
+  .spk-btn.active { border-color: #1f6feb; color: #58a6ff; background: #1f6feb14; font-weight: 700; }
+
+  /* 转写流 */
+  .ts { max-height: 300px; overflow: auto; }
+  .ts-item { padding: 8px 14px; border-bottom: 1px solid #1c2128; }
+  .ts-item .meta { display: flex; gap: 8px; align-items: center; font-size: 11px; color: #7d8590; margin-bottom: 4px; }
+  .ts-item .who { font-weight: 700; color: #adbac7; }
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 700; }
+  .tag.final { color: #3fb950; background: rgba(63,185,80,.1); }
+  .tag.partial { color: #d29922; background: rgba(187,128,9,.1); }
+  .tag.ai { color: #bc8cff; background: rgba(188,140,255,.1); }
+  .ts-item .txt { font-size: 12.5px; line-height: 1.65; color: #c9d1d9; }
+  .ts-item .txt.dim { color: #768390; }
+  .ts-item .ops { margin-left: auto; display: flex; gap: 5px; }
+
+  /* Agent 状态 */
+  .agent { display: flex; align-items: center; gap: 9px; padding: 9px 14px; border-bottom: 1px solid #1c2128; }
+  .agent:last-child { border-bottom: none; }
+  .agent .st { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+  .st.ok { background: #3fb950; }
+  .st.gen { background: #58a6ff; box-shadow: 0 0 0 3px #1f6feb33; }
+  .st.err { background: #f85149; }
+  .agent .nm { font-weight: 600; font-size: 12.5px; }
+  .agent .sub { font-size: 11px; color: #7d8590; }
+  .agent .ops { margin-left: auto; display: flex; gap: 5px; }
+
+  /* 事件日志 */
+  .log { max-height: 260px; overflow: auto; font-size: 11.5px; }
+  .log-item { display: flex; gap: 8px; padding: 5px 14px; border-bottom: 1px solid #1c2128; color: #8b949e; }
+  .log-item time { color: #57606a; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .log-item.warn { color: #d29922; }
+  .log-item.err { color: #f85149; }
+
+  .col { display: flex; flex-direction: column; gap: 12px; }
+
+  /* ===== 投票视图 ===== */
+  .votes { padding: 12px 18px; display: grid; grid-template-columns: 1fr 320px; gap: 12px; align-items: start; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #21262d; }
+  th { color: #7d8590; font-size: 11.5px; font-weight: 600; }
+  .seg { display: inline-flex; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .seg button { border: none; background: none; color: #7d8590; padding: 5px 14px; font-size: 12px; }
+  .seg button.aff.on { background: #1f6feb22; color: #58a6ff; font-weight: 700; }
+  .seg button.neg.on { background: #f7816622; color: #f78166; font-weight: 700; }
+  select, input[type=text] {
+    background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+    border-radius: 8px; padding: 6px 10px; font-size: 12.5px; font-family: inherit;
+  }
+
+  /* ===== 设置视图 ===== */
+  .settings { padding: 12px 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+  .form-row { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .form-row label { color: #7d8590; font-size: 12px; }
+  .form-row input, .form-row select { width: 100%; }
+  .switch {
+    width: 34px; height: 19px; border-radius: 99px; background: #1f6feb; position: relative; display: inline-block;
+  }
+  .switch::after { content: ""; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: #fff; top: 2px; right: 2px; }
+  .switch.off { background: #30363d; }
+  .switch.off::after { right: auto; left: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ===== 顶栏 ===== -->
+<div class="topbar">
+  <div>
+    <div class="title">第一届人机辩论赛 <span class="badge running">进行中</span></div>
+    <div class="sub">AI 时代，我们更应该培养编程思维 / 提问思维 · 智码战队 vs 问道战队</div>
+  </div>
+  <div class="tabs">
+    <button class="on" data-view="monitor">比赛监控</button>
+    <button data-view="votes">投票与结果</button>
+    <button data-view="settings">比赛设置</button>
+  </div>
+  <div class="top-actions">
+    <span style="align-self:center;color:#7d8590;font-size:12px">大屏场景：</span>
+    <select><option>实况</option><option>候场</option><option>阵容</option><option>中场</option><option>结果</option></select>
+    <button class="btn warn">⏸ 暂停比赛</button>
+    <button class="btn danger">⛔ 紧急停止</button>
+  </div>
+</div>
+
+<!-- ============ 视图：比赛监控 ============ -->
+<div class="view on" data-view="monitor">
+  <div class="monitor">
+
+    <!-- 左：流程时间线 -->
+    <div class="card">
+      <div class="hd">比赛流程<span class="extra">7 / 10</span></div>
+      <div class="phase-item done"><span class="dot"></span>正方一辩立论<span class="dur">3:00</span></div>
+      <div class="phase-item done"><span class="dot"></span>反方一辩立论<span class="dur">3:00</span></div>
+      <div class="phase-item done"><span class="dot"></span>正方二辩陈词<span class="dur">1:30</span></div>
+      <div class="phase-item done"><span class="dot"></span>反方二辩陈词<span class="dur">1:30</span></div>
+      <div class="phase-item done"><span class="dot"></span>正方三辩陈词<span class="dur">1:30</span></div>
+      <div class="phase-item done"><span class="dot"></span>反方三辩陈词<span class="dur">1:30</span></div>
+      <div class="phase-item cur"><span class="dot"></span>自由辩论<span class="dur">4:00×2</span></div>
+      <div class="phase-item"><span class="dot"></span>反方四辩总结<span class="dur">3:00</span></div>
+      <div class="phase-item"><span class="dot"></span>正方四辩总结<span class="dur">3:00</span></div>
+      <div class="phase-item"><span class="dot"></span>点评与评委合票<span class="dur">17:00</span></div>
+      <div class="bd" style="display:flex;gap:6px">
+        <button class="btn sm">⏮ 回退</button>
+        <button class="btn sm">⏭ 跳过</button>
+        <button class="btn sm primary">下一环节 ▶</button>
+      </div>
+    </div>
+
+    <!-- 中：当前环节控制 -->
+    <div class="col">
+      <div class="card">
+        <div class="hd">当前环节控制</div>
+        <div class="bd">
+          <div class="now-line">
+            <span class="ph">自由辩论</span>
+            <span class="sp">当前发言：<b>正方三辩 · 林晚晴（人类）</b></span>
+            <span class="sp">下一轮：反方</span>
+          </div>
+          <div class="clock-row">
+            <div class="clock aff"><div class="c">正方剩余总时间</div><div class="v">02:31</div></div>
+            <div class="clock turn"><div class="c">单次发言（上限 15s）</div><div class="v">11<small>s</small></div></div>
+            <div class="clock neg"><div class="c">反方剩余总时间</div><div class="v">03:05</div></div>
+          </div>
+          <div class="ctrl-row">
+            <button class="btn">⏸ 暂停计时</button>
+            <button class="btn">校准时钟</button>
+            <button class="btn">🔔 手动响铃</button>
+            <button class="btn ghost-danger">强制结束本次发言</button>
+          </div>
+
+          <div class="divider"></div>
+          <div class="sec-label">指定发言人（自由辩论 · 反方下一轮）</div>
+          <div class="spk-grid">
+            <button class="spk-btn">启问<small>一辩 · AI</small></button>
+            <button class="spk-btn active">赵亦凡<small>二辩 · 人类</small></button>
+            <button class="spk-btn">穷理<small>三辩 · AI</small></button>
+            <button class="spk-btn">苏明哲<small>四辩 · 人类</small></button>
+          </div>
+
+          <div class="divider"></div>
+          <div class="sec-label">AI 干预</div>
+          <div class="ctrl-row" style="margin-top:0">
+            <button class="btn">🔄 重试生成</button>
+            <button class="btn">✋ 中断 AI</button>
+            <button class="btn">⌨️ 人工代输入</button>
+            <button class="btn">🔇 停止 TTS</button>
+            <button class="btn">🔒 锁定辩手麦克风</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 转写与发言流 -->
+      <div class="card">
+        <div class="hd">实时转写 / 发言流<span class="extra">自由辩论 · 第 14 轮</span></div>
+        <div class="ts">
+          <div class="ts-item">
+            <div class="meta">
+              <span class="who">正方三辩 · 林晚晴</span><span class="tag partial">ASR partial</span><span>00:23:41</span>
+              <span class="ops"><button class="btn sm">✎ 修正</button><button class="btn sm">标记无效</button></span>
+            </div>
+            <div class="txt dim">真正能驱动 AI 解决复杂问题的，恰恰是把大问题拆成可执行步骤的能力……</div>
+          </div>
+          <div class="ts-item">
+            <div class="meta">
+              <span class="who">反方三辩 · 穷理</span><span class="tag ai">AI</span><span class="tag final">final</span><span>00:23:18 · 14s</span>
+              <span class="ops"><button class="btn sm">✎ 修正</button><button class="btn sm">标记无效</button></span>
+            </div>
+            <div class="txt">对方辩友混淆了工具与思维：拆解步骤是 AI 的强项，而决定拆什么、为何拆，恰恰来自好的提问。</div>
+          </div>
+          <div class="ts-item">
+            <div class="meta">
+              <span class="who">正方二辩 · 玄思</span><span class="tag ai">AI</span><span class="tag final">final</span><span>00:22:59 · 13s</span>
+              <span class="ops"><button class="btn sm">✎ 修正</button><button class="btn sm">标记无效</button></span>
+            </div>
+            <div class="txt">提问若不落地为可验证的步骤，就只是空中楼阁。编程思维正是让问题可验证的桥梁。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右：Agent 状态 + 事件日志 -->
+    <div class="col">
+      <div class="card">
+        <div class="hd">AI 辩手状态</div>
+        <div class="agent">
+          <span class="st ok"></span>
+          <div><div class="nm">玄思 · 正方二辩</div><div class="sub">Qwen-Max · 心跳 2s 前 · 平均首字 1.8s</div></div>
+          <div class="ops"><button class="btn sm">测试</button></div>
+        </div>
+        <div class="agent">
+          <span class="st ok"></span>
+          <div><div class="nm">深思 · 正方四辩</div><div class="sub">DeepSeek-V3 · 心跳 1s 前 · 已预下发总结任务</div></div>
+          <div class="ops"><button class="btn sm">测试</button></div>
+        </div>
+        <div class="agent">
+          <span class="st gen"></span>
+          <div><div class="nm">穷理 · 反方三辩</div><div class="sub">Kimi-K2 · 生成中 · 已等待 2.1s</div></div>
+          <div class="ops"><button class="btn sm">中断</button></div>
+        </div>
+        <div class="agent">
+          <span class="st err"></span>
+          <div><div class="nm">启问 · 反方一辩</div><div class="sub">GLM-4-Plus · 心跳超时 12s ⚠</div></div>
+          <div class="ops"><button class="btn sm">重连</button><button class="btn sm">代输入</button></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">语音链路</div>
+        <div class="bd" style="display:flex;flex-direction:column;gap:7px;font-size:12px;color:#adbac7">
+          <div>🎙 ASR（讯飞流式听写）<span style="color:#3fb950;float:right">正常 · 延迟 0.6s</span></div>
+          <div>🔊 TTS（讯飞语音合成）<span style="color:#3fb950;float:right">空闲</span></div>
+          <div>🖥 大屏连接<span style="color:#3fb950;float:right">已连接 · seq 1842</span></div>
+          <div>💻 辩手端在线<span style="color:#3fb950;float:right">4 / 4</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">事件日志<span class="extra">seq 1842</span></div>
+        <div class="log">
+          <div class="log-item"><time>23:41</time>正方三辩 开始发言（自由辩论第 14 轮）</div>
+          <div class="log-item"><time>23:32</time>反方三辩（AI）发言结束 · 14s</div>
+          <div class="log-item warn"><time>23:30</time>反方三辩 单次发言剩余 5s 提醒</div>
+          <div class="log-item"><time>23:18</time>反方三辩（AI）TTS 开始播报</div>
+          <div class="log-item"><time>23:16</time>穷理 Agent 流式返回开始 · 首字 1.6s</div>
+          <div class="log-item err"><time>22:47</time>启问 Agent 心跳超时（12s）</div>
+          <div class="log-item"><time>22:31</time>主持人指定发言人：反方三辩</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============ 视图：投票与结果 ============ -->
+<div class="view" data-view="votes">
+  <div class="votes">
+    <div class="card">
+      <div class="hd">评委投票录入（主持人代录）</div>
+      <table>
+        <tr><th>评委</th><th>立论票</th><th>过程票</th><th>结辩票</th><th>最佳辩手</th></tr>
+        <tr>
+          <td>王老师</td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><span class="seg"><button class="aff">正</button><button class="neg on">反</button></span></td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><select><option>反方二辩 · 赵亦凡</option></select></td>
+        </tr>
+        <tr>
+          <td>李老师</td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><span class="seg"><button class="aff">正</button><button class="neg on">反</button></span></td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><select><option>正方三辩 · 林晚晴</option></select></td>
+        </tr>
+        <tr>
+          <td>张老师</td>
+          <td><span class="seg"><button class="aff">正</button><button class="neg on">反</button></span></td>
+          <td><span class="seg"><button class="aff">正</button><button class="neg">反</button></span></td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><select><option>反方二辩 · 赵亦凡</option></select></td>
+        </tr>
+        <tr>
+          <td>AI 评委</td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><span class="seg"><button class="aff on">正</button><button class="neg">反</button></span></td>
+          <td><span class="seg"><button class="aff">正</button><button class="neg on">反</button></span></td>
+          <td><select><option>正方二辩 · 玄思（AI）</option></select></td>
+        </tr>
+      </table>
+      <div class="bd" style="display:flex;gap:8px">
+        <button class="btn">保存草稿</button>
+        <button class="btn primary">公布评委结果 → 大屏</button>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <div class="hd">学生扫码投票</div>
+        <div class="bd" style="display:flex;flex-direction:column;gap:10px">
+          <div style="color:#adbac7">状态：<b style="color:#3fb950">投票中</b> · 已收 137 票</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn">关闭投票</button>
+            <button class="btn" disabled style="opacity:.45">公布学生结果（需先公布评委结果）</button>
+          </div>
+          <div style="color:#57606a;font-size:11.5px;line-height:1.6">学生投票结果在评委结果公布后才允许公布，避免干扰评委判断。二维码展示在大屏“中场”场景。</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd">结果</div>
+        <div class="bd" style="display:flex;flex-direction:column;gap:8px;color:#adbac7">
+          <div>优胜方：<b style="color:#58a6ff">正方 · 智码战队</b>（评委 2:1 + AI 评委参考）</div>
+          <div>最佳辩手：<b style="color:#d29922">反方二辩 · 赵亦凡</b>（2 票）</div>
+          <button class="btn primary" style="align-self:flex-start">切大屏到「结果揭晓」场景</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 视图：比赛设置 ============ -->
+<div class="view" data-view="settings">
+  <div class="settings">
+    <div class="col">
+      <div class="card">
+        <div class="hd">基础信息</div>
+        <div class="bd">
+          <div class="form-row"><label>比赛名称</label><input type="text" value="中科院计算所第一届人机辩论赛"></div>
+          <div class="form-row"><label>辩题</label><input type="text" value="AI 时代，我们更应该培养编程思维 / 提问思维"></div>
+          <div class="form-row"><label>正方立场</label><input type="text" value="更应该培养编程思维"></div>
+          <div class="form-row"><label>反方立场</label><input type="text" value="更应该培养提问思维"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">队伍与辩手</div>
+        <table>
+          <tr><th>持方</th><th>辩位</th><th>辩手</th><th>类型</th><th>模型 / Agent URL</th><th></th></tr>
+          <tr><td style="color:#58a6ff">正方</td><td>一辩</td><td>陈思远</td><td>人类</td><td style="color:#57606a">—</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#58a6ff">正方</td><td>二辩</td><td>玄思</td><td>AI · 闭源</td><td>http://10.0.0.21:8100</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#58a6ff">正方</td><td>三辩</td><td>林晚晴</td><td>人类</td><td style="color:#57606a">—</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#58a6ff">正方</td><td>四辩</td><td>深思</td><td>AI · 开源</td><td>http://10.0.0.22:8100</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#f78166">反方</td><td>一辩</td><td>启问</td><td>AI · 闭源</td><td>http://10.0.0.23:8100</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#f78166">反方</td><td>二辩</td><td>赵亦凡</td><td>人类</td><td style="color:#57606a">—</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#f78166">反方</td><td>三辩</td><td>穷理</td><td>AI · 开源</td><td>http://10.0.0.24:8100</td><td><button class="btn sm">编辑</button></td></tr>
+          <tr><td style="color:#f78166">反方</td><td>四辩</td><td>苏明哲</td><td>人类</td><td style="color:#57606a">—</td><td><button class="btn sm">编辑</button></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <div class="hd">赛制与自由辩论</div>
+        <div class="bd">
+          <div class="form-row"><label>流程模板</label><select><option>传统华语赛制变体（10 环节）</option></select></div>
+          <div class="form-row"><label>环节切换</label><select><option>主持人确认后切换</option><option>自动切换</option></select></div>
+          <div class="form-row"><label>双方总时间</label><input type="text" value="4:00"></div>
+          <div class="form-row"><label>单次上限</label><input type="text" value="15 秒"></div>
+          <div class="form-row"><label>先手方</label><select><option>正方</option><option>反方</option></select></div>
+          <div class="form-row"><label>发言调度</label><select><option>队内控制（人类按麦 / 点 AI 队友）</option><option>主持人点名</option><option>AI 自动接管</option></select></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">AI 时序策略</div>
+        <div class="bd">
+          <div class="form-row"><label>计时起点</label><select><option>TTS 播出第一个字</option><option>任务下发时</option></select></div>
+          <div class="form-row"><label>准备超时</label><input type="text" value="常规 10s · 自由辩论 5s"></div>
+          <div class="form-row"><label>超长处理</label><select><option>响铃后允许念完当前句</option><option>到点硬停</option><option>仅提醒</option></select></div>
+          <div class="form-row"><label>提前下发</label><span class="switch"></span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">语音与大屏</div>
+        <div class="bd">
+          <div class="form-row"><label>ASR 服务</label><select><option>讯飞 · 流式听写</option></select></div>
+          <div class="form-row"><label>TTS 服务</label><select><option>讯飞 · 语音合成</option></select></div>
+          <div class="form-row"><label>TTS 发音人</label><select><option>聆小琪（女声）</option><option>聆飞皓（男声）</option></select></div>
+          <div class="form-row"><label>背景图</label><button class="btn sm">上传 / 生成</button></div>
+          <div class="form-row"><label>主色</label><input type="text" value="#38BDF8"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll(".tabs button").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b === btn));
+      document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.dataset.view === btn.dataset.view));
+    };
+  });
+</script>
+</body>
+</html>

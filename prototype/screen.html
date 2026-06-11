@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大屏展示页 · 原型 v2</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #02030a; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: #eef2fa;
+    display: grid; place-items: center;
+  }
+  .serif { font-family: "Songti SC", "STSong", "Noto Serif SC", "SimSun", serif; }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+  /* ===== 舞台：16:9，container query 精确缩放 ===== */
+  .stage {
+    position: relative;
+    width: min(100vw, 177.78vh);
+    height: min(56.25vw, 100vh);
+    container-type: size;
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse 55% 42% at 50% -10%, rgba(56, 98, 214, .26), transparent 62%),
+      radial-gradient(ellipse 36% 30% at 8% 108%, rgba(46, 144, 250, .13), transparent 65%),
+      radial-gradient(ellipse 36% 30% at 92% 108%, rgba(244, 99, 80, .13), transparent 65%),
+      linear-gradient(180deg, #081020 0%, #050a16 55%, #030610 100%);
+  }
+  /* 细点阵肌理 */
+  .stage::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,.05) 1px, transparent 1.4px);
+    background-size: 2.2cqw 2.2cqw;
+    background-position: center;
+    mask-image: radial-gradient(ellipse 75% 70% at 50% 40%, #000 30%, transparent 100%);
+  }
+  /* 暗角 */
+  .stage::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    box-shadow: inset 0 0 14cqw rgba(0,0,0,.55);
+  }
+  /* 背景线路装饰（SVG） */
+  .bg-deco { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: .5; }
+
+  /* 礼仪金边框 */
+  .frame {
+    position: absolute; inset: 1.6cqw 1.6cqw; pointer-events: none; z-index: 2;
+    border: 1px solid rgba(214, 181, 122, .22);
+  }
+  .frame i {
+    position: absolute; width: 2.6cqw; height: 2.6cqw;
+    border: 2px solid rgba(222, 192, 136, .65);
+  }
+  .frame i:nth-child(1) { top: -2px; left: -2px; border-right: none; border-bottom: none; }
+  .frame i:nth-child(2) { top: -2px; right: -2px; border-left: none; border-bottom: none; }
+  .frame i:nth-child(3) { bottom: -2px; left: -2px; border-right: none; border-top: none; }
+  .frame i:nth-child(4) { bottom: -2px; right: -2px; border-left: none; border-top: none; }
+
+  .scene { position: absolute; inset: 0; z-index: 3; display: none; flex-direction: column; }
+  .scene.on { display: flex; }
+
+  /* ===== 顶栏：主办机构 ===== */
+  .topbar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 2.6cqw 3.4cqw 0;
+  }
+  .org { display: flex; align-items: center; gap: 1cqw; }
+  .org .emblem { width: 3.4cqw; height: 3.4cqw; flex: 0 0 auto; }
+  .org .names .cn { font-size: 1.25cqw; font-weight: 600; letter-spacing: .14em; color: #e9ddc2; }
+  .org .names .en { font-size: .62cqw; color: #8d99b3; letter-spacing: .1em; margin-top: .3cqw; }
+  .status-area { display: flex; align-items: center; gap: 1cqw; }
+  .pill {
+    font-size: .95cqw; padding: .45cqw 1.2cqw; border-radius: 99px; letter-spacing: .08em;
+    border: 1px solid rgba(255,255,255,.16); color: #c0cadc; background: rgba(255,255,255,.03);
+  }
+  .pill.gold { color: #e8d6ab; border-color: rgba(214,181,122,.4); background: rgba(214,181,122,.07); }
+  .pill.live { color: #5ee79a; border-color: rgba(94,231,154,.4); background: rgba(94,231,154,.07); }
+  .pill.live::before { content: "●"; font-size: .8em; margin-right: .5cqw; animation: blink 1.8s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  /* ===== 赛事题区 ===== */
+  .masthead { text-align: center; flex: 0 0 auto; margin-top: 1cqw; }
+  .masthead .event {
+    font-size: 1.15cqw; letter-spacing: .52em; text-indent: .52em; color: #d6b57a; font-weight: 600;
+  }
+  .masthead .topic-line {
+    display: flex; align-items: center; justify-content: center; gap: 1.6cqw; margin-top: .8cqw;
+  }
+  .masthead .rule {
+    width: 11cqw; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(214,181,122,.55));
+  }
+  .masthead .rule.r { transform: scaleX(-1); }
+  .masthead h1 {
+    font-size: 2.3cqw; font-weight: 700; letter-spacing: .06em; color: #f4f7fd;
+    text-shadow: 0 0 2.5cqw rgba(86, 134, 255, .35);
+  }
+  .masthead h1 .vs-mark { color: #d6b57a; font-size: .8em; margin: 0 .4cqw; }
+
+  /* ===== 主体三栏 ===== */
+  .main {
+    flex: 1 1 auto; min-height: 0;
+    display: grid; grid-template-columns: 18cqw 1fr 18cqw;
+    gap: 1.4cqw; padding: 1.2cqw 3.4cqw .9cqw;
+  }
+  .team {
+    border-radius: 1cqw; padding: 1.1cqw 1.1cqw .9cqw; position: relative;
+    background: linear-gradient(180deg, rgba(20,30,54,.72), rgba(12,18,34,.72));
+    border: 1px solid rgba(160,180,220,.13);
+    display: flex; flex-direction: column;
+  }
+  .team::before {
+    content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 2px; border-radius: 2px;
+  }
+  .team.aff::before { background: linear-gradient(90deg, transparent, #4da3ff, transparent); }
+  .team.neg::before { background: linear-gradient(90deg, transparent, #ff6b5e, transparent); }
+  .team .side-row { display: flex; align-items: baseline; gap: .7cqw; }
+  .team .side-name { font-size: 1.35cqw; font-weight: 800; letter-spacing: .3em; }
+  .team.aff .side-name { color: #76b7ff; }
+  .team.neg .side-name { color: #ff8a7e; }
+  .team .tname { font-size: 1cqw; color: #cdd6e6; font-weight: 600; }
+  .team .stance { font-size: .85cqw; color: #94a0b8; margin-top: .45cqw; line-height: 1.5; }
+  .roster { display: flex; flex-direction: column; gap: .55cqw; margin-top: .9cqw; }
+  .deb {
+    display: flex; align-items: center; gap: .65cqw;
+    padding: .55cqw .65cqw; border-radius: .65cqw;
+    border: 1px solid transparent; position: relative;
+  }
+  .deb .avatar {
+    width: 2.15cqw; height: 2.15cqw; border-radius: 50%; flex: 0 0 auto;
+    display: grid; place-items: center; font-size: .95cqw; font-weight: 700;
+    background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.12);
+  }
+  .deb .nm { font-size: 1cqw; font-weight: 600; white-space: nowrap; }
+  .deb .sub { font-size: .72cqw; color: #8d99b3; margin-top: .12cqw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip {
+    margin-left: auto; flex: 0 0 auto;
+    font-size: .66cqw; font-weight: 700; padding: .18cqw .5cqw; border-radius: .35cqw; letter-spacing: .06em;
+  }
+  .chip.ai { color: #cdb6ff; background: rgba(150,110,255,.16); border: 1px solid rgba(150,110,255,.25); }
+  .chip.hu { color: #8fe6b0; background: rgba(80,200,130,.13); border: 1px solid rgba(80,200,130,.22); }
+  .deb.speaking { background: rgba(77,163,255,.12); border-color: rgba(77,163,255,.5); }
+  .team.neg .deb.speaking { background: rgba(255,107,94,.12); border-color: rgba(255,107,94,.5); }
+  .deb.speaking::after {
+    content: "发言中"; font-size: .62cqw; font-weight: 700; letter-spacing: .05em;
+    position: absolute; right: .6cqw; top: -.55cqw;
+    padding: .1cqw .45cqw; border-radius: .3cqw;
+    background: #2f7fe0; color: #fff;
+  }
+  .team.neg .deb.speaking::after { background: #e05a4e; }
+  .deb.speaking .avatar { box-shadow: 0 0 0 .18cqw rgba(77,163,255,.45); }
+  .team.neg .deb.speaking .avatar { box-shadow: 0 0 0 .18cqw rgba(255,107,94,.45); }
+
+  /* ===== 中央计时区 ===== */
+  .center { display: flex; flex-direction: column; align-items: center; min-height: 0; }
+  .phase-name {
+    font-size: 1.75cqw; font-weight: 700; letter-spacing: .5em; text-indent: .5em;
+    color: #f0e9d8; margin-top: .2cqw;
+  }
+  .phase-sub { font-size: .8cqw; color: #8d99b3; letter-spacing: .2em; margin-top: .4cqw; }
+
+  .clocks { display: flex; align-items: center; gap: 2.6cqw; margin-top: 1.2cqw; }
+  .sideclock { text-align: center; width: 11cqw; }
+  .sideclock .cap { font-size: .82cqw; color: #94a0b8; letter-spacing: .25em; text-indent: .25em; }
+  .sideclock .val { font-size: 2.7cqw; font-weight: 800; margin-top: .15cqw; }
+  .sideclock.aff .val { color: #76b7ff; text-shadow: 0 0 1.8cqw rgba(77,163,255,.4); }
+  .sideclock.neg .val { color: #ff8a7e; text-shadow: 0 0 1.8cqw rgba(255,107,94,.35); }
+  .sideclock .bar {
+    height: .32cqw; border-radius: 99px; background: rgba(255,255,255,.09);
+    margin-top: .5cqw; overflow: hidden;
+  }
+  .sideclock .bar i { display: block; height: 100%; border-radius: 99px; }
+  .sideclock.aff .bar i { width: 63%; background: linear-gradient(90deg, #2f7fe0, #76b7ff); }
+  .sideclock.neg .bar i { width: 76%; background: linear-gradient(90deg, #e05a4e, #ff8a7e); }
+
+  .turnclock { position: relative; width: 11.5cqw; height: 11.5cqw; display: grid; place-items: center; }
+  .turnclock .glow {
+    position: absolute; inset: -18%; border-radius: 50%;
+    background: radial-gradient(circle, rgba(94,231,154,.16), transparent 65%);
+  }
+  .turnclock .ring {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: conic-gradient(#5ee79a 0deg 264deg, rgba(255,255,255,.08) 264deg 360deg);
+  }
+  .turnclock .ring::before {
+    content: ""; position: absolute; inset: .55cqw; border-radius: 50%;
+    background: #0a1322;
+    box-shadow: inset 0 0 2cqw rgba(0,0,0,.6);
+  }
+  .turnclock .inner { position: relative; text-align: center; }
+  .turnclock .n { font-size: 4cqw; font-weight: 800; line-height: 1; color: #eafff2; text-shadow: 0 0 2cqw rgba(94,231,154,.5); }
+  .turnclock .c { font-size: .72cqw; color: #8d99b3; letter-spacing: .3em; text-indent: .3em; margin-top: .5cqw; }
+
+  .speakers { display: flex; gap: 3cqw; margin-top: 1.1cqw; align-items: center; }
+  .spk { font-size: .95cqw; color: #8d99b3; letter-spacing: .05em; }
+  .spk b { font-size: 1.15cqw; color: #eef2fa; margin-left: .6cqw; font-weight: 700; }
+  .spk.cur b { color: #76b7ff; }
+
+  /* ===== 字幕区 ===== */
+  .subtitle {
+    flex: 0 0 auto; margin: 0 3.4cqw 2.6cqw; min-height: 16.5cqh;
+    border-radius: 1cqw; position: relative;
+    background: linear-gradient(180deg, rgba(13,20,38,.88), rgba(8,13,26,.88));
+    border: 1px solid rgba(160,180,220,.14);
+    border-left: .28cqw solid #4da3ff;
+    padding: 1cqw 1.6cqw 1.1cqw;
+    backdrop-filter: blur(8px);
+  }
+  .sub-head { display: flex; align-items: center; gap: .9cqw; margin-bottom: .55cqw; }
+  .sub-speaker { font-size: 1.05cqw; font-weight: 700; color: #76b7ff; letter-spacing: .04em; }
+  .sub-flag {
+    font-size: .68cqw; font-weight: 700; padding: .16cqw .55cqw; border-radius: .35cqw; letter-spacing: .06em;
+    color: #8fe6b0; background: rgba(80,200,130,.13); border: 1px solid rgba(80,200,130,.22);
+  }
+  .sub-state { font-size: .78cqw; color: #768093; margin-left: auto; letter-spacing: .05em; }
+  .sub-text { font-size: 1.5cqw; line-height: 1.8; color: #e7edf8; font-weight: 500; }
+  .sub-text .partial { color: #7f8aa0; font-weight: 400; }
+  .cursor {
+    display: inline-block; width: .14cqw; height: 1.4cqw; background: #5ee79a;
+    vertical-align: -.18cqw; margin-left: .2cqw; animation: blink .9s infinite;
+  }
+
+  /* ===== 候场场景 ===== */
+  .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .hero .emblem-lg { width: 7cqw; height: 7cqw; margin-bottom: 1.6cqw; filter: drop-shadow(0 0 2.5cqw rgba(214,181,122,.35)); }
+  .hero .org-cn { font-size: 1.3cqw; color: #cbb98f; letter-spacing: .8em; text-indent: .8em; }
+  .hero .title {
+    font-size: 5.6cqw; font-weight: 800; letter-spacing: .18em; text-indent: .18em; margin-top: 1.2cqw;
+    background: linear-gradient(180deg, #fdf6e4 20%, #e6c98c 75%, #c8a25e);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 .3cqw 2cqw rgba(214,181,122,.25));
+  }
+  .hero .topic2 { font-size: 1.5cqw; color: #aeb9cd; letter-spacing: .12em; margin-top: 1.4cqw; }
+  .hero .topic2 b { color: #eef2fa; }
+  .hero .vs-row { display: flex; align-items: center; gap: 3.4cqw; margin-top: 2.6cqw; }
+  .hero .vs-team { text-align: center; }
+  .hero .vs-team .t { font-size: 2cqw; font-weight: 700; }
+  .hero .vs-team .s { font-size: .9cqw; color: #8d99b3; margin-top: .5cqw; letter-spacing: .1em; }
+  .hero .vs-x {
+    font-size: 2.6cqw; font-weight: 800; font-style: italic; color: #d6b57a;
+    text-shadow: 0 0 2cqw rgba(214,181,122,.4);
+  }
+
+  /* ===== 阵容场景 ===== */
+  .teams-grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 2cqw; padding: 1.4cqw 8cqw 3cqw; }
+  .tcol {
+    border-radius: 1.2cqw; padding: 1.7cqw; position: relative;
+    background: linear-gradient(180deg, rgba(20,30,54,.7), rgba(12,18,34,.7));
+    border: 1px solid rgba(160,180,220,.13);
+  }
+  .tcol::before { content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 2.5px; border-radius: 3px; }
+  .tcol.aff::before { background: linear-gradient(90deg, transparent, #4da3ff, transparent); }
+  .tcol.neg::before { background: linear-gradient(90deg, transparent, #ff6b5e, transparent); }
+  .tcol h3 { font-size: 1.55cqw; letter-spacing: .1em; }
+  .tcol.aff h3 { color: #76b7ff; }
+  .tcol.neg h3 { color: #ff8a7e; }
+  .tcol .stance { font-size: .95cqw; color: #94a0b8; margin: .5cqw 0 1.2cqw; }
+  .tcol .deb { padding: .85cqw .8cqw; }
+  .tcol .deb .avatar { width: 3cqw; height: 3cqw; font-size: 1.2cqw; }
+  .tcol .deb .nm { font-size: 1.25cqw; }
+  .tcol .deb .sub { font-size: .85cqw; }
+  .tcol .chip { font-size: .78cqw; }
+
+  /* ===== 结果场景 ===== */
+  .result-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .result-wrap .lbl { font-size: 1.1cqw; color: #cbb98f; letter-spacing: .9em; text-indent: .9em; }
+  .result-wrap .winner {
+    font-size: 4.6cqw; font-weight: 800; letter-spacing: .12em; margin-top: 1cqw;
+    background: linear-gradient(180deg, #fdf6e4 25%, #e6c98c 80%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 .3cqw 2.2cqw rgba(214,181,122,.3));
+  }
+  .result-wrap .best { font-size: 1.4cqw; color: #cdd6e6; margin-top: 1.2cqw; }
+  .result-wrap .best b { color: #f2d491; }
+  .ballots { display: flex; gap: 1.6cqw; margin-top: 2.4cqw; }
+  .ballot {
+    width: 15cqw; border-radius: 1cqw; padding: 1.1cqw 1.2cqw;
+    background: linear-gradient(180deg, rgba(20,30,54,.7), rgba(12,18,34,.7));
+    border: 1px solid rgba(160,180,220,.13);
+  }
+  .ballot .bt { font-size: .95cqw; color: #c0cadc; text-align: center; letter-spacing: .3em; text-indent: .3em; margin-bottom: .9cqw; }
+  .ballot .row { display: flex; align-items: center; gap: .6cqw; font-size: .85cqw; margin-top: .55cqw; }
+  .ballot .row span { width: 2.6cqw; }
+  .ballot .bar { flex: 1; height: .6cqw; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; }
+  .ballot .bar i { display: block; height: 100%; border-radius: 99px; }
+  .ballot .aff-i { background: linear-gradient(90deg, #2f7fe0, #76b7ff); }
+  .ballot .neg-i { background: linear-gradient(90deg, #e05a4e, #ff8a7e); }
+  .ballot .pending { font-size: .85cqw; color: #6b7689; text-align: center; padding: .9cqw 0 .4cqw; line-height: 1.6; }
+
+  /* ===== 原型预览切换器（评审用，非正式 UI） ===== */
+  .proto-switch {
+    position: fixed; right: 14px; bottom: 14px; z-index: 99;
+    display: flex; gap: 6px; padding: 6px;
+    background: rgba(10,16,30,.92); border: 1px solid rgba(255,255,255,.16); border-radius: 10px;
+  }
+  .proto-switch button {
+    font-size: 12px; padding: 5px 11px; border-radius: 6px; border: none; cursor: pointer;
+    background: transparent; color: #94a3b8; font-family: inherit;
+  }
+  .proto-switch button.on { background: #2563eb; color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="stage">
+
+  <!-- 背景装饰线路（纯 SVG，正式版可替换为生成的主视觉背景图） -->
+  <svg class="bg-deco" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice" fill="none">
+    <g stroke="rgba(86,134,214,.14)" stroke-width="1.5">
+      <path d="M -20 880 L 270 880 L 340 810 L 620 810" />
+      <path d="M -20 950 L 200 950 L 290 1040" />
+      <path d="M 1940 880 L 1650 880 L 1580 810 L 1300 810" />
+      <path d="M 1940 950 L 1720 950 L 1630 1040" />
+      <path d="M 80 -20 L 80 140 L 170 230" />
+      <path d="M 1840 -20 L 1840 140 L 1750 230" />
+    </g>
+    <g fill="rgba(120,165,235,.35)">
+      <circle cx="270" cy="880" r="4"/><circle cx="620" cy="810" r="4"/><circle cx="200" cy="950" r="4"/>
+      <circle cx="1650" cy="880" r="4"/><circle cx="1300" cy="810" r="4"/><circle cx="1720" cy="950" r="4"/>
+      <circle cx="170" cy="230" r="4"/><circle cx="1750" cy="230" r="4"/>
+    </g>
+  </svg>
+
+  <div class="frame"><i></i><i></i><i></i><i></i></div>
+
+  <!-- ============ 场景：候场 ============ -->
+  <section class="scene" data-scene="idle">
+    <div class="hero">
+      <!-- 占位会徽：正式版替换为计算所官方 Logo -->
+      <svg class="emblem-lg" viewBox="0 0 64 64" fill="none">
+        <circle cx="32" cy="32" r="29" stroke="#d6b57a" stroke-width="1.6"/>
+        <circle cx="32" cy="32" r="25" stroke="rgba(214,181,122,.4)" stroke-width=".8"/>
+        <rect x="22" y="22" width="20" height="20" rx="3" stroke="#e6c98c" stroke-width="1.6"/>
+        <path d="M27 32h10M32 27v10" stroke="#e6c98c" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M22 27h-7M22 37h-7M42 27h7M42 37h7M27 22v-7M37 22v-7M27 42v7M37 42v7" stroke="#d6b57a" stroke-width="1.4" stroke-linecap="round"/>
+        <circle cx="15" cy="27" r="1.6" fill="#e6c98c"/><circle cx="15" cy="37" r="1.6" fill="#e6c98c"/>
+        <circle cx="49" cy="27" r="1.6" fill="#e6c98c"/><circle cx="49" cy="37" r="1.6" fill="#e6c98c"/>
+        <circle cx="27" cy="15" r="1.6" fill="#e6c98c"/><circle cx="37" cy="15" r="1.6" fill="#e6c98c"/>
+        <circle cx="27" cy="49" r="1.6" fill="#e6c98c"/><circle cx="37" cy="49" r="1.6" fill="#e6c98c"/>
+      </svg>
+      <div class="org-cn serif">中国科学院计算技术研究所</div>
+      <div class="title serif">第一届人机辩论赛</div>
+      <div class="topic2">辩题 ·「<b>AI 时代，我们更应该培养编程思维 / 提问思维</b>」</div>
+      <div class="vs-row">
+        <div class="vs-team">
+          <div class="t" style="color:#76b7ff">智码战队</div>
+          <div class="s">正方 · 编程思维</div>
+        </div>
+        <div class="vs-x serif">对 阵</div>
+        <div class="vs-team">
+          <div class="t" style="color:#ff8a7e">问道战队</div>
+          <div class="s">反方 · 提问思维</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 场景：阵容介绍 ============ -->
+  <section class="scene" data-scene="teams">
+    <div class="topbar">
+      <div class="org">
+        <svg class="emblem" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="29" stroke="#d6b57a" stroke-width="1.8"/>
+          <rect x="22" y="22" width="20" height="20" rx="3" stroke="#e6c98c" stroke-width="1.8"/>
+          <path d="M27 32h10M32 27v10" stroke="#e6c98c" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M22 27h-7M22 37h-7M42 27h7M42 37h7M27 22v-7M37 22v-7M27 42v7M37 42v7" stroke="#d6b57a" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <div class="names">
+          <div class="cn serif">中国科学院计算技术研究所 · 第一届人机辩论赛</div>
+          <div class="en">INSTITUTE OF COMPUTING TECHNOLOGY, CHINESE ACADEMY OF SCIENCES</div>
+        </div>
+      </div>
+      <div class="status-area"><span class="pill gold">双方阵容</span></div>
+    </div>
+    <div class="masthead">
+      <div class="topic-line">
+        <div class="rule"></div>
+        <h1 class="serif">AI 时代，我们更应该培养<span style="color:#76b7ff">编程思维</span><span class="vs-mark">/</span><span style="color:#ff8a7e">提问思维</span></h1>
+        <div class="rule r"></div>
+      </div>
+    </div>
+    <div class="teams-grid">
+      <div class="tcol aff">
+        <h3>正方 · 智码战队</h3>
+        <div class="stance">持方立场：AI 时代，我们更应该培养编程思维</div>
+        <div class="roster">
+          <div class="deb"><div class="avatar">陈</div><div><div class="nm">陈思远</div><div class="sub">一辩 · 立论</div></div><span class="chip hu">人 类</span></div>
+          <div class="deb"><div class="avatar">玄</div><div><div class="nm">玄思</div><div class="sub">二辩 · 陈词 · Qwen-Max</div></div><span class="chip ai">AI · 闭源</span></div>
+          <div class="deb"><div class="avatar">林</div><div><div class="nm">林晚晴</div><div class="sub">三辩 · 陈词</div></div><span class="chip hu">人 类</span></div>
+          <div class="deb"><div class="avatar">深</div><div><div class="nm">深思</div><div class="sub">四辩 · 总结 · DeepSeek-V3</div></div><span class="chip ai">AI · 开源</span></div>
+        </div>
+      </div>
+      <div class="tcol neg">
+        <h3>反方 · 问道战队</h3>
+        <div class="stance">持方立场：AI 时代，我们更应该培养提问思维</div>
+        <div class="roster">
+          <div class="deb"><div class="avatar">启</div><div><div class="nm">启问</div><div class="sub">一辩 · 立论 · GLM-4-Plus</div></div><span class="chip ai">AI · 闭源</span></div>
+          <div class="deb"><div class="avatar">赵</div><div><div class="nm">赵亦凡</div><div class="sub">二辩 · 陈词</div></div><span class="chip hu">人 类</span></div>
+          <div class="deb"><div class="avatar">穷</div><div><div class="nm">穷理</div><div class="sub">三辩 · 陈词 · Kimi-K2</div></div><span class="chip ai">AI · 开源</span></div>
+          <div class="deb"><div class="avatar">苏</div><div><div class="nm">苏明哲</div><div class="sub">四辩 · 总结</div></div><span class="chip hu">人 类</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 场景：比赛实况（自由辩论） ============ -->
+  <section class="scene on" data-scene="live">
+    <div class="topbar">
+      <div class="org">
+        <svg class="emblem" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="29" stroke="#d6b57a" stroke-width="1.8"/>
+          <rect x="22" y="22" width="20" height="20" rx="3" stroke="#e6c98c" stroke-width="1.8"/>
+          <path d="M27 32h10M32 27v10" stroke="#e6c98c" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M22 27h-7M22 37h-7M42 27h7M42 37h7M27 22v-7M37 22v-7M27 42v7M37 42v7" stroke="#d6b57a" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <div class="names">
+          <div class="cn serif">中国科学院计算技术研究所 · 第一届人机辩论赛</div>
+          <div class="en">INSTITUTE OF COMPUTING TECHNOLOGY, CHINESE ACADEMY OF SCIENCES</div>
+        </div>
+      </div>
+      <div class="status-area">
+        <span class="pill">环节 7 / 10</span>
+        <span class="pill live">比赛进行中</span>
+      </div>
+    </div>
+
+    <div class="masthead">
+      <div class="topic-line">
+        <div class="rule"></div>
+        <h1 class="serif">AI 时代，我们更应该培养<span style="color:#76b7ff">编程思维</span><span class="vs-mark">/</span><span style="color:#ff8a7e">提问思维</span></h1>
+        <div class="rule r"></div>
+      </div>
+    </div>
+
+    <div class="main">
+      <!-- 正方 -->
+      <div class="team aff">
+        <div class="side-row"><span class="side-name">正方</span><span class="tname">智码战队</span></div>
+        <div class="stance">更应该培养编程思维</div>
+        <div class="roster">
+          <div class="deb"><div class="avatar">陈</div><div><div class="nm">陈思远</div><div class="sub">一辩</div></div><span class="chip hu">人类</span></div>
+          <div class="deb"><div class="avatar">玄</div><div><div class="nm">玄思</div><div class="sub">二辩 · Qwen-Max</div></div><span class="chip ai">AI</span></div>
+          <div class="deb speaking"><div class="avatar">林</div><div><div class="nm">林晚晴</div><div class="sub">三辩</div></div><span class="chip hu">人类</span></div>
+          <div class="deb"><div class="avatar">深</div><div><div class="nm">深思</div><div class="sub">四辩 · DeepSeek-V3</div></div><span class="chip ai">AI</span></div>
+        </div>
+      </div>
+
+      <!-- 中央 -->
+      <div class="center">
+        <div class="phase-name serif">自由辩论</div>
+        <div class="phase-sub">双方各 4 分钟 · 单次发言不超过 15 秒</div>
+        <div class="clocks">
+          <div class="sideclock aff">
+            <div class="cap">正方剩余</div>
+            <div class="val num">02:31</div>
+            <div class="bar"><i></i></div>
+          </div>
+          <div class="turnclock">
+            <div class="glow"></div>
+            <div class="ring"></div>
+            <div class="inner">
+              <div class="n num">11</div>
+              <div class="c">单次发言 · 秒</div>
+            </div>
+          </div>
+          <div class="sideclock neg">
+            <div class="cap">反方剩余</div>
+            <div class="val num">03:05</div>
+            <div class="bar"><i></i></div>
+          </div>
+        </div>
+        <div class="speakers">
+          <div class="spk cur">当前发言<b>正方三辩 · 林晚晴</b></div>
+          <div class="spk">下一轮<b>反方发言</b></div>
+        </div>
+      </div>
+
+      <!-- 反方 -->
+      <div class="team neg">
+        <div class="side-row"><span class="side-name">反方</span><span class="tname">问道战队</span></div>
+        <div class="stance">更应该培养提问思维</div>
+        <div class="roster">
+          <div class="deb"><div class="avatar">启</div><div><div class="nm">启问</div><div class="sub">一辩 · GLM-4-Plus</div></div><span class="chip ai">AI</span></div>
+          <div class="deb"><div class="avatar">赵</div><div><div class="nm">赵亦凡</div><div class="sub">二辩</div></div><span class="chip hu">人类</span></div>
+          <div class="deb"><div class="avatar">穷</div><div><div class="nm">穷理</div><div class="sub">三辩 · Kimi-K2</div></div><span class="chip ai">AI</span></div>
+          <div class="deb"><div class="avatar">苏</div><div><div class="nm">苏明哲</div><div class="sub">四辩</div></div><span class="chip hu">人类</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 字幕 -->
+    <div class="subtitle">
+      <div class="sub-head">
+        <span class="sub-speaker">正方三辩 · 林晚晴</span>
+        <span class="sub-flag">实时转写</span>
+        <span class="sub-state">ASR 识别中 · 本次发言剩余 11 秒</span>
+      </div>
+      <div class="sub-text">
+        对方辩友刚才说提问思维是起点，但请注意，没有编程思维的结构化拆解，问题只能停留在表面。
+        <span class="partial">真正能驱动 AI 解决复杂问题的，恰恰是把大问题拆成可执行步骤的能力</span><span class="cursor"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 场景：结果揭晓 ============ -->
+  <section class="scene" data-scene="result">
+    <div class="topbar">
+      <div class="org">
+        <svg class="emblem" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="29" stroke="#d6b57a" stroke-width="1.8"/>
+          <rect x="22" y="22" width="20" height="20" rx="3" stroke="#e6c98c" stroke-width="1.8"/>
+          <path d="M27 32h10M32 27v10" stroke="#e6c98c" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M22 27h-7M22 37h-7M42 27h7M42 37h7M27 22v-7M37 22v-7M27 42v7M37 42v7" stroke="#d6b57a" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <div class="names">
+          <div class="cn serif">中国科学院计算技术研究所 · 第一届人机辩论赛</div>
+          <div class="en">INSTITUTE OF COMPUTING TECHNOLOGY, CHINESE ACADEMY OF SCIENCES</div>
+        </div>
+      </div>
+      <div class="status-area"><span class="pill gold">比赛结果</span></div>
+    </div>
+    <div class="result-wrap">
+      <div class="lbl">优 胜 方</div>
+      <div class="winner serif">正方 · 智码战队</div>
+      <div class="best">最佳辩手 · <b>反方二辩 赵亦凡</b></div>
+      <div class="ballots">
+        <div class="ballot">
+          <div class="bt">立论票</div>
+          <div class="row"><span style="color:#76b7ff">正 2</span><div class="bar"><i class="aff-i" style="width:67%"></i></div></div>
+          <div class="row"><span style="color:#ff8a7e">反 1</span><div class="bar"><i class="neg-i" style="width:33%"></i></div></div>
+        </div>
+        <div class="ballot">
+          <div class="bt">过程票</div>
+          <div class="row"><span style="color:#76b7ff">正 1</span><div class="bar"><i class="aff-i" style="width:33%"></i></div></div>
+          <div class="row"><span style="color:#ff8a7e">反 2</span><div class="bar"><i class="neg-i" style="width:67%"></i></div></div>
+        </div>
+        <div class="ballot">
+          <div class="bt">结辩票</div>
+          <div class="row"><span style="color:#76b7ff">正 3</span><div class="bar"><i class="aff-i" style="width:100%"></i></div></div>
+          <div class="row"><span style="color:#ff8a7e">反 0</span><div class="bar"><i class="neg-i" style="width:2%"></i></div></div>
+        </div>
+        <div class="ballot">
+          <div class="bt">同学投票</div>
+          <div class="pending">评委结果公布后展示</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- 原型预览切换器：仅供评审，正式版由管理端控制场景 -->
+<div class="proto-switch">
+  <button data-go="idle">候场</button>
+  <button data-go="teams">阵容</button>
+  <button data-go="live" class="on">实况</button>
+  <button data-go="result">结果</button>
+</div>
+
+<script>
+  document.querySelectorAll(".proto-switch button").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".scene").forEach(s => s.classList.toggle("on", s.dataset.scene === btn.dataset.go));
+      document.querySelectorAll(".proto-switch button").forEach(b => b.classList.toggle("on", b === btn));
+    };
+  });
+</script>
+</body>
+</html>

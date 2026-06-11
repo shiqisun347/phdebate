@@ -1,0 +1,562 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.auth import (
+    Principal,
+    authorize_speaker_or_host,
+    authorize_websocket,
+    require_admin,
+    require_host,
+    require_read_access,
+    require_speaker_or_host,
+)
+from app.services.match_store import MatchStateError, store
+from app.services.preflight_report import build_preflight_report
+from app.services.speech_diagnostics import build_speech_diagnostics
+
+
+app = FastAPI(title="Phdebate API", version="0.1.0")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+FRONTEND_DIST = PROJECT_ROOT / "apps" / "frontend" / "dist"
+FRONTEND_INDEX = FRONTEND_DIST / "index.html"
+FRONTEND_ASSETS = FRONTEND_DIST / "assets"
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.exception_handler(MatchStateError)
+async def match_state_error_handler(_request, exc: MatchStateError) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "ok": False,
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail
+    if isinstance(detail, dict) and "code" in detail:
+        error = {
+            "code": detail.get("code", "http_error"),
+            "message": detail.get("message", str(exc.detail)),
+            "details": detail.get("details", {}),
+        }
+    else:
+        error = {
+            "code": "not_found" if exc.status_code == 404 else "http_error",
+            "message": str(detail),
+            "details": {},
+        }
+    return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": error})
+
+
+@app.get("/api/health")
+async def health() -> Dict[str, Any]:
+    return {"ok": True, "service": "phdebate-api", "version": "0.1.0"}
+
+
+@app.post("/api/demo/reset")
+async def reset_demo(_principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    store.reset_demo()
+    await store.emit("match.updated", {"reason": "demo_reset"})
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches")
+async def create_match(body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    store.reset_demo()
+    await store.update_match(body)
+    snapshot = await store.get_snapshot()
+    await store.emit("match.created", {"match_id": snapshot["match"]["id"]}, "admin")
+    return {"ok": True, "data": {"match_id": snapshot["match"]["id"], "status": snapshot["match"]["status"]}}
+
+
+@app.get("/api/matches/{match_id}")
+async def get_match(match_id: str, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    snapshot = await store.get_snapshot()
+    if snapshot["match"]["id"] != match_id:
+        raise HTTPException(status_code=404, detail="match not found")
+    return {"ok": True, "data": snapshot}
+
+
+@app.get("/api/public/matches/{match_id}/vote-options")
+async def get_public_vote_options(match_id: str) -> Dict[str, Any]:
+    snapshot = await store.get_snapshot()
+    if snapshot["match"]["id"] != match_id:
+        raise HTTPException(status_code=404, detail="match not found")
+    return {
+        "ok": True,
+        "data": {
+            "match": {
+                "id": snapshot["match"]["id"],
+                "title": snapshot["match"]["title"],
+                "topic": snapshot["match"]["topic"],
+            },
+            "teams": [
+                {
+                    "id": team["id"],
+                    "side": team["side"],
+                    "name": team["name"],
+                    "position": team["position"],
+                }
+                for team in snapshot["teams"]
+                if team["side"] in {"affirmative", "negative"}
+            ],
+            "speakers": [
+                {
+                    "id": speaker["id"],
+                    "side": speaker["side"],
+                    "seat": speaker["seat"],
+                    "name": speaker["name"],
+                    "speaker_type": speaker["speaker_type"],
+                }
+                for speaker in snapshot["speakers"]
+                if speaker["side"] in {"affirmative", "negative"}
+            ],
+            "vote_state": {
+                "window_status": snapshot["vote_state"]["window_status"],
+                "audience_count": snapshot["vote_state"]["audience_count"],
+                "judge_published": snapshot["vote_state"]["judge_published"],
+                "audience_published": snapshot["vote_state"]["audience_published"],
+            },
+        },
+    }
+
+
+@app.get("/api/matches/{match_id}/audit-logs")
+async def get_audit_logs(match_id: str, limit: int = 30, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": {"items": await store.get_audit_logs(limit)}}
+
+
+@app.get("/api/matches/{match_id}/preflight-report")
+async def get_preflight_report(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    snapshot = await store.get_snapshot()
+    diagnostics = build_speech_diagnostics(store.audio_root_path())
+    return {"ok": True, "data": build_preflight_report(snapshot, diagnostics)}
+
+
+@app.post("/api/matches/{match_id}/exports")
+async def create_export(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.create_export_bundle()}
+
+
+@app.get("/api/matches/{match_id}/exports/{export_id}/download")
+async def download_export(match_id: str, export_id: str, _principal: Principal = Depends(require_host)) -> FileResponse:
+    await _ensure_match(match_id)
+    path = await store.export_file_path(export_id)
+    return FileResponse(path, media_type="application/zip", filename=path.name)
+
+
+@app.patch("/api/matches/{match_id}")
+async def update_match(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.update_match(body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.patch("/api/matches/{match_id}/teams/{team_id}")
+async def update_team(match_id: str, team_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.update_team(team_id, body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.patch("/api/matches/{match_id}/speakers/{speaker_id}")
+async def update_speaker(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.update_speaker(speaker_id, body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.patch("/api/matches/{match_id}/phases/{phase_id}")
+async def update_phase(match_id: str, phase_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.update_phase(phase_id, body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/start")
+async def start_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_match_status("running")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/pause")
+async def pause_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_match_status("paused")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/resume")
+async def resume_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_match_status("running")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/finish")
+async def finish_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_match_status("finished")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/emergency-stop")
+async def emergency_stop(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_match_status("intervention")
+    await store.emit("match.emergency_stopped", {"reason": (body or {}).get("reason", "manual")}, "host")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/screen/scene")
+async def set_screen_scene(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_screen_scene(body.get("scene", "live"), body.get("live_mode"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/phases/{phase_id}/start")
+async def start_phase(match_id: str, phase_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.start_phase(phase_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/phases/{phase_id}/skip")
+async def skip_phase(match_id: str, phase_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.skip_phase(phase_id, (body or {}).get("reason", "manual_skip"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/phases/{phase_id}/rollback")
+async def rollback_phase(match_id: str, phase_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.rollback_phase(phase_id, (body or {}).get("reason", "manual_rollback"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/clocks/{clock_name}/pause")
+async def pause_clock(match_id: str, clock_name: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.pause_clock(clock_name, (body or {}).get("reason", "manual"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/clocks/{clock_name}/resume")
+async def resume_clock(match_id: str, clock_name: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.resume_clock(clock_name, (body or {}).get("reason", "manual"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/clocks/{clock_name}/adjust")
+async def adjust_clock(match_id: str, clock_name: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.adjust_clock(clock_name, int(body.get("remaining_ms", 0)), body.get("reason", "manual"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/activate")
+async def activate_speaker(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.activate_speaker(speaker_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/start-speaking")
+async def start_speaking(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.start_speaking(speaker_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/stop-speaking")
+async def stop_speaking(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.stop_speaking(speaker_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/asr/partial")
+async def asr_partial(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.record_asr_partial(speaker_id, body.get("text", ""), body.get("latency_ms"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/asr/final")
+async def asr_final(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.record_asr_final(speaker_id, body.get("text", ""), body.get("latency_ms"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/asr/fail")
+async def asr_fail(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.record_asr_failed(speaker_id, (body or {}).get("reason", "asr_failed"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/tts/fail")
+async def tts_fail(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.record_tts_failed(
+        speaker_id,
+        (body or {}).get("reason", "tts_failed"),
+        (body or {}).get("text_only", True),
+    )
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.get("/api/matches/{match_id}/speech/diagnostics")
+async def speech_diagnostics(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": build_speech_diagnostics(store.audio_root_path())}
+
+
+@app.post("/api/matches/{match_id}/speech/tts/probe")
+async def probe_tts(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.probe_tts((body or {}).get("text", ""))}
+
+
+@app.post("/api/matches/{match_id}/speech/asr/probe")
+async def probe_asr(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    audio_base64 = str(payload.get("audio_base64") or "")
+    audio = base64.b64decode(audio_base64) if audio_base64 else b""
+    return {
+        "ok": True,
+        "data": await store.probe_asr(
+            audio,
+            str(payload.get("format") or "audio/L16;rate=16000"),
+            str(payload.get("encoding") or "raw"),
+        ),
+    }
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/asr/recognize")
+async def recognize_speech_audio(match_id: str, speech_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.recognize_audio_archive(speech_id)}
+
+
+@app.patch("/api/matches/{match_id}/speeches/{speech_id}")
+async def patch_speech(match_id: str, speech_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.patch_speech(speech_id, body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/audio-chunks")
+async def upload_speech_audio_chunk(
+    match_id: str,
+    speech_id: str,
+    request: Request,
+    speaker_id: str = Form(...),
+    chunk_index: int = Form(...),
+    duration_ms: Optional[int] = Form(None),
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    authorize_speaker_or_host(request, speaker_id)
+    content = await file.read()
+    await store.record_audio_chunk(
+        speech_id=speech_id,
+        speaker_id=speaker_id,
+        chunk_index=chunk_index,
+        content=content,
+        mime_type=file.content_type or "application/octet-stream",
+        duration_ms=duration_ms,
+    )
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/audio/complete")
+async def complete_speech_audio(match_id: str, speech_id: str, request: Request, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    speaker_id = payload.get("speaker_id")
+    if speaker_id:
+        authorize_speaker_or_host(request, speaker_id)
+    else:
+        require_host(request)
+    await store.complete_audio_archive(speech_id, speaker_id)
+    if payload.get("auto_recognize") is True:
+        result = await store.recognize_audio_archive(speech_id)
+        return {"ok": True, "data": result["snapshot"]}
+    if await store.should_auto_recognize_audio_archive(speech_id):
+        asyncio.create_task(store.auto_recognize_audio_archive(speech_id))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/request-ai-teammate")
+async def request_ai_teammate(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    agent_id = body.get("agent_speaker_id") or speaker_id
+    await store.activate_speaker(agent_id)
+    asyncio.create_task(store.run_agent_speech(agent_id))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/agent/{speaker_id}/retry")
+async def retry_agent(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    store.ensure_agent_speaker_for_current_phase(speaker_id)
+    asyncio.create_task(store.run_agent_speech(speaker_id))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/agent/{speaker_id}/health")
+async def check_agent_health(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    result = await store.check_agent_health(speaker_id)
+    return {"ok": True, "data": {"result": result, "snapshot": await store.get_snapshot()}}
+
+
+@app.post("/api/matches/{match_id}/agents/health")
+async def check_all_agent_health(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    results = await store.check_all_agent_health()
+    return {"ok": True, "data": {"results": results, "snapshot": await store.get_snapshot()}}
+
+
+@app.post("/api/matches/{match_id}/agent/{speaker_id}/interrupt")
+async def interrupt_agent(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.emit("agent.interrupted", {"speaker_id": speaker_id, "reason": (body or {}).get("reason", "manual")}, "host")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/agent/{speaker_id}/manual-input")
+async def manual_agent_input(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.record_manual_agent_input(
+        speaker_id,
+        body.get("content", ""),
+        body.get("reason", "manual_input"),
+    )
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/votes")
+async def submit_judge_votes(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.submit_vote(body, audience=False)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/audience-votes/open")
+async def open_audience_votes(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.open_audience_votes()
+    return {"ok": True, "data": {"vote_url": f"/vote/{match_id}", "window_status": "open"}}
+
+
+@app.post("/api/matches/{match_id}/audience-votes/close")
+async def close_audience_votes(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.close_audience_votes()
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/votes/publish")
+async def publish_votes(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.publish_votes(body.get("scope", "judge"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/public/matches/{match_id}/audience-votes")
+async def submit_audience_vote(match_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.submit_vote(body, audience=True)
+    return {"ok": True, "data": {"received": True}}
+
+
+@app.websocket("/ws/matches/{match_id}")
+async def match_ws(
+    websocket: WebSocket,
+    match_id: str,
+    last_seq: int = 0,
+    channel: str = "screen",
+    speaker_id: Optional[str] = None,
+) -> None:
+    if authorize_websocket(websocket, channel, speaker_id) is None:
+        await websocket.close(code=1008)
+        return
+    await store.websocket(websocket, last_seq=last_seq, channel=channel, speaker_id=speaker_id)
+
+
+async def _ensure_match(match_id: str) -> None:
+    snapshot = await store.get_snapshot()
+    if snapshot["match"]["id"] != match_id:
+        raise HTTPException(status_code=404, detail="match not found")
+
+
+def _frontend_index() -> FileResponse:
+    if not FRONTEND_INDEX.exists():
+        raise HTTPException(status_code=404, detail="frontend dist not built")
+    return FileResponse(FRONTEND_INDEX)
+
+
+if FRONTEND_ASSETS.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS), name="frontend-assets")
+
+
+@app.get("/", include_in_schema=False)
+async def frontend_root() -> FileResponse:
+    return _frontend_index()
+
+
+@app.get("/screen", include_in_schema=False)
+async def frontend_screen() -> FileResponse:
+    return _frontend_index()
+
+
+@app.get("/admin", include_in_schema=False)
+async def frontend_admin() -> FileResponse:
+    return _frontend_index()
+
+
+@app.get("/console", include_in_schema=False)
+@app.get("/console/{speaker_id}", include_in_schema=False)
+async def frontend_console(speaker_id: Optional[str] = None) -> FileResponse:
+    return _frontend_index()
+
+
+@app.get("/vote", include_in_schema=False)
+@app.get("/vote/{match_id}", include_in_schema=False)
+async def frontend_vote(match_id: Optional[str] = None) -> FileResponse:
+    return _frontend_index()

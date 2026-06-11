@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>辩手控制台 · 原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0a0e1a;
+    color: #e8edf6;
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .console {
+    width: 100%; max-width: 430px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+
+  /* 身份卡 */
+  .id-card {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 16px; border-radius: 16px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
+  }
+  .id-card .avatar {
+    width: 46px; height: 46px; border-radius: 50%;
+    background: linear-gradient(135deg,#0ea5e9,#6366f1);
+    display: grid; place-items: center; font-size: 19px; font-weight: 700;
+  }
+  .id-card .nm { font-size: 17px; font-weight: 700; }
+  .id-card .sub { font-size: 12.5px; color: #8b97ad; margin-top: 2px; }
+  .id-card .side {
+    margin-left: auto; font-size: 12px; font-weight: 700; letter-spacing: .1em;
+    color: #7dd3fc; background: rgba(56,189,248,.12);
+    padding: 5px 10px; border-radius: 8px;
+  }
+
+  /* 环节状态条 */
+  .phase-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px; border-radius: 14px; font-size: 13.5px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
+    color: #aeb9cd;
+  }
+  .phase-bar b { color: #e8edf6; }
+  .phase-bar .conn { margin-left: auto; font-size: 11.5px; color: #4ade80; }
+  .phase-bar .conn::before { content: "●"; margin-right: 4px; }
+
+  /* 状态横幅 */
+  .banner {
+    border-radius: 14px; padding: 13px 16px;
+    font-size: 14.5px; font-weight: 600; text-align: center;
+    letter-spacing: .04em;
+  }
+  .banner.waiting { background: rgba(148,163,184,.10); color: #94a3b8; }
+  .banner.ready   { background: rgba(74,222,128,.12); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+  .banner.speaking{ background: rgba(56,189,248,.12); color: #38bdf8; border: 1px solid rgba(56,189,248,.3); }
+  .banner.overtime{ background: rgba(248,113,113,.14); color: #f87171; border: 1px solid rgba(248,113,113,.35); }
+
+  /* 倒计时 */
+  .timer-card {
+    border-radius: 20px; padding: 26px 16px 22px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  .ring-wrap { position: relative; width: 190px; height: 190px; display: grid; place-items: center; }
+  .ring {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: conic-gradient(var(--ring-c,#38bdf8) 0deg var(--ring-deg,238deg), rgba(255,255,255,.07) var(--ring-deg,238deg) 360deg);
+  }
+  .ring::before { content: ""; position: absolute; inset: 11px; border-radius: 50%; background: #0e1526; }
+  .t-num { position: relative; font-size: 46px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .t-cap { position: relative; font-size: 12px; color: #8b97ad; letter-spacing: .2em; margin-top: 2px; }
+  .t-inner { position: relative; display: flex; flex-direction: column; align-items: center; }
+  .free-row { display: flex; gap: 26px; font-size: 13px; color: #8b97ad; }
+  .free-row b { color: #7dd3fc; font-variant-numeric: tabular-nums; font-size: 15px; margin-left: 5px; }
+
+  /* 麦克风主按钮 */
+  .mic-btn {
+    border: none; cursor: pointer; font-family: inherit;
+    border-radius: 18px; padding: 20px;
+    font-size: 18px; font-weight: 700; letter-spacing: .08em;
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    transition: transform .08s;
+    width: 100%;
+  }
+  .mic-btn:active { transform: scale(.98); }
+  .mic-btn svg { width: 26px; height: 26px; }
+  .mic-btn.disabled {
+    background: rgba(148,163,184,.10); color: #64748b; cursor: not-allowed;
+  }
+  .mic-btn.start {
+    background: linear-gradient(135deg,#16a34a,#22c55e); color: #fff;
+    box-shadow: 0 6px 28px rgba(34,197,94,.35);
+  }
+  .mic-btn.stop {
+    background: linear-gradient(135deg,#dc2626,#ef4444); color: #fff;
+    box-shadow: 0 6px 28px rgba(239,68,68,.35);
+  }
+
+  /* 自由辩论：让 AI 队友发言 */
+  .ai-btn {
+    border: 1px solid rgba(139,92,246,.4); cursor: pointer; font-family: inherit;
+    border-radius: 14px; padding: 14px;
+    font-size: 14px; font-weight: 600;
+    background: rgba(139,92,246,.10); color: #c4b5fd;
+    width: 100%;
+  }
+  .ai-btn.disabled { opacity: .35; cursor: not-allowed; }
+  .hint { font-size: 12px; color: #64748b; text-align: center; line-height: 1.6; }
+
+  /* 原型预览切换器 */
+  .proto-switch {
+    position: fixed; right: 14px; bottom: 14px; z-index: 99;
+    display: flex; gap: 6px; padding: 6px;
+    background: rgba(15,23,42,.92); border: 1px solid rgba(255,255,255,.15); border-radius: 10px;
+  }
+  .proto-switch button {
+    font-size: 12px; padding: 5px 10px; border-radius: 6px; border: none; cursor: pointer;
+    background: transparent; color: #94a3b8; font-family: inherit;
+  }
+  .proto-switch button.on { background: #2563eb; color: #fff; }
+
+  .state { display: none; flex-direction: column; gap: 14px; }
+  .state.on { display: flex; }
+</style>
+</head>
+<body>
+
+<div class="console">
+
+  <!-- 身份卡（所有状态共用） -->
+  <div class="id-card">
+    <div class="avatar">林</div>
+    <div>
+      <div class="nm">林晚晴</div>
+      <div class="sub">智码战队 · 三辩</div>
+    </div>
+    <div class="side">正方</div>
+  </div>
+
+  <!-- ========== 状态 1：等待中（别人发言） ========== -->
+  <div class="state" data-state="waiting">
+    <div class="phase-bar">当前环节：<b>反方三辩陈词</b><span class="conn">已连接</span></div>
+    <div class="banner waiting">等待中 · 当前发言：反方三辩 穷理（AI）</div>
+    <div class="timer-card">
+      <div class="ring-wrap">
+        <div class="ring" style="--ring-c:#475569;--ring-deg:160deg"></div>
+        <div class="t-inner">
+          <div class="t-num">00:38</div>
+          <div class="t-cap">对方剩余</div>
+        </div>
+      </div>
+    </div>
+    <button class="mic-btn disabled" disabled>
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+      未到你的发言环节
+    </button>
+    <div class="hint">轮到你时按钮会亮起，并伴随提示音</div>
+  </div>
+
+  <!-- ========== 状态 2：可发言 ========== -->
+  <div class="state on" data-state="ready">
+    <div class="phase-bar">当前环节：<b>正方三辩陈词</b><span class="conn">已连接</span></div>
+    <div class="banner ready">轮到你发言了，准备好后点击开始</div>
+    <div class="timer-card">
+      <div class="ring-wrap">
+        <div class="ring" style="--ring-c:#4ade80;--ring-deg:360deg"></div>
+        <div class="t-inner">
+          <div class="t-num">01:30</div>
+          <div class="t-cap">本环节时长</div>
+        </div>
+      </div>
+    </div>
+    <button class="mic-btn start">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+      开始发言
+    </button>
+    <div class="hint">点击后开始计时并采集麦克风</div>
+  </div>
+
+  <!-- ========== 状态 3：发言中 ========== -->
+  <div class="state" data-state="speaking">
+    <div class="phase-bar">当前环节：<b>正方三辩陈词</b><span class="conn">已连接</span></div>
+    <div class="banner speaking">发言中 · 正在录音转写</div>
+    <div class="timer-card">
+      <div class="ring-wrap">
+        <div class="ring" style="--ring-c:#38bdf8;--ring-deg:205deg"></div>
+        <div class="t-inner">
+          <div class="t-num">00:51</div>
+          <div class="t-cap">剩余时间</div>
+        </div>
+      </div>
+    </div>
+    <button class="mic-btn stop">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      结束发言
+    </button>
+    <div class="hint">剩余 15 秒时铃声提醒，超时后自动结束</div>
+  </div>
+
+  <!-- ========== 状态 4：自由辩论 ========== -->
+  <div class="state" data-state="free">
+    <div class="phase-bar">当前环节：<b>自由辩论</b><span class="conn">已连接</span></div>
+    <div class="banner ready">本方回合 · 你可以发言，或交给 AI 队友</div>
+    <div class="timer-card">
+      <div class="ring-wrap">
+        <div class="ring" style="--ring-c:#4ade80;--ring-deg:264deg"></div>
+        <div class="t-inner">
+          <div class="t-num">11</div>
+          <div class="t-cap">单次上限 / 秒</div>
+        </div>
+      </div>
+      <div class="free-row">
+        <span>本方剩余<b>02:31</b></span>
+        <span style="color:#64748b">对方剩余<b style="color:#94a3b8">03:05</b></span>
+      </div>
+    </div>
+    <button class="mic-btn start">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+      开始发言
+    </button>
+    <button class="ai-btn">🤖 让 AI 队友发言（玄思 · 二辩）</button>
+    <div class="hint">单次发言不超过 15 秒 · 本方任一辩手开始后其他人按钮锁定</div>
+  </div>
+
+</div>
+
+<!-- 原型预览切换器：仅用于评审布局 -->
+<div class="proto-switch">
+  <button data-go="waiting">等待中</button>
+  <button data-go="ready" class="on">可发言</button>
+  <button data-go="speaking">发言中</button>
+  <button data-go="free">自由辩论</button>
+</div>
+
+<script>
+  document.querySelectorAll(".proto-switch button").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".state").forEach(s => s.classList.toggle("on", s.dataset.state === btn.dataset.go));
+      document.querySelectorAll(".proto-switch button").forEach(b => b.classList.toggle("on", b === btn));
+    };
+  });
+</script>
+</body>
+</html>
