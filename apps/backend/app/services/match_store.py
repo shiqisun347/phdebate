@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import hashlib
 import io
@@ -16,8 +17,20 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.services.agent_gateway import AgentGateway, AgentGatewayError
+from app.services.integration_config import integration_config
 from app.services.sqlite_repo import SQLiteRepository, project_root
 from app.services.xfyun_gateway import XfyunASRGateway, XfyunGatewayError, XfyunTTSGateway
+
+
+def _select_asr_gateway():
+    """Pick the RTASR (极速版) gateway for the iFlytek real-time endpoint, otherwise the
+    legacy IAT gateway. References the module-level XfyunASRGateway so tests can monkeypatch it."""
+    url = os.getenv("XFYUN_ASR_URL", "").strip()
+    from app.services.xfyun_rtasr import XfyunRTASRGateway, is_rtasr_url
+
+    if is_rtasr_url(url):
+        return XfyunRTASRGateway(url=url)
+    return XfyunASRGateway(url=url)
 
 
 class MatchStateError(Exception):
@@ -75,6 +88,13 @@ class MatchStore:
         self.events: List[Dict[str, Any]] = []
         self._asr_streams = {}
         self.repo.clear_match_history("match_001")
+        # 需求3：重置 demo 时清理多比赛注册表与非活动槽位，保证起点干净
+        try:
+            for entry in self._load_registry():
+                self.repo.delete_app_state(self._match_slot_key(str(entry.get("id"))))
+            self.repo.delete_app_state(self._REGISTRY_KEY)
+        except Exception:
+            pass
         self.snapshot: Dict[str, Any] = {
             "match": {
                 "id": "match_001",
@@ -353,6 +373,38 @@ class MatchStore:
             )
         return phases
 
+    @staticmethod
+    def _seat_from_speaker_text(text: str) -> Optional[int]:
+        mapping = {"一辩": 1, "二辩": 2, "三辩": 3, "四辩": 4}
+        for label, seat in mapping.items():
+            if label in (text or ""):
+                return seat
+        return None
+
+    def _phases_from_ruleset(self, ruleset: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """把赛制规则的流程节点转换为比赛 phase 结构。"""
+        phases: List[Dict[str, Any]] = []
+        for index, node in enumerate(ruleset.get("flow", []) or [], start=1):
+            phase_type = node.get("phase_type") or "statement"
+            side = node.get("side") or "neutral"
+            seat = self._seat_from_speaker_text(node.get("speaker", "")) if phase_type != "free_debate" else None
+            key = node.get("key") or f"phase_{index}"
+            phases.append(
+                {
+                    "id": f"phase_{index}_{key}",
+                    "phase_key": key,
+                    "name": node.get("name") or f"环节{index}",
+                    "phase_type": phase_type,
+                    "display_order": index,
+                    "side": side,
+                    "speaker_seat": seat,
+                    "duration_seconds": int(node.get("duration_seconds") or 180),
+                    "speaker_selector": "free_debate" if phase_type == "free_debate" else "fixed_seat",
+                    "status": "pending",
+                }
+            )
+        return phases
+
     async def get_snapshot(self) -> Dict[str, Any]:
         async with self._lock:
             self._refresh_clocks()
@@ -591,6 +643,134 @@ class MatchStore:
         )
         return await self.get_snapshot()
 
+    # --- 需求 3：多比赛管理（项目化，可增删改查 + 切换） ---
+
+    _REGISTRY_KEY = "match_registry"
+
+    def _match_slot_key(self, match_id: str) -> str:
+        return f"match_snapshot:{match_id}"
+
+    def _registry_entry(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        match = snapshot["match"]
+        return {
+            "id": match["id"],
+            "title": match.get("title"),
+            "topic": match.get("topic"),
+            "status": match.get("status"),
+            "screen_scene": match.get("screen_scene"),
+            "current_phase_id": match.get("current_phase_id"),
+            "created_at": match.get("created_at"),
+            "updated_at": iso_now(),
+        }
+
+    def _load_registry(self) -> List[Dict[str, Any]]:
+        data = self.repo.get_app_state(self._REGISTRY_KEY) or {}
+        return data.get("matches", [])
+
+    def _save_registry(self, matches: List[Dict[str, Any]]) -> None:
+        self.repo.set_app_state(self._REGISTRY_KEY, {"matches": matches}, iso_now())
+
+    def _upsert_registry(self, snapshot: Dict[str, Any]) -> None:
+        entry = self._registry_entry(snapshot)
+        matches = [m for m in self._load_registry() if m.get("id") != entry["id"]]
+        matches.append(entry)
+        self._save_registry(matches)
+
+    def _stash_active(self) -> None:
+        """Persist the active match to its own slot + refresh its registry entry."""
+        self._persist_snapshot()
+        self.repo.set_app_state(self._match_slot_key(self.snapshot["match"]["id"]), self.snapshot, iso_now())
+        self._upsert_registry(self.snapshot)
+
+    async def list_matches(self) -> Dict[str, Any]:
+        async with self._lock:
+            self._upsert_registry(self.snapshot)
+            matches = self._load_registry()
+            active_id = self.snapshot["match"]["id"]
+        for entry in matches:
+            entry["active"] = entry.get("id") == active_id
+        matches.sort(key=lambda m: m.get("created_at") or "", reverse=True)
+        return {"matches": matches, "active_match_id": active_id}
+
+    async def create_match(self, fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        fields = fields or {}
+        async with self._lock:
+            self._stash_active()
+            now = utc_now()
+            new_id = f"match_{now.strftime('%Y%m%d_%H%M%S_%f')}"
+            new_snapshot = self._new_match_snapshot_from_archive(deepcopy(self.snapshot), new_id, now)
+            title = str(fields.get("title") or "").strip()
+            topic = str(fields.get("topic") or "").strip()
+            if title:
+                new_snapshot["match"]["title"] = title
+            if topic:
+                new_snapshot["match"]["topic"] = topic
+            for key in (
+                "affirmative_position",
+                "negative_position",
+                "organizer",
+                "venue",
+            ):
+                if key in fields:
+                    new_snapshot["match"][key] = fields.get(key)
+            ruleset_id = str(fields.get("ruleset_id") or "").strip()
+            if ruleset_id:
+                from app.services.ruleset_store import ruleset_store
+
+                ruleset = ruleset_store.get(ruleset_id)
+                if ruleset:
+                    new_snapshot["match"]["ruleset_id"] = ruleset_id
+                    new_snapshot["match"]["ruleset_name"] = ruleset.get("name", "")
+                    phases = self._phases_from_ruleset(ruleset)
+                    if phases:
+                        new_snapshot["phases"] = phases
+                        new_snapshot["clocks"] = []
+                        new_snapshot["current_speech"] = None
+                        new_snapshot["match"]["current_phase_id"] = phases[0]["id"]
+            self.seq = 0
+            self.events = []
+            self._asr_streams = {}
+            self.snapshot = new_snapshot
+            self._persist_snapshot()
+            self._upsert_registry(self.snapshot)
+        await self.emit("match.created", {"match_id": new_id, "title": new_snapshot["match"]["title"]}, "admin")
+        return await self.get_snapshot()
+
+    async def switch_match(self, target_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            active_id = self.snapshot["match"]["id"]
+            switched = target_id != active_id
+            if switched:
+                target = self.repo.get_app_state(self._match_slot_key(target_id))
+                if not target:
+                    raise MatchStateError("match_not_found", "未找到该比赛，无法切换。", {"match_id": target_id})
+                self._stash_active()
+                self.snapshot = target
+                self.seq = int(target.get("last_seq", 0))
+                self._ensure_runtime_fields()
+                self.events = self.repo.load_events(target_id)
+                self._asr_streams = {}
+                self._persist_snapshot()
+                # 已成为活动比赛，移除非活动槽位副本
+                self.repo.delete_app_state(self._match_slot_key(target_id))
+                self._upsert_registry(self.snapshot)
+        if switched:
+            await self.emit("match.switched", {"match_id": target_id, "previous_match_id": active_id}, "admin")
+        return await self.get_snapshot()
+
+    async def delete_match(self, target_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            if target_id == self.snapshot["match"]["id"]:
+                raise MatchStateError("cannot_delete_active", "不能删除当前比赛，请先切换到其它比赛。", {"match_id": target_id})
+            matches = self._load_registry()
+            if not any(m.get("id") == target_id for m in matches):
+                raise MatchStateError("match_not_found", "未找到该比赛。", {"match_id": target_id})
+            self._save_registry([m for m in matches if m.get("id") != target_id])
+            self.repo.delete_app_state(self._match_slot_key(target_id))
+            self.repo.clear_match_history(target_id)
+        await self.emit("match.deleted", {"match_id": target_id}, "admin")
+        return await self.list_matches()
+
     async def emit(
         self,
         event_type: str,
@@ -774,6 +954,15 @@ class MatchStore:
             self._persist_snapshot()
         return await self.emit("speaker.updated", {"speaker_id": speaker_id, "fields": sorted(set(updated))}, "admin")
 
+    async def get_integration_config(self) -> Dict[str, Any]:
+        return integration_config.public()
+
+    async def update_integration_config(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        config = integration_config.update(body or {})
+        changed = [kind for kind in ("asr", "tts") if isinstance((body or {}).get(kind), dict)]
+        await self.emit("integration_config.updated", {"sections": changed}, "admin")
+        return config
+
     async def create_agent_config(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             now = iso_now()
@@ -898,7 +1087,7 @@ class MatchStore:
     async def set_screen_scene(self, scene: str, live_mode: Optional[str]) -> Dict[str, Any]:
         normalized_scene = self._normalize_screen_scene(scene)
         async with self._lock:
-            if normalized_scene in {"judge_commentary", "judge_result", "audience_result"}:
+            if normalized_scene in {"judge_commentary", "judge_result", "audience_result", "xiaoqi_commentary", "xiaoqi_result"}:
                 self._ensure_vote_controls_available("set_result_screen_scene")
             if normalized_scene == "judge_commentary":
                 self.snapshot["vote_state"]["window_status"] = "open"
@@ -910,7 +1099,7 @@ class MatchStore:
                     "需要先公布评委结果，再切换到学生投票结果。",
                     {"judge_published": False},
                 )
-            if normalized_scene in {"judge_commentary", "judge_result", "audience_result"}:
+            if normalized_scene in {"judge_commentary", "judge_result", "audience_result", "xiaoqi_commentary", "xiaoqi_result"}:
                 self._clear_flow_state()
             self.snapshot["match"]["screen_scene"] = normalized_scene
             if live_mode:
@@ -941,6 +1130,9 @@ class MatchStore:
                 }
             self._reset_clocks_for_phase(phase)
             self._persist_snapshot()
+        if phase["phase_type"] == "free_debate":
+            # 需求 2.md：自由辩论首轮（正方先手）也给 5s 决定窗口。
+            self._arm_free_debate_auto_agent("affirmative", 1)
         return await self.emit("phase.started", {"phase_id": phase_id, "name": phase["name"]}, "host")
 
     async def skip_phase(self, phase_id: str, reason: str) -> Dict[str, Any]:
@@ -1066,7 +1258,14 @@ class MatchStore:
         if skipped_all:
             agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
             if agents_on_side:
-                chosen = random.choice(agents_on_side)
+                async with self._lock:
+                    auto_handled = self.snapshot["free_debate"].setdefault("auto_handled", {})
+                    if auto_handled.get(turn_key):
+                        return await self.get_snapshot()
+                    chosen = random.choice(agents_on_side)
+                    auto_handled[turn_key] = chosen["id"]
+                    self._persist_snapshot()
+                await self.emit("free_debate.auto_agent", {"side": side, "turn_index": turn_index, "speaker_id": chosen["id"], "reason": "all_skipped"}, "system")
                 try:
                     self.ensure_agent_speaker_for_current_phase(chosen["id"])
                     asyncio.create_task(self.run_agent_speech(chosen["id"]))
@@ -1245,6 +1444,93 @@ class MatchStore:
 
     async def run_mock_agent_speech(self, speaker_id: str) -> None:
         await self.run_agent_speech(speaker_id)
+
+    async def run_agent_command(self, speaker_id: str, command: str, prompt: str = "") -> Dict[str, Any]:
+        speaker = self._find_speaker(speaker_id)
+        if speaker["speaker_type"] != "agent":
+            raise MatchStateError("invalid_speaker", "只有 Agent 辩手可以接收 Agent 命令。", {"speaker_id": speaker_id})
+        config = self._agent_config_for_speaker(speaker)
+        if config and not config.get("enabled", True):
+            raise MatchStateError(
+                "agent_config_disabled",
+                "该 Agent 配置已停用，不能发送命令。",
+                {"speaker_id": speaker_id, "agent_config_id": config.get("id")},
+            )
+
+        task_id = f"cmd_{self.seq + 1}"
+        endpoint = self.agent_gateway.endpoint_for(speaker)
+        phase = self._current_phase()
+        match = self.snapshot["match"]
+        command_text = str(command or "custom").strip() or "custom"
+        prompt_text = str(prompt or "").strip()
+        payload = {
+            "model_name": (config or {}).get("model_name", speaker.get("model_name") or ""),
+            "debater_name": speaker["name"],
+            "debate_position": self._seat_label(speaker["seat"]),
+            "debate_topic": match["topic"],
+            "current_stage": command_text,
+            "next_stage": phase.get("name", ""),
+            "holder": "正方" if speaker["side"] == "affirmative" else "反方",
+            "other_info": {
+                "command": command_text,
+                "prompt": prompt_text,
+                "match_id": match["id"],
+                "speaker_id": speaker_id,
+                "side": speaker["side"],
+                "seat": speaker["seat"],
+            },
+            "debate_history": self._build_debate_history(),
+            "match_id": match["id"],
+            "task_id": task_id,
+            "speech_id": None,
+            "speaker_id": speaker_id,
+            "agent_config_id": speaker.get("agent_config_id"),
+            "agent_provider_type": (config or {}).get("provider_type"),
+            "time_limit_seconds": 60,
+            "remaining_seconds": 60,
+            "target_chars": 260,
+            "output": {"stream": True, "language": "zh-CN"},
+        }
+
+        async with self._lock:
+            self._set_agent_status(speaker_id, "streaming", f"command {command_text}")
+            self._persist_snapshot()
+        await self.emit(
+            "agent.command.started",
+            {"task_id": task_id, "speaker_id": speaker_id, "command": command_text, "endpoint": endpoint or "embedded://mock"},
+            "host",
+        )
+
+        fallback = self._mock_agent_command_chunks(speaker, command_text)
+        content = ""
+        try:
+            async for event in self.agent_gateway.stream_speech(endpoint, payload, fallback, config=config):
+                if event.get("type") == "delta":
+                    content += str(event.get("delta") or "")
+                elif event.get("type") == "final":
+                    content = str(event.get("content") or content)
+                    break
+        except AgentGatewayError as exc:
+            async with self._lock:
+                self._set_agent_status(speaker_id, "failed", exc.message)
+                self._persist_snapshot()
+            await self.emit(
+                "agent.command_failed",
+                {"task_id": task_id, "speaker_id": speaker_id, "command": command_text, "code": exc.code, "message": exc.message},
+                "host",
+            )
+            raise MatchStateError(exc.code, exc.message, exc.details) from exc
+
+        async with self._lock:
+            self._set_agent_status(speaker_id, "ready", f"command {command_text} completed")
+            self._persist_snapshot()
+        await self.emit(
+            "agent.command_finished",
+            {"task_id": task_id, "speaker_id": speaker_id, "command": command_text, "content": content},
+            "agent",
+            speaker_id,
+        )
+        return {"task_id": task_id, "speaker_id": speaker_id, "command": command_text, "payload": payload, "content": content}
 
     async def record_manual_agent_input(self, speaker_id: str, content: str, reason: str = "manual_input") -> Dict[str, Any]:
         text = str(content or "").strip()
@@ -1754,7 +2040,7 @@ class MatchStore:
         if not session:
             request_id = f"asr_stream_{speech_id}"
             stream_started_at = iso_now()
-            gateway = XfyunASRGateway(url=os.getenv("XFYUN_ASR_URL", "").strip())
+            gateway = _select_asr_gateway()
 
             async def on_partial(text: str, latency_ms: int, chunk_count: int) -> None:
                 await self._record_live_asr_text(speech_id, speaker_id, text, False, latency_ms, chunk_count)
@@ -1957,7 +2243,7 @@ class MatchStore:
             raise MatchStateError("invalid_audio_archive", "归档音频为空，无法识别。", {"speech_id": speech_id})
         await self.emit("asr.archive_recognition_started", {"speech_id": speech_id, "audio_bytes": len(content)}, "host")
 
-        gateway = XfyunASRGateway(url=os.getenv("XFYUN_ASR_URL", "").strip())
+        gateway = _select_asr_gateway()
         try:
             result = await gateway.recognize(content, audio_format="audio/L16;rate=16000", encoding="raw")
         except XfyunGatewayError as exc:
@@ -2057,7 +2343,7 @@ class MatchStore:
             self._persist_snapshot()
         await self.emit("asr.probe_started", {"audio_bytes": len(content), "format": audio_format, "encoding": encoding}, "host")
 
-        gateway = XfyunASRGateway(url=os.getenv("XFYUN_ASR_URL", "").strip())
+        gateway = _select_asr_gateway()
         try:
             result = await gateway.recognize(content, audio_format=audio_format, encoding=encoding)
         except XfyunGatewayError as exc:
@@ -2169,6 +2455,8 @@ class MatchStore:
             "chunk_count": result.chunk_count,
             "latency_ms": result.latency_ms,
             "file_path": str(file_path),
+            # 让前端可直接在本机播放试合成音频
+            "audio_base64": base64.b64encode(result.audio).decode("ascii"),
         }
         async with self._lock:
             self.snapshot["speech_service"]["tts"] = {
@@ -2595,6 +2883,88 @@ class MatchStore:
             results.append(await self.check_agent_health(speaker_id))
         return results
 
+    async def test_agent_config(self, config_id: str, custom_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """一次性连通性 / 调试测试：用已保存的 Agent 配置发起一次发言请求并返回结果。"""
+        config = self._find_agent_config(config_id)
+        return await self._run_agent_config_test(config, custom_payload)
+
+    async def test_agent_config_inline(self, fields: Dict[str, Any], custom_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """连通性测试未保存的 Agent 表单（新建页面用）。"""
+        try:
+            config = self._normalize_agent_config_fields(fields, now=iso_now(), create=True)
+        except MatchStateError as exc:
+            return {"ok": False, "error_code": exc.code, "error_message": exc.message, "details": exc.details}
+        return await self._run_agent_config_test(config, custom_payload)
+
+    async def _run_agent_config_test(self, config: Dict[str, Any], custom_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        provider = config.get("provider_type", "rest_api")
+        endpoint = config.get("endpoint", "").strip() if provider == "rest_api" else ""
+        if provider == "rest_api" and not endpoint:
+            return {"ok": False, "error_code": "missing_endpoint", "error_message": "REST API agent 未配置接口地址。"}
+
+        topic = self.snapshot["match"].get("topic") or "测试辩题：AI 时代应培养编程思维还是提问思维"
+        payload: Dict[str, Any] = custom_payload or {
+            "model_name": config.get("model_name", ""),
+            "debater_name": "测试辩手",
+            "debate_position": "一辩",
+            "debate_topic": topic,
+            "current_stage": "正方一辩立论",
+            "next_stage": "反方一辩立论",
+            "holder": "正方",
+            "time_limit_seconds": 60,
+            "target_chars": 120,
+            "other_info": {},
+            "debate_history": [],
+        }
+        payload.setdefault("task_id", "agent_test")
+        payload.setdefault("speech_id", "agent_test")
+        payload.setdefault("match_id", self.snapshot["match"]["id"])
+
+        started = time.perf_counter()
+        content = ""
+        chunks = 0
+        try:
+            async for event in self.agent_gateway.stream_speech(
+                endpoint, payload, ["（连通性测试占位回复）"], config=config
+            ):
+                if event.get("type") == "delta":
+                    content += event.get("delta", "")
+                    chunks += 1
+                elif event.get("type") == "final" and event.get("content"):
+                    content = event["content"]
+            return {
+                "ok": True,
+                "content": content,
+                "chunks": chunks,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "endpoint": endpoint or "openai_sdk",
+                "model": config.get("model_id") or config.get("model_name"),
+                "request": payload,
+            }
+        except AgentGatewayError as exc:
+            return {
+                "ok": False,
+                "error_code": exc.code,
+                "error_message": exc.message,
+                "details": exc.details,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "request": payload,
+            }
+
+    def clear_request_logs(self) -> None:
+        """清空当前比赛的 Agent / 语音 / 审计请求日志。"""
+        self.repo.clear_request_logs(self.snapshot["match"]["id"])
+
+    def get_request_logs(self, limit: int = 200) -> Dict[str, Any]:
+        """API 请求日志：Agent 请求 + 语音服务请求 + 操作审计。"""
+        match_id = self.snapshot["match"]["id"]
+        return {
+            "match_id": match_id,
+            "agent_requests": self.repo.load_agent_requests(match_id, limit),
+            "speech_service_requests": self.repo.load_speech_service_requests(match_id, limit),
+            "audit_logs": self.repo.load_audit_logs(match_id, limit),
+        }
+
     async def websocket(self, websocket: WebSocket, last_seq: int = 0, channel: str = "screen", speaker_id: Optional[str] = None) -> None:
         await websocket.accept()
         self._connections.add(websocket)
@@ -2820,7 +3190,9 @@ class MatchStore:
             "id": speaker.get("agent_config_id") or self._default_agent_config_id(str(speaker.get("id") or "")),
             "name": f"{speaker.get('name') or '未命名'} Agent",
             "provider_type": "openai_sdk",
+            "request_method": "POST",
             "model_name": speaker.get("model_name") or "qwen3.6-plus",
+            "model_id": speaker.get("model_id") or "qwen3.6-plus",
             "model_kind": speaker.get("model_kind") or "closed_source",
             "endpoint": speaker.get("agent_endpoint") or self._agent_endpoint_for_speaker(str(speaker.get("id") or "")),
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -2844,6 +3216,10 @@ class MatchStore:
         if provider_type not in {"rest_api", "openai_sdk"}:
             raise MatchStateError("invalid_agent_config", "Agent 类型必须为 rest_api 或 openai_sdk。", {"provider_type": provider_type})
 
+        request_method = str(fields.get("request_method", source.get("request_method", "POST")) or "POST").strip().upper()
+        if request_method not in {"GET", "POST", "PUT", "PATCH"}:
+            raise MatchStateError("invalid_agent_config", "请求方式必须为 GET、POST、PUT 或 PATCH。", {"request_method": request_method})
+
         name = str(fields.get("name", source.get("name", "")) or "").strip()
         if not name:
             raise MatchStateError("invalid_agent_config", "Agent 名称不能为空。")
@@ -2851,6 +3227,12 @@ class MatchStore:
         model_name = str(fields.get("model_name", fields.get("model", source.get("model_name", ""))) or "").strip()
         if not model_name:
             model_name = "未配置模型"
+
+        # model_id is the actual id passed to the OpenAI-compatible API (openai_sdk mode).
+        # Defaults to the 需求 2.md test model so demo agents stream out of the box.
+        model_id = str(fields.get("model_id", source.get("model_id", "")) or "").strip()
+        if not model_id and provider_type == "openai_sdk":
+            model_id = "qwen3.6-plus"
 
         model_kind = fields.get("model_kind", source.get("model_kind", "closed_source"))
         if model_kind not in {"open_source", "closed_source"}:
@@ -2874,7 +3256,9 @@ class MatchStore:
             "id": source.get("id", ""),
             "name": name,
             "provider_type": provider_type,
+            "request_method": request_method,
             "model_name": model_name,
+            "model_id": model_id,
             "model_kind": model_kind,
             "endpoint": str(fields.get("endpoint", source.get("endpoint", "")) or "").strip(),
             "base_url": str(fields.get("base_url", source.get("base_url", "")) or "").strip(),
@@ -2944,6 +3328,7 @@ class MatchStore:
         config["model_kind"] = speaker.get("model_kind") or "closed_source"
         config["endpoint"] = speaker.get("agent_endpoint") or ""
         config["provider_type"] = config.get("provider_type") or "rest_api"
+        config["request_method"] = config.get("request_method") or "POST"
         config["updated_at"] = iso_now()
 
     def _ensure_runtime_fields(self) -> None:
@@ -3065,6 +3450,50 @@ class MatchStore:
         vote_state.pop("audience_votes", None)
         for config in snapshot.get("agent_configs", []):
             config.pop("api_key", None)
+        snapshot["next_speaker"] = self._next_speaker_info(snapshot)
+        snapshot["integration_config"] = integration_config.public()
+
+    def _next_speaker_info(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """需求 2.md：辩手端需展示下一个发言的选手。固定环节解析为下一环节的辩位与辩手，
+        自由辩论给出先手方提示。"""
+        phases = snapshot.get("phases", [])
+        current_id = snapshot.get("match", {}).get("current_phase_id")
+        current = next((p for p in phases if p.get("id") == current_id), None)
+        order = current.get("display_order") if current else -1
+        candidates = [p for p in phases if isinstance(p.get("display_order"), int) and p["display_order"] > order]
+        nxt = min(candidates, key=lambda p: p["display_order"]) if candidates else None
+        if not nxt:
+            return None
+        info: Dict[str, Any] = {
+            "phase_id": nxt.get("id"),
+            "phase_name": nxt.get("name"),
+            "phase_type": nxt.get("phase_type"),
+        }
+        if nxt.get("phase_type") == "free_debate":
+            info.update({"side": "affirmative", "label": f"{nxt.get('name')} · 正方先手"})
+            return info
+        speaker = next(
+            (
+                s
+                for s in snapshot.get("speakers", [])
+                if s.get("side") == nxt.get("side") and s.get("seat") == nxt.get("speaker_seat")
+            ),
+            None,
+        )
+        if speaker:
+            info.update(
+                {
+                    "speaker_id": speaker.get("id"),
+                    "speaker_name": speaker.get("name"),
+                    "speaker_type": speaker.get("speaker_type"),
+                    "side": speaker.get("side"),
+                    "seat": speaker.get("seat"),
+                    "label": f"{nxt.get('name')} · {speaker.get('name')}",
+                }
+            )
+        else:
+            info["label"] = nxt.get("name")
+        return info
 
     def _empty_judge_summary(self) -> Dict[str, Any]:
         return {
@@ -3428,7 +3857,7 @@ class MatchStore:
                 "content": segment["text"],
             })
         return [
-            {"stage": phase_by_id.get(pid, pid), "message": groups[pid]}
+            {"stage": phase_by_id.get(pid, pid), "content": groups[pid]}
             for pid in ordered_phase_ids
             if pid in groups
         ]
@@ -3437,7 +3866,7 @@ class MatchStore:
         phase = self._current_phase()
         match = self.snapshot["match"]
         config = self._agent_config_for_speaker(speaker) or {}
-        time_limit = 15 if phase["phase_type"] == "free_debate" else phase["duration_seconds"]
+        time_limit = self._free_turn_seconds(phase) if phase["phase_type"] == "free_debate" else phase["duration_seconds"]
         clock = self._clock("turn" if phase["phase_type"] == "free_debate" else "main")
         remaining_seconds = int((clock["remaining_ms"] if clock else time_limit * 1000) / 1000)
         next_phase = self._next_phase(phase)
@@ -3451,6 +3880,14 @@ class MatchStore:
             "current_stage": phase["name"],
             "next_stage": next_phase["name"] if next_phase else "比赛结束",
             "holder": holder,
+            "other_info": {
+                "match_id": match["id"],
+                "speaker_id": speaker["id"],
+                "side": speaker["side"],
+                "phase_type": phase["phase_type"],
+                "remaining_seconds": remaining_seconds,
+                "time_limit_seconds": time_limit,
+            },
             "debate_history": self._build_debate_history(),
             # 内部路由字段
             "match_id": match["id"],
@@ -4085,17 +4522,70 @@ class MatchStore:
         old_turn_index = int(self.snapshot["free_debate"]["turn_index"])
         old_turn_key = f"{side}_{old_turn_index}"
         next_side = "negative" if side == "affirmative" else "affirmative"
+        new_turn_index = old_turn_index + 1
         self.snapshot["free_debate"]["current_turn_side"] = next_side
-        self.snapshot["free_debate"]["turn_index"] = old_turn_index + 1
-        # Clear skip votes for the completed turn
+        self.snapshot["free_debate"]["turn_index"] = new_turn_index
+        # Clear skip votes / auto-handled marker for the completed turn
         skip_votes = self.snapshot["free_debate"].get("skip_votes", {})
         skip_votes.pop(old_turn_key, None)
+        auto_handled = self.snapshot["free_debate"].get("auto_handled", {})
+        auto_handled.pop(old_turn_key, None)
         turn_clock = self._clock("turn")
         if turn_clock:
             turn_clock["remaining_ms"] = turn_clock["total_seconds"] * 1000
             turn_clock["state"] = "paused"
             turn_clock["deadline_at"] = None
             turn_clock.pop("expired_notified_at", None)
+        # 需求 2.md：新一轮开始后给本方 5s 决定窗口，超时则随机 AI 接管。
+        self._arm_free_debate_auto_agent(next_side, new_turn_index)
+
+    def _arm_free_debate_auto_agent(self, side: str, turn_index: int) -> None:
+        """Schedule a background task: if the side has not started speaking within the
+        decision window (and has not all-skipped), a random agent on that side answers."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.create_task(self._free_debate_auto_agent_after_delay(side, turn_index))
+
+    async def _free_debate_auto_agent_after_delay(self, side: str, turn_index: int) -> None:
+        import random
+
+        await asyncio.sleep(self._free_debate_decision_seconds())
+        async with self._lock:
+            match = self.snapshot["match"]
+            if match.get("status") != "running":
+                return
+            phase = self._current_phase()
+            if phase.get("phase_type") != "free_debate":
+                return
+            fd = self.snapshot["free_debate"]
+            if fd.get("current_turn_side") != side or int(fd.get("turn_index", -1)) != turn_index:
+                return
+            if self.snapshot.get("current_speech"):
+                return
+            turn_key = f"{side}_{turn_index}"
+            if fd.setdefault("auto_handled", {}).get(turn_key):
+                return
+            total_clock = self._clock(f"{side}_total")
+            if total_clock and int(total_clock.get("remaining_ms", 0)) <= 0:
+                return
+            agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
+            if not agents_on_side:
+                return
+            chosen = random.choice(agents_on_side)
+            fd["auto_handled"][turn_key] = chosen["id"]
+            self._persist_snapshot()
+        await self.emit(
+            "free_debate.auto_agent",
+            {"side": side, "turn_index": turn_index, "speaker_id": chosen["id"], "reason": "decision_timeout"},
+            "system",
+        )
+        try:
+            self.ensure_agent_speaker_for_current_phase(chosen["id"])
+            await self.run_agent_speech(chosen["id"])
+        except Exception:
+            pass
 
     def _clear_flow_state(self) -> None:
         self.snapshot["flow"] = self._fresh_flow_state()
@@ -4191,7 +4681,7 @@ class MatchStore:
             "result": "judge_result",
         }
         normalized = aliases.get(scene, scene)
-        allowed = {"idle", "live", "paused", "judge_commentary", "judge_result", "audience_result"}
+        allowed = {"idle", "live", "paused", "judge_commentary", "judge_result", "audience_result", "xiaoqi_commentary", "xiaoqi_result"}
         if normalized not in allowed:
             raise MatchStateError("invalid_screen_scene", "未知的大屏场景。", {"scene": scene})
         return normalized
@@ -4296,7 +4786,23 @@ class MatchStore:
         return int(phase.get("side_total_seconds") or max(1, int(phase["duration_seconds"]) // 2))
 
     def _free_turn_seconds(self, phase: Dict[str, Any]) -> int:
-        return int(phase.get("turn_seconds") or 15)
+        # 需求 2.md：自由辩论单次发言不超过 30s。
+        return int(phase.get("turn_seconds") or 30)
+
+    def _free_debate_decision_seconds(self, phase: Optional[Dict[str, Any]] = None) -> float:
+        # 需求 2.md：人类辩手在本轮有 5s 决定窗口；超时（或全部跳过）则随机 AI 接管。
+        # 可用 PHDEBATE_FREE_DEBATE_DECISION_SECONDS 覆盖（测试/现场调参）。
+        env_value = os.getenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "").strip()
+        if env_value:
+            try:
+                return max(0.0, float(env_value))
+            except ValueError:
+                pass
+        phase = phase or self._current_phase()
+        try:
+            return max(0.0, float(phase.get("decision_seconds") or 5))
+        except (TypeError, ValueError):
+            return 5.0
 
     def _validated_seconds(self, value: Any, field: str, minimum: int, maximum: int) -> int:
         try:
@@ -4392,6 +4898,22 @@ class MatchStore:
             "对方把编程思维说成万能钥匙，",
             "却忽略了 AI 时代最稀缺的能力，",
             "是提出正确问题并不断校准目标。"
+        ]
+
+    def _mock_agent_command_chunks(self, speaker: Dict[str, Any], command: str) -> List[str]:
+        if command == "self_intro":
+            return [
+                f"大家好，我是{speaker.get('name', 'AI 辩手')}，",
+                "我会在接下来的辩论中尽量给出清晰、克制且可检验的论证。"
+            ]
+        if command == "fallback":
+            return [
+                "当前我给出一段替代回应：",
+                "请先抓住对方论证中的关键前提，再回到本方判准进行回应。"
+            ]
+        return [
+            "命令已收到，",
+            "我将根据当前辩题和已有发言给出回应。"
         ]
 
 

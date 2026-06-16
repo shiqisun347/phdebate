@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { ClockTile } from "../components/ClockTile";
 import { AuthPrompt } from "../components/AuthPrompt";
@@ -317,6 +317,11 @@ function Subtitle({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; curre
   const isAgent = source === "agent_text";
   const degraded = snapshot.speech_service.tts.status === "failed" && snapshot.speech_service.tts.speaker_id === currentSpeaker?.id;
   const asrFailed = snapshot.speech_service.asr.status === "failed" && source === "human_asr";
+  const textRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    // 流式发言时自动滚到底部，保持最新内容可见（窗口固定大小）
+    if (textRef.current) textRef.current.scrollTop = textRef.current.scrollHeight;
+  }, [text]);
   return (
     <footer className="subtitle-panel">
       <div>
@@ -326,7 +331,7 @@ function Subtitle({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; curre
         {asrFailed && <StatusPill tone="red">ASR 异常</StatusPill>}
         <span>{snapshot.current_speech ? "进行中" : "最近发言"}</span>
       </div>
-      <p>{text}</p>
+      <p ref={textRef}>{text}</p>
     </footer>
   );
 }

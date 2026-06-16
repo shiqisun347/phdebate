@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from urllib.parse import urlparse
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 import httpx
@@ -104,7 +105,13 @@ class AgentGateway:
         base_url = config.get("base_url", "").strip()
         api_key_env = config.get("api_key_env", "DASHSCOPE_API_KEY").strip()
         api_key = os.getenv(api_key_env, "").strip()
-        model = config.get("model_name", "qwen3.6-plus").strip() or "qwen3.6-plus"
+        # `model_name` is the display label (e.g. "Qwen-Max"); `model_id` is the actual
+        # id sent to the OpenAI-compatible API. Fall back to the 需求 2.md test model.
+        model = (
+            str(config.get("model_id") or "").strip()
+            or os.getenv("DASHSCOPE_MODEL", "").strip()
+            or "qwen3.6-plus"
+        )
 
         if not api_key:
             raise AgentGatewayError(
@@ -123,16 +130,17 @@ class AgentGateway:
         try:
             client = AsyncOpenAI(**client_kwargs)
             content = ""
-            async with client.chat.completions.stream(
+            stream = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=800,
-            ) as stream:
-                async for chunk in stream:
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
-                    if delta:
-                        content += delta
-                        yield {"type": "delta", "task_id": task_id, "delta": delta}
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    content += delta
+                    yield {"type": "delta", "task_id": task_id, "delta": delta}
             yield {
                 "type": "final",
                 "task_id": task_id,
@@ -159,7 +167,7 @@ class AgentGateway:
         for stage in debate_history:
             stage_name = stage.get("stage", "")
             history_text += f"\n【{stage_name}】\n"
-            for msg in stage.get("message", []):
+            for msg in stage.get("content", stage.get("message", [])):
                 history_text += f"  {msg.get('speaker', '')}: {msg.get('content', '')}\n"
 
         system_prompt = (
@@ -247,4 +255,9 @@ class AgentGateway:
         return headers
 
     def _url(self, endpoint: str, path: str) -> str:
-        return f"{endpoint.rstrip('/')}{path}"
+        endpoint = endpoint.rstrip("/")
+        parsed = urlparse(endpoint)
+        has_explicit_path = bool(parsed.path and parsed.path != "/")
+        if path == "/speech" and has_explicit_path:
+            return endpoint
+        return f"{endpoint}{path}"

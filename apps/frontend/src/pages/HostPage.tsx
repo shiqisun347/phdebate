@@ -4,6 +4,7 @@ import { post } from "../api/client";
 import { AuthPrompt } from "../components/AuthPrompt";
 import { ClockTile } from "../components/ClockTile";
 import { useActionFeedback } from "../components/Feedback";
+import { StageHistory } from "../components/StageHistory";
 import { StatusPill } from "../components/StatusPill";
 import { useClockRemaining } from "../hooks/useClockRemaining";
 import { useMatch } from "../realtime/useMatch";
@@ -274,15 +275,9 @@ export function HostPage({ matchId }: HostPageProps) {
           </div>
 
           <div className="host-panel">
-            <div className="section-title">实时转写</div>
+            <div className="section-title"><Clock3 size={16} />阶段发言记录</div>
             <div className="host-transcript">
-              {snapshot.recent_transcript.slice(0, 5).map((segment) => (
-                <div key={segment.id} className={segment.valid === false ? "invalid" : ""}>
-                  <strong>{segment.speaker_label}</strong>
-                  <p>{segment.text || "等待文本..."}</p>
-                </div>
-              ))}
-              {!snapshot.recent_transcript.length && <p className="muted-line">暂无转写。</p>}
+              <StageHistory snapshot={snapshot} />
             </div>
           </div>
         </aside>

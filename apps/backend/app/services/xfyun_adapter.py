@@ -165,6 +165,76 @@ def tts_finished(message: Dict[str, Any]) -> bool:
     return ((message.get("data") or {}).get("status")) == 2
 
 
+# --- 超拟人 / super smart-tts（wss://.../v1/private/...）schema ---
+# 该接口与老版 TTS 不同：使用 header / parameter / payload 三段式，
+# 响应音频在 payload.audio.audio（base64）。参见 需求 2.md 与讯飞 super smart-tts 文档。
+
+def build_super_tts_frame(
+    text: str,
+    credentials: XfyunCredentials,
+    *,
+    voice: Optional[str] = None,
+    audio_encoding: Optional[str] = None,
+    sample_rate: Optional[int] = None,
+    speed: Optional[int] = None,
+    volume: Optional[int] = None,
+    pitch: Optional[int] = None,
+) -> Dict[str, Any]:
+    encoding = audio_encoding or os.getenv("XFYUN_TTS_AUE", "lame")
+    rate = sample_rate if sample_rate is not None else int(os.getenv("XFYUN_TTS_SAMPLE_RATE", "24000"))
+    return {
+        "header": {"app_id": credentials.app_id, "status": 2},
+        "parameter": {
+            "tts": {
+                # 该试用 app 的免费发音人：x6_lingfeiyi_pro / x6_lingxiaoxuan_pro /
+                # x6_lingfeibo_pro / x6_lingxiaoyue_pro（详见 docs/14）。其它需授权，否则 licc limit。
+                "vcn": voice or os.getenv("XFYUN_TTS_VOICE", "x6_lingfeiyi_pro"),
+                "speed": speed if speed is not None else int(os.getenv("XFYUN_TTS_SPEED", "50")),
+                "volume": volume if volume is not None else int(os.getenv("XFYUN_TTS_VOLUME", "50")),
+                "pitch": pitch if pitch is not None else int(os.getenv("XFYUN_TTS_PITCH", "50")),
+                "audio": {
+                    "encoding": encoding,
+                    "sample_rate": rate,
+                    "channels": 1,
+                    "bit_depth": 16,
+                    "frame_size": 0,
+                },
+            }
+        },
+        "payload": {
+            "text": {
+                "encoding": "utf8",
+                "compress": "raw",
+                "format": "plain",
+                "status": 2,
+                "seq": 0,
+                "text": base64.b64encode(text.encode("utf-8")).decode("utf-8"),
+            }
+        },
+    }
+
+
+def extract_super_tts_audio(message: Dict[str, Any]) -> bytes:
+    audio = (((message.get("payload") or {}).get("audio") or {}).get("audio") or "")
+    return base64.b64decode(audio) if audio else b""
+
+
+def super_tts_error(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    header = message.get("header") or {}
+    code = header.get("code")
+    if code not in (None, 0):
+        return {"code": code, "message": header.get("message") or "super-tts error"}
+    return None
+
+
+def super_tts_finished(message: Dict[str, Any]) -> bool:
+    header = message.get("header") or {}
+    if header.get("status") == 2:
+        return True
+    audio = ((message.get("payload") or {}).get("audio") or {})
+    return audio.get("status") == 2
+
+
 def optional_int_env(target: Dict[str, Any], key: str, env_name: str) -> None:
     value = os.getenv(env_name, "").strip()
     if value:

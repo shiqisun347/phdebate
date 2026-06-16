@@ -1,4 +1,4 @@
-import { CheckCircle2, ClipboardCheck, Mic, Pause, Play, RadioTower, Square, UserRound } from "lucide-react";
+import { CheckCircle2, ClipboardCheck, Mic, Pause, Play, RadioTower, SkipForward, Square, UserRound } from "lucide-react";
 import { type ButtonHTMLAttributes, useEffect, useRef, useState } from "react";
 import { getMatch, patch, post, uploadAudioChunk } from "../api/client";
 import { AuthPrompt } from "../components/AuthPrompt";
@@ -678,14 +678,30 @@ function HumanConsoleView({
               </button>
             </div>
           ) : (
-            <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`))} className={`mic-button ${canSpeak ? "start" : "disabled"}`} disabled={!canSpeak} onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`)}>
-              <Play size={28} />开始发言
-            </button>
+            <div className="console-speech-actions">
+              <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`))} className={`mic-button ${canSpeak ? "start" : "disabled"}`} disabled={!canSpeak} onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`)}>
+                <Play size={28} />开始发言
+              </button>
+              {isFree && canSpeak && (
+                <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/free-debate-skip`))} className="mic-button skip" onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/free-debate-skip`)}>
+                  <SkipForward size={20} />跳过本轮
+                </button>
+              )}
+            </div>
           )}
         </div>
       </section>
 
       <section className="console-secondary">
+        {snapshot.next_speaker && (
+          <div>
+            <h3>下一位发言</h3>
+            <p>
+              {snapshot.next_speaker.label}
+              {snapshot.next_speaker.speaker_id === speaker.id ? "（下一位就是你，请提前准备）" : ""}
+            </p>
+          </div>
+        )}
         <div>
           <h3>提示</h3>
           <p>{phaseHelpText(currentPhase, speaker, snapshot.free_debate.current_turn_side)}</p>

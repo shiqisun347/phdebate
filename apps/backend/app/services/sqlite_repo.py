@@ -363,6 +363,32 @@ class SQLiteRepository:
             )
             self._sync_structured_snapshot(conn, snapshot, updated_at)
 
+    def get_app_state(self, key: str) -> Optional[Dict[str, Any]]:
+        """Raw app_state read (no structured mirroring) — used for the multi-match registry
+        and inactive-match snapshot slots."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT value_json FROM app_state WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        return json.loads(row["value_json"])
+
+    def set_app_state(self, key: str, value: Dict[str, Any], updated_at: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_state (key, value_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  value_json = excluded.value_json,
+                  updated_at = excluded.updated_at
+                """,
+                (key, json.dumps(value, ensure_ascii=False), updated_at),
+            )
+
+    def delete_app_state(self, key: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+
     def clear_match_history(self, match_id: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM events WHERE match_id = ?", (match_id,))
@@ -605,6 +631,12 @@ class SQLiteRepository:
                     request_id,
                 ),
             )
+
+    def clear_request_logs(self, match_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM agent_requests WHERE match_id = ?", (match_id,))
+            conn.execute("DELETE FROM speech_service_requests WHERE match_id = ?", (match_id,))
+            conn.execute("DELETE FROM audit_logs WHERE match_id = ?", (match_id,))
 
     def load_agent_requests(self, match_id: str, limit: int = 200) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 10000))

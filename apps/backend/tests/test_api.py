@@ -37,6 +37,18 @@ def reset_demo_state(monkeypatch, tmp_path) -> None:
     client.post("/api/demo/reset")
 
 
+def _use_embedded_mock_agent(speaker_id: str = "spk_aff_2") -> None:
+    """Demo agents default to the qwen openai_sdk provider, which requires a live
+    API key. Tests that exercise the offline embedded-mock speech path switch the
+    speaker's agent config to rest_api with no endpoint so stream_speech falls back
+    to the deterministic mock chunks."""
+    resp = client.patch(
+        f"/api/matches/match_001/agents/configs/agent_{speaker_id}",
+        json={"provider_type": "rest_api", "endpoint": ""},
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def test_health() -> None:
     response = client.get("/api/health")
     assert response.status_code == 200
@@ -794,7 +806,7 @@ def test_speaker_settings_patch_uses_agent_configs_instead_of_inline_agent_field
 
     updated_config = client.patch(
         f"/api/matches/match_001/agents/configs/{config['id']}",
-        json={"model_name": "Qwen-Plus", "model_kind": "closed_source", "endpoint": "http://127.0.0.1:8100"},
+        json={"provider_type": "rest_api", "model_name": "Qwen-Plus", "model_kind": "closed_source", "endpoint": "http://127.0.0.1:8100"},
     )
     assert updated_config.status_code == 200
     data = updated_config.json()["data"]
@@ -1279,6 +1291,7 @@ def test_data_summary_reports_current_data_exports_and_archives() -> None:
 
 def test_mock_agent_speech_records_final_transcript(monkeypatch) -> None:
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    _use_embedded_mock_agent("spk_aff_2")
 
     asyncio.run(store.run_agent_speech("spk_aff_2"))
 
@@ -1354,7 +1367,7 @@ def test_agent_speech_can_use_injected_gateway(monkeypatch) -> None:
         def endpoint_for(self, speaker):
             return "http://fake-agent"
 
-        async def stream_speech(self, endpoint, payload, fallback_chunks):
+        async def stream_speech(self, endpoint, payload, fallback_chunks, *, config=None):
             assert endpoint == "http://fake-agent"
             assert payload["speaker_id"] == "spk_aff_2"
             yield {"type": "delta", "task_id": payload["task_id"], "delta": "外部 Agent "}
@@ -1415,7 +1428,7 @@ def test_agent_gateway_failure_records_request_and_allows_manual_fallback(monkey
         def endpoint_for(self, speaker):
             return "http://broken-agent"
 
-        async def stream_speech(self, endpoint, payload, fallback_chunks):
+        async def stream_speech(self, endpoint, payload, fallback_chunks, *, config=None):
             assert endpoint == "http://broken-agent"
             assert payload["speaker_id"] == "spk_aff_2"
             if False:
@@ -1492,6 +1505,7 @@ def test_agent_speech_formal_tts_archives_audio(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
     monkeypatch.setattr("app.services.match_store.XfyunTTSGateway", FakeGateway)
+    _use_embedded_mock_agent("spk_aff_2")
 
     asyncio.run(store.run_agent_speech("spk_aff_2"))
 
@@ -1528,6 +1542,7 @@ def test_agent_speech_formal_tts_failure_keeps_text_transcript(monkeypatch) -> N
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
     monkeypatch.setattr("app.services.match_store.XfyunTTSGateway", FailingGateway)
+    _use_embedded_mock_agent("spk_aff_2")
 
     asyncio.run(store.run_agent_speech("spk_aff_2"))
 
@@ -1619,6 +1634,115 @@ def test_free_debate_turn_rejects_wrong_side_after_switch() -> None:
     right_side = client.post("/api/matches/match_001/speakers/spk_neg_2/start-speaking")
     assert right_side.status_code == 200
     assert right_side.json()["data"]["current_speech"]["speaker_id"] == "spk_neg_2"
+
+
+def test_multi_match_create_list_switch_delete() -> None:
+    base = client.get("/api/matches")
+    assert base.status_code == 200
+    assert any(m["id"] == "match_001" and m["active"] for m in base.json()["data"]["matches"])
+
+    created = client.post("/api/matches", json={"title": "测试场B", "topic": "话题B"})
+    assert created.status_code == 200
+    new_id = created.json()["data"]["match_id"]
+    assert new_id != "match_001"
+
+    listed = client.get("/api/matches").json()["data"]
+    assert listed["active_match_id"] == new_id
+    ids = {m["id"]: m for m in listed["matches"]}
+    assert ids[new_id]["active"] is True and ids[new_id]["title"] == "测试场B"
+    assert ids["match_001"]["active"] is False
+
+    switched = client.post("/api/matches/match_001/switch")
+    assert switched.status_code == 200
+    assert switched.json()["data"]["match"]["id"] == "match_001"
+
+    # deleting the active match is rejected; deleting an inactive one works
+    assert client.delete("/api/matches/match_001").status_code == 409
+    deleted = client.delete(f"/api/matches/{new_id}")
+    assert deleted.status_code == 200
+    assert all(m["id"] != new_id for m in deleted.json()["data"]["matches"])
+
+
+def test_integration_config_get_patch_toggle_and_redacts_secrets() -> None:
+    import os
+
+    saved = {k: os.environ.get(k) for k in ("XFYUN_ASR_URL", "XFYUN_TTS_URL", "XFYUN_API_KEY", "XFYUN_TTS_VOICE", "XFYUN_ASR_LANG")}
+    try:
+        base = client.get("/api/matches/match_001/integration-config")
+        assert base.status_code == 200
+        assert set(base.json()["data"].keys()) == {"asr", "tts"}
+
+        patched = client.patch(
+            "/api/matches/match_001/integration-config",
+            json={
+                "asr": {"enabled": False},
+                "tts": {"enabled": True, "endpoint": "wss://example/tts", "voice": "x6_lingxiaoxuan_pro", "secrets": {"api_key": "SECRET_K"}},
+            },
+        )
+        assert patched.status_code == 200
+        data = patched.json()["data"]
+        assert data["asr"]["enabled"] is False
+        assert data["tts"]["enabled"] is True
+        assert data["tts"]["endpoint"] == "wss://example/tts"
+        assert data["tts"]["voice"] == "x6_lingxiaoxuan_pro"
+        assert data["tts"]["secrets"]["api_key"] == {"configured": True, "redacted": "********"}
+        assert "SECRET_K" not in json.dumps(data)  # never echo plaintext
+
+        # disabled ASR clears the env URL so the gateway degrades
+        assert os.environ.get("XFYUN_ASR_URL") == ""
+        assert os.environ.get("XFYUN_TTS_URL") == "wss://example/tts"
+
+        snap = client.get("/api/matches/match_001").json()["data"]
+        assert snap["integration_config"]["tts"]["enabled"] is True
+    finally:
+        from app.services.integration_config import integration_config
+
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        integration_config.config = integration_config._seed_from_env()
+        integration_config._apply_to_env()
+
+
+def test_free_debate_single_turn_defaults_to_30_seconds(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    asyncio.run(store.start_phase("phase_free_debate"))
+    snapshot = client.get("/api/matches/match_001").json()["data"]
+    turn_clock = next(clock for clock in snapshot["clocks"] if clock["name"] == "turn")
+    assert turn_clock["total_seconds"] == 30
+
+
+def test_free_debate_all_skip_triggers_random_agent(monkeypatch) -> None:
+    # Keep the decision timer from firing so we isolate the all-skip path.
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    _use_embedded_mock_agent("spk_aff_2")
+    _use_embedded_mock_agent("spk_aff_4")
+
+    async def scenario():
+        await store.record_free_debate_skip("spk_aff_1")
+        return await store.record_free_debate_skip("spk_aff_3")
+
+    snapshot = asyncio.run(scenario())
+    auto_handled = snapshot["free_debate"].get("auto_handled", {})
+    assert auto_handled, "all-skip should mark the turn auto-handled"
+    assert any(value in {"spk_aff_2", "spk_aff_4"} for value in auto_handled.values())
+
+
+def test_free_debate_decision_timeout_triggers_agent(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "0.05")
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    _use_embedded_mock_agent("spk_aff_2")
+    _use_embedded_mock_agent("spk_aff_4")
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")  # arms 0.05s decision timer for affirmative turn 1
+        await asyncio.sleep(2.0)  # allow timer to fire and the embedded mock agent to finish
+
+    asyncio.run(scenario())
+    summary = client.get("/api/matches/match_001/data-summary").json()["data"]
+    assert summary["event_type_counts"].get("free_debate.auto_agent", 0) >= 1
 
 
 def test_agent_retry_rejects_invalid_phase_speaker() -> None:
@@ -2325,3 +2449,4 @@ def test_tts_failure_marks_text_only_degradation_for_agent_speech() -> None:
     assert data["speech_service"]["tts"]["status"] == "failed"
     assert data["speech_service"]["tts"]["speaker_id"] == "spk_aff_2"
     assert data["speech_service"]["tts"]["degraded_to"] == "text_only"
+

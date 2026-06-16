@@ -1,4 +1,4 @@
-import { AdminPage } from "./pages/AdminPage";
+import { AdminApp } from "./admin/AdminApp";
 import { FeedbackProvider } from "./components/Feedback";
 import { ConsolePage } from "./pages/ConsolePage";
 import { HostPage } from "./pages/HostPage";
@@ -12,7 +12,7 @@ export function App() {
   const matchId = routeMatchId(path, params);
 
   let page;
-  if (path.startsWith("/admin")) page = <AdminPage matchId={matchId} />;
+  if (path.startsWith("/admin")) return <AdminApp matchId={matchId} />;
   else if (path.startsWith("/host")) page = <HostPage matchId={matchId} />;
   else if (path.startsWith("/screen")) page = <ScreenPage matchId={matchId} />;
   else if (path.startsWith("/console")) {

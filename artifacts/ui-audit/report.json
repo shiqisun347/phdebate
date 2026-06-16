@@ -1,0 +1,790 @@
+{
+  "generated_at": "2026-06-16T12:29:55.981Z",
+  "frontend_url": "http://127.0.0.1:8000",
+  "checks": [
+    {
+      "route": "nav",
+      "path": "/",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-nav.png"
+    },
+    {
+      "route": "host",
+      "path": "/host",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1348,
+        "offenders": []
+      },
+      "screenshot": "1366x768-host.png"
+    },
+    {
+      "route": "host_timeout",
+      "path": "/host",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1367,
+        "offenders": []
+      },
+      "screenshot": "1366x768-host_timeout.png"
+    },
+    {
+      "route": "admin",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1673,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin.png"
+    },
+    {
+      "route": "admin_matches",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1258,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_matches.png"
+    },
+    {
+      "route": "admin_setup",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1006,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_setup.png"
+    },
+    {
+      "route": "admin_speakers",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1653,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_speakers.png"
+    },
+    {
+      "route": "admin_agents",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 2042,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_agents.png"
+    },
+    {
+      "route": "admin_agent_create",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 2042,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_agent_create.png"
+    },
+    {
+      "route": "admin_speech",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_speech.png"
+    },
+    {
+      "route": "admin_data",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1591,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_data.png"
+    },
+    {
+      "route": "admin_data_detail",
+      "path": "/admin",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 1591,
+        "offenders": []
+      },
+      "screenshot": "1366x768-admin_data_detail.png"
+    },
+    {
+      "route": "screen",
+      "path": "/screen",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-screen.png"
+    },
+    {
+      "route": "screen_paused",
+      "path": "/screen",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-screen_paused.png"
+    },
+    {
+      "route": "screen_commentary",
+      "path": "/screen",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-screen_commentary.png"
+    },
+    {
+      "route": "screen_judge_result",
+      "path": "/screen",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-screen_judge_result.png"
+    },
+    {
+      "route": "screen_audience_result",
+      "path": "/screen",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-screen_audience_result.png"
+    },
+    {
+      "route": "console",
+      "path": "/console",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-console.png"
+    },
+    {
+      "route": "console_human_ready",
+      "path": "/console/spk_aff_3",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 916,
+        "offenders": []
+      },
+      "screenshot": "1366x768-console_human_ready.png"
+    },
+    {
+      "route": "console_agent_ready",
+      "path": "/console/spk_aff_2",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-console_agent_ready.png"
+    },
+    {
+      "route": "vote",
+      "path": "/vote",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-vote.png"
+    },
+    {
+      "route": "vote_paused",
+      "path": "/vote",
+      "viewport": "1366x768",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1366,
+        "viewportHeight": 768,
+        "scrollWidth": 1366,
+        "scrollHeight": 768,
+        "offenders": []
+      },
+      "screenshot": "1366x768-vote_paused.png"
+    },
+    {
+      "route": "host",
+      "path": "/host",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 1348,
+        "offenders": []
+      },
+      "screenshot": "1440x900-host.png"
+    },
+    {
+      "route": "admin",
+      "path": "/admin",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 1673,
+        "offenders": []
+      },
+      "screenshot": "1440x900-admin.png"
+    },
+    {
+      "route": "admin_matches",
+      "path": "/admin",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 1258,
+        "offenders": []
+      },
+      "screenshot": "1440x900-admin_matches.png"
+    },
+    {
+      "route": "admin_setup",
+      "path": "/admin",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 1006,
+        "offenders": []
+      },
+      "screenshot": "1440x900-admin_setup.png"
+    },
+    {
+      "route": "admin_speakers",
+      "path": "/admin",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 1653,
+        "offenders": []
+      },
+      "screenshot": "1440x900-admin_speakers.png"
+    },
+    {
+      "route": "admin_agents",
+      "path": "/admin",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 2042,
+        "offenders": []
+      },
+      "screenshot": "1440x900-admin_agents.png"
+    },
+    {
+      "route": "admin_data",
+      "path": "/admin",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 1591,
+        "offenders": []
+      },
+      "screenshot": "1440x900-admin_data.png"
+    },
+    {
+      "route": "screen",
+      "path": "/screen",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "offenders": []
+      },
+      "screenshot": "1440x900-screen.png"
+    },
+    {
+      "route": "screen_commentary",
+      "path": "/screen",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "offenders": []
+      },
+      "screenshot": "1440x900-screen_commentary.png"
+    },
+    {
+      "route": "screen_judge_result",
+      "path": "/screen",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "offenders": []
+      },
+      "screenshot": "1440x900-screen_judge_result.png"
+    },
+    {
+      "route": "screen_audience_result",
+      "path": "/screen",
+      "viewport": "1440x900",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1440,
+        "viewportHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "offenders": []
+      },
+      "screenshot": "1440x900-screen_audience_result.png"
+    },
+    {
+      "route": "screen",
+      "path": "/screen",
+      "viewport": "1920x1080",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1920,
+        "viewportHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 1080,
+        "offenders": []
+      },
+      "screenshot": "1920x1080-screen.png"
+    },
+    {
+      "route": "screen_paused",
+      "path": "/screen",
+      "viewport": "1920x1080",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1920,
+        "viewportHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 1080,
+        "offenders": []
+      },
+      "screenshot": "1920x1080-screen_paused.png"
+    },
+    {
+      "route": "screen_commentary",
+      "path": "/screen",
+      "viewport": "1920x1080",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1920,
+        "viewportHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 1080,
+        "offenders": []
+      },
+      "screenshot": "1920x1080-screen_commentary.png"
+    },
+    {
+      "route": "screen_judge_result",
+      "path": "/screen",
+      "viewport": "1920x1080",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1920,
+        "viewportHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 1080,
+        "offenders": []
+      },
+      "screenshot": "1920x1080-screen_judge_result.png"
+    },
+    {
+      "route": "screen_audience_result",
+      "path": "/screen",
+      "viewport": "1920x1080",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 1920,
+        "viewportHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 1080,
+        "offenders": []
+      },
+      "screenshot": "1920x1080-screen_audience_result.png"
+    },
+    {
+      "route": "nav",
+      "path": "/",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 1066,
+        "offenders": []
+      },
+      "screenshot": "390x844-nav.png"
+    },
+    {
+      "route": "admin",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3729,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin.png"
+    },
+    {
+      "route": "admin_matches",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 2697,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_matches.png"
+    },
+    {
+      "route": "admin_setup",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3267,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_setup.png"
+    },
+    {
+      "route": "admin_speakers",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3585,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_speakers.png"
+    },
+    {
+      "route": "admin_agents",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3218,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_agents.png"
+    },
+    {
+      "route": "admin_agent_create",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3218,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_agent_create.png"
+    },
+    {
+      "route": "admin_data",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3372,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_data.png"
+    },
+    {
+      "route": "admin_data_detail",
+      "path": "/admin",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 3372,
+        "offenders": []
+      },
+      "screenshot": "390x844-admin_data_detail.png"
+    },
+    {
+      "route": "console",
+      "path": "/console",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 1457,
+        "offenders": []
+      },
+      "screenshot": "390x844-console.png"
+    },
+    {
+      "route": "console_human_ready",
+      "path": "/console/spk_aff_3",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 1509,
+        "offenders": []
+      },
+      "screenshot": "390x844-console_human_ready.png"
+    },
+    {
+      "route": "console_agent_ready",
+      "path": "/console/spk_aff_2",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 1445,
+        "offenders": []
+      },
+      "screenshot": "390x844-console_agent_ready.png"
+    },
+    {
+      "route": "vote",
+      "path": "/vote",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 844,
+        "offenders": []
+      },
+      "screenshot": "390x844-vote.png"
+    },
+    {
+      "route": "vote_paused",
+      "path": "/vote",
+      "viewport": "390x844",
+      "status": "ok",
+      "issues": [],
+      "metrics": {
+        "viewportWidth": 390,
+        "viewportHeight": 844,
+        "scrollWidth": 390,
+        "scrollHeight": 844,
+        "offenders": []
+      },
+      "screenshot": "390x844-vote_paused.png"
+    }
+  ],
+  "summary": {
+    "total": 52,
+    "failed": 0
+  }
+}

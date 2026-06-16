@@ -1,0 +1,112 @@
+@tailwind base;
+@tailwind components;
+
+/*
+ * Legacy `styles.css` (loaded in the same bundle) sets global element rules
+ * — e.g. `button { background:#20252d; color:#eef2f7 }`, `:root{color-scheme:dark}` —
+ * that bleed into the admin page. We neutralise them with `:where()`-scoped
+ * resets: `.admin-shell :where(button)` has specificity (0,1,0) — high enough to
+ * beat legacy element selectors (0,0,1), but EQUAL to Tailwind utilities, so any
+ * utility that comes later in the cascade (below `@tailwind utilities`) still wins.
+ * These MUST sit above `@tailwind utilities`.
+ */
+.admin-shell :where(button) {
+  background-color: transparent;
+  background-image: none;
+  color: inherit;
+  border: 0 solid hsl(var(--border));
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+  border-radius: 0;
+  font: inherit;
+  line-height: inherit;
+  box-shadow: none;
+}
+.admin-shell :where(input, textarea, select) {
+  background-color: transparent;
+  color: inherit;
+  border: 0 solid hsl(var(--input));
+  font: inherit;
+}
+.admin-shell :where(a) {
+  color: inherit;
+  text-decoration: none;
+}
+.admin-shell :where(h1, h2, h3, h4, h5, h6, p, figure, ul, ol) {
+  margin: 0;
+  padding: 0;
+}
+.admin-shell :where(ul, ol) {
+  list-style: none;
+}
+.admin-shell :where(svg) {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+@tailwind utilities;
+
+/*
+ * Single unified dark theme — shadcn/ui "slate + blue" dark palette (the
+ * canonical mature palette, not custom-invented). Card/popover are lifted a
+ * touch above the page background so panels read clearly; blue primary keeps
+ * every interactive control visible against the dark surface.
+ */
+.admin-shell {
+  --background: 222 47% 7%;
+  --foreground: 210 40% 98%;
+  --card: 222 40% 11%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222 40% 11%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 217 91% 60%;
+  --primary-foreground: 222 47% 11%;
+  --secondary: 217 33% 18%;
+  --secondary-foreground: 210 40% 96%;
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 217 33% 22%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 210 40% 98%;
+  --success: 142 71% 45%;
+  --success-foreground: 222 47% 11%;
+  --warning: 38 92% 50%;
+  --warning-foreground: 222 47% 11%;
+  --border: 217 33% 20%;
+  --input: 217 33% 24%;
+  --ring: 217 91% 60%;
+  --sidebar: 222 47% 5%;
+  --sidebar-foreground: 210 40% 92%;
+  --sidebar-accent: 217 91% 60%;
+  --sidebar-border: 217 33% 16%;
+  --radius: 0.6rem;
+
+  color-scheme: dark;
+  box-sizing: border-box;
+  font-family: theme("fontFamily.sans");
+  -webkit-font-smoothing: antialiased;
+  color: hsl(var(--foreground));
+  background-color: hsl(var(--background));
+  line-height: 1.5;
+}
+.admin-shell *,
+.admin-shell *::before,
+.admin-shell *::after {
+  box-sizing: border-box;
+}
+
+.admin-shell ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.admin-shell ::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.35);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.admin-shell ::-webkit-scrollbar-track {
+  background: transparent;
+}

@@ -1,4 +1,4 @@
-import type { ApiResponse, ASRArchiveRecognitionResult, ASRProbeResult, AuditLog, AudienceVotePayload, CurrentMatchSummary, DataSummary, ExportBundle, MatchSnapshot, PreflightReport, RuntimeAuthStatus, SpeechDiagnostics, TTSProbeResult, VoteOptions } from "../types/contracts";
+import type { AgentConfigTestResult, ApiResponse, ASRArchiveRecognitionResult, ASRProbeResult, AuditLog, AudienceVotePayload, CurrentMatchSummary, DataSummary, ExportBundle, GeneratedFlow, IntegrationConfig, MatchList, MatchSnapshot, PreflightReport, RequestLogs, Ruleset, RulesetList, RuntimeAuthStatus, SpeechDiagnostics, TTSProbeResult, VoteOptions, XiaoqiCommandResult, XiaoqiConfig } from "../types/contracts";
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
@@ -83,6 +83,30 @@ export function getSpeechDiagnostics(matchId: string): Promise<SpeechDiagnostics
   return request<SpeechDiagnostics>(`/api/matches/${matchId}/speech/diagnostics`);
 }
 
+export function listMatches(): Promise<MatchList> {
+  return request<MatchList>(`/api/matches`);
+}
+
+export function createMatch(body: { title?: string; topic?: string }): Promise<{ match_id: string; status: string }> {
+  return post<{ match_id: string; status: string }>(`/api/matches`, body);
+}
+
+export function switchMatch(matchId: string): Promise<MatchSnapshot> {
+  return post<MatchSnapshot>(`/api/matches/${matchId}/switch`, {});
+}
+
+export function deleteMatch(matchId: string): Promise<MatchList> {
+  return remove<MatchList>(`/api/matches/${matchId}`);
+}
+
+export function getIntegrationConfig(matchId: string): Promise<IntegrationConfig> {
+  return request<IntegrationConfig>(`/api/matches/${matchId}/integration-config`);
+}
+
+export function patchIntegrationConfig(matchId: string, body: Partial<Record<"asr" | "tts", unknown>>): Promise<IntegrationConfig> {
+  return patch<IntegrationConfig>(`/api/matches/${matchId}/integration-config`, body);
+}
+
 export function getPreflightReport(matchId: string): Promise<PreflightReport> {
   return request<PreflightReport>(`/api/matches/${matchId}/preflight-report`);
 }
@@ -91,8 +115,47 @@ export function probeTts(matchId: string, text = "人机辩论赛语音合成自
   return post<TTSProbeResult>(`/api/matches/${matchId}/speech/tts/probe`, { text });
 }
 
-export function probeAsr(matchId: string): Promise<ASRProbeResult> {
-  return post<ASRProbeResult>(`/api/matches/${matchId}/speech/asr/probe`, {});
+export function probeAsr(
+  matchId: string,
+  audioBase64?: string,
+  format = "audio/L16;rate=16000"
+): Promise<ASRProbeResult> {
+  return post<ASRProbeResult>(
+    `/api/matches/${matchId}/speech/asr/probe`,
+    audioBase64 ? { audio_base64: audioBase64, format, encoding: "raw" } : {}
+  );
+}
+
+export function testAgentConfig(
+  matchId: string,
+  configId: string,
+  payload?: Record<string, unknown>
+): Promise<AgentConfigTestResult> {
+  return post<AgentConfigTestResult>(
+    `/api/matches/${matchId}/agents/configs/${configId}/test`,
+    payload ? { payload } : {}
+  );
+}
+
+export function testAgentConfigInline(
+  matchId: string,
+  config: Record<string, unknown>,
+  payload?: Record<string, unknown>
+): Promise<AgentConfigTestResult> {
+  return post<AgentConfigTestResult>(`/api/matches/${matchId}/agents/configs/test-inline`, { config, payload });
+}
+
+export function getRequestLogs(matchId: string, limit = 200): Promise<RequestLogs> {
+  return request<RequestLogs>(`/api/matches/${matchId}/logs?limit=${limit}`);
+}
+
+export function clearRequestLogs(matchId: string): Promise<RequestLogs> {
+  return remove<RequestLogs>(`/api/matches/${matchId}/logs`);
+}
+
+export function testWsUrl(kind: "asr" | "tts", matchId: string): string {
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}/ws/${kind}-test/${matchId}`;
 }
 
 export function recognizeArchivedSpeech(matchId: string, speechId: string): Promise<ASRArchiveRecognitionResult> {
@@ -101,6 +164,42 @@ export function recognizeArchivedSpeech(matchId: string, speechId: string): Prom
 
 export function createExportBundle(matchId: string): Promise<ExportBundle> {
   return post<ExportBundle>(`/api/matches/${matchId}/exports`);
+}
+
+export function listRulesets(): Promise<RulesetList> {
+  return request<RulesetList>("/api/admin/rulesets");
+}
+
+export function createRuleset(body: Partial<Ruleset>): Promise<Ruleset> {
+  return post<Ruleset>("/api/admin/rulesets", body);
+}
+
+export function updateRuleset(id: string, body: Partial<Ruleset>): Promise<Ruleset> {
+  return patch<Ruleset>(`/api/admin/rulesets/${id}`, body);
+}
+
+export function deleteRuleset(id: string): Promise<{ rulesets: Ruleset[] }> {
+  return remove<{ rulesets: Ruleset[] }>(`/api/admin/rulesets/${id}`);
+}
+
+export function generateRulesetFlow(template: string, useAi = true): Promise<GeneratedFlow> {
+  return post<GeneratedFlow>("/api/admin/rulesets/generate-flow", { template, use_ai: useAi });
+}
+
+export function getXiaoqi(): Promise<XiaoqiConfig> {
+  return request<XiaoqiConfig>("/api/admin/xiaoqi");
+}
+
+export function updateXiaoqi(body: Partial<XiaoqiConfig>): Promise<XiaoqiConfig> {
+  return put<XiaoqiConfig>("/api/admin/xiaoqi", body);
+}
+
+export function sendXiaoqiCommand(body: {
+  command: string;
+  question?: string;
+  context?: Record<string, unknown>;
+}): Promise<XiaoqiCommandResult> {
+  return post<XiaoqiCommandResult>("/api/admin/xiaoqi/command", body);
 }
 
 export function getRuntimeAuthStatus(): Promise<RuntimeAuthStatus> {

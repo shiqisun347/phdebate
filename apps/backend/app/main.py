@@ -6,7 +6,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
+# Load project-root .env (if present) before any service reads os.environ, so local
+# dev picks up DASHSCOPE_API_KEY / XFYUN_* keys without exporting them manually.
+# Already-set environment variables (e.g. systemd Environment=) take precedence.
+# Skipped under pytest so the test environment stays hermetic.
+import sys as _sys
+
+if "pytest" not in _sys.modules:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
+    except ImportError:
+        pass
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +40,8 @@ from app.auth import (
 from app.services.match_store import MatchStateError, store
 from app.services.preflight_report import build_preflight_report
 from app.services.speech_diagnostics import build_speech_diagnostics
+from app.services.ruleset_store import ruleset_store, generate_flow, FLOW_TEMPLATE
+from app.services.xiaoqi_store import xiaoqi_store, COMMANDS as XIAOQI_COMMANDS
 
 
 _timer_task: Optional[asyncio.Task] = None
@@ -136,13 +152,25 @@ async def reset_current_match(match_id: str, body: Dict[str, Any], _principal: P
     return {"ok": True, "data": data}
 
 
+@app.get("/api/matches")
+async def list_matches(_principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    return {"ok": True, "data": await store.list_matches()}
+
+
 @app.post("/api/matches")
-async def create_match(body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
-    store.reset_demo()
-    await store.update_match(body)
-    snapshot = await store.get_snapshot()
-    await store.emit("match.created", {"match_id": snapshot["match"]["id"]}, "admin")
+async def create_match(body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    snapshot = await store.create_match(body or {})
     return {"ok": True, "data": {"match_id": snapshot["match"]["id"], "status": snapshot["match"]["status"]}}
+
+
+@app.post("/api/matches/{match_id}/switch")
+async def switch_match(match_id: str, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    return {"ok": True, "data": await store.switch_match(match_id)}
+
+
+@app.delete("/api/matches/{match_id}")
+async def delete_match(match_id: str, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    return {"ok": True, "data": await store.delete_match(match_id)}
 
 
 @app.get("/api/matches/{match_id}")
@@ -258,6 +286,73 @@ async def put_security_auth(body: Dict[str, Any], principal: Principal = Depends
         principal.actor_id,
     )
     return {"ok": True, "data": status}
+
+
+# ---------------------------------------------------------------------------
+# 赛制规则管理（全局）
+# ---------------------------------------------------------------------------
+@app.get("/api/admin/rulesets")
+async def list_rulesets(_principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    return {"ok": True, "data": {"rulesets": ruleset_store.list(), "flow_template": FLOW_TEMPLATE}}
+
+
+@app.post("/api/admin/rulesets")
+async def create_ruleset(body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return {"ok": True, "data": ruleset_store.create(body or {})}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.patch("/api/admin/rulesets/{ruleset_id}")
+async def update_ruleset(ruleset_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return {"ok": True, "data": ruleset_store.update(ruleset_id, body or {})}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ruleset not found")
+
+
+@app.delete("/api/admin/rulesets/{ruleset_id}")
+async def delete_ruleset(ruleset_id: str, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        ruleset_store.delete(ruleset_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ruleset not found")
+    return {"ok": True, "data": {"rulesets": ruleset_store.list()}}
+
+
+@app.post("/api/admin/rulesets/generate-flow")
+async def generate_ruleset_flow(body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    template = str((body or {}).get("template") or "")
+    use_ai = bool((body or {}).get("use_ai", True))
+    return {"ok": True, "data": generate_flow(template, use_ai=use_ai)}
+
+
+# ---------------------------------------------------------------------------
+# 小七管理（全局）
+# ---------------------------------------------------------------------------
+@app.get("/api/admin/xiaoqi")
+async def get_xiaoqi(_principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    return {"ok": True, "data": xiaoqi_store.public()}
+
+
+@app.put("/api/admin/xiaoqi")
+async def update_xiaoqi(body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    return {"ok": True, "data": xiaoqi_store.update(body or {})}
+
+
+@app.post("/api/admin/xiaoqi/command")
+async def send_xiaoqi_command(body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    command = str((body or {}).get("command") or "")
+    if command not in XIAOQI_COMMANDS:
+        raise HTTPException(status_code=400, detail=f"command must be one of {XIAOQI_COMMANDS}")
+    result = await xiaoqi_store.send(
+        command,
+        question=str((body or {}).get("question") or ""),
+        context=(body or {}).get("context") if isinstance((body or {}).get("context"), dict) else None,
+    )
+    await store.emit("xiaoqi.command_sent", {"command": command, "sent": result.get("sent", False)}, _principal.actor_type, _principal.actor_id)
+    return {"ok": True, "data": result}
 
 
 @app.post("/api/matches/{match_id}/exports")
@@ -584,6 +679,18 @@ async def tts_fail(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.get("/api/matches/{match_id}/integration-config")
+async def get_integration_config(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.get_integration_config()}
+
+
+@app.patch("/api/matches/{match_id}/integration-config")
+async def patch_integration_config(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.update_integration_config(body or {})}
+
+
 @app.get("/api/matches/{match_id}/speech/diagnostics")
 async def speech_diagnostics(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -720,6 +827,36 @@ async def delete_agent_config(match_id: str, agent_config_id: str, _principal: P
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.post("/api/matches/{match_id}/agents/configs/{agent_config_id}/test")
+async def test_agent_config(match_id: str, agent_config_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    custom = (body or {}).get("payload") if isinstance((body or {}).get("payload"), dict) else None
+    result = await store.test_agent_config(agent_config_id, custom)
+    return {"ok": True, "data": result}
+
+
+@app.post("/api/matches/{match_id}/agents/configs/test-inline")
+async def test_agent_config_inline(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    config = (body or {}).get("config") if isinstance((body or {}).get("config"), dict) else (body or {})
+    custom = (body or {}).get("payload") if isinstance((body or {}).get("payload"), dict) else None
+    result = await store.test_agent_config_inline(config, custom)
+    return {"ok": True, "data": result}
+
+
+@app.get("/api/matches/{match_id}/logs")
+async def get_request_logs(match_id: str, limit: int = 200, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": store.get_request_logs(limit)}
+
+
+@app.delete("/api/matches/{match_id}/logs")
+async def clear_request_logs(match_id: str, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    store.clear_request_logs()
+    return {"ok": True, "data": store.get_request_logs(50)}
+
+
 @app.post("/api/matches/{match_id}/agent/{speaker_id}/interrupt")
 async def interrupt_agent(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -795,6 +932,107 @@ async def match_ws(
     await store.websocket(websocket, last_seq=last_seq, channel=channel, speaker_id=speaker_id)
 
 
+@app.websocket("/ws/asr-test/{match_id}")
+async def asr_test_ws(websocket: WebSocket, match_id: str) -> None:
+    """流式 ASR 自检：浏览器持续推送 16k PCM 帧，服务端转发讯飞实时听写并回传 partial/final。"""
+    import os as _os
+    from app.services.xfyun_rtasr import select_asr_gateway
+
+    await websocket.accept()
+
+    async def emit(kind: str, **kw: Any) -> None:
+        try:
+            await websocket.send_json({"type": kind, **kw})
+        except Exception:
+            pass
+
+    url = _os.getenv("XFYUN_ASR_URL", "").strip()
+    if not url:
+        await emit("error", message="未配置 ASR 地址（XFYUN_ASR_URL），无法进行流式测试。")
+        await websocket.close()
+        return
+
+    gateway = select_asr_gateway(url)
+    try:
+        session = await gateway.open_stream(
+            on_partial=lambda text: emit("partial", text=text),
+            on_final=lambda text: emit("final", text=text),
+            on_error=lambda err: emit("error", message=str(err)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        await emit("error", message=f"无法建立 ASR 流：{exc}")
+        await websocket.close()
+        return
+
+    await emit("ready")
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            if msg.get("bytes") is not None:
+                await session.send_audio(msg["bytes"])
+            elif msg.get("text") == "end":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            result = await session.finish()
+            await emit("done", text=result.text, latency_ms=result.latency_ms, chunk_count=result.chunk_count)
+        except Exception as exc:  # noqa: BLE001
+            await emit("error", message=str(exc))
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/tts-test/{match_id}")
+async def tts_test_ws(websocket: WebSocket, match_id: str) -> None:
+    """流式 TTS 自检：合成时逐段把音频回传浏览器，便于边收边播。"""
+    import os as _os
+    from app.services.xfyun_gateway import XfyunTTSGateway
+
+    await websocket.accept()
+    try:
+        req = await websocket.receive_json()
+    except Exception:
+        await websocket.close()
+        return
+
+    text = str((req or {}).get("text") or "").strip()
+    url = _os.getenv("XFYUN_TTS_URL", "").strip()
+    if not url:
+        await websocket.send_json({"type": "error", "message": "未配置 TTS 地址（XFYUN_TTS_URL）。"})
+        await websocket.close()
+        return
+
+    gateway = XfyunTTSGateway(url=url)
+    try:
+        async for ev in gateway.synthesize_stream(text):
+            if ev["type"] == "chunk":
+                await websocket.send_json(
+                    {"type": "chunk", "index": ev["index"], "audio_base64": base64.b64encode(ev["audio"]).decode("ascii")}
+                )
+            else:
+                await websocket.send_json(
+                    {"type": "done", "mime_type": ev["mime_type"], "latency_ms": ev["latency_ms"], "chunk_count": ev["chunk_count"]}
+                )
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:  # noqa: BLE001
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 def _token_hashes_from_security_body(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(body.get("token_hashes"), dict):
         return body["token_hashes"]
@@ -862,7 +1100,9 @@ def _client_ip(request: Request) -> str:
 def _frontend_index() -> FileResponse:
     if not FRONTEND_INDEX.exists():
         raise HTTPException(status_code=404, detail="frontend dist not built")
-    return FileResponse(FRONTEND_INDEX)
+    # index.html must always revalidate so browsers pick up new content-hashed asset
+    # bundles after a deploy; the /assets/* files themselves are immutable by hash.
+    return FileResponse(FRONTEND_INDEX, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 if FRONTEND_ASSETS.exists():

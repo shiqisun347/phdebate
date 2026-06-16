@@ -172,7 +172,9 @@ export interface AgentConfig {
   id: string;
   name: string;
   provider_type: "rest_api" | "openai_sdk" | string;
+  request_method?: "GET" | "POST" | "PUT" | "PATCH" | string;
   model_name: string;
+  model_id?: string;
   model_kind: "open_source" | "closed_source" | string;
   endpoint: string;
   base_url: string;
@@ -345,8 +347,62 @@ export interface TTSProbeResult {
     chunk_count: number;
     latency_ms: number;
     file_path: string;
+    audio_base64?: string;
   };
   snapshot: MatchSnapshot;
+}
+
+export interface AgentConfigTestResult {
+  ok: boolean;
+  content?: string;
+  chunks?: number;
+  latency_ms?: number;
+  endpoint?: string;
+  model?: string;
+  error_code?: string;
+  error_message?: string;
+  details?: Record<string, unknown>;
+  request?: Record<string, unknown>;
+}
+
+export interface AgentRequestLog {
+  id: string;
+  task_id: string;
+  speech_id: string | null;
+  speaker_id: string;
+  endpoint: string;
+  status: string;
+  request: Record<string, unknown>;
+  response_text: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  latency_ms: number | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface SpeechServiceRequestLog {
+  id: string;
+  request_id: string;
+  service: string;
+  operation: string;
+  speech_id: string | null;
+  speaker_id: string | null;
+  status: string;
+  request: Record<string, unknown>;
+  response: Record<string, unknown>;
+  error_code: string | null;
+  error_message: string | null;
+  latency_ms: number | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface RequestLogs {
+  match_id: string;
+  agent_requests: AgentRequestLog[];
+  speech_service_requests: SpeechServiceRequestLog[];
+  audit_logs: AuditLog[];
 }
 
 export interface ASRProbeResult {
@@ -373,6 +429,58 @@ export interface ASRArchiveRecognitionResult {
   snapshot: MatchSnapshot;
 }
 
+export interface MatchListEntry {
+  id: string;
+  title?: string;
+  topic?: string;
+  status: string;
+  screen_scene?: string;
+  current_phase_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  active: boolean;
+}
+
+export interface MatchList {
+  matches: MatchListEntry[];
+  active_match_id: string;
+}
+
+export interface NextSpeaker {
+  phase_id: string;
+  phase_name: string;
+  phase_type: string;
+  speaker_id?: string;
+  speaker_name?: string;
+  speaker_type?: SpeakerType;
+  side?: Side;
+  seat?: number;
+  label: string;
+}
+
+export interface IntegrationSecretStatus {
+  configured: boolean;
+  redacted: string;
+}
+
+export interface IntegrationSection {
+  enabled: boolean;
+  provider: string;
+  endpoint: string;
+  lang?: string;
+  voice?: string;
+  secrets: {
+    app_id: IntegrationSecretStatus;
+    api_key: IntegrationSecretStatus;
+    api_secret: IntegrationSecretStatus;
+  };
+}
+
+export interface IntegrationConfig {
+  asr: IntegrationSection;
+  tts: IntegrationSection;
+}
+
 export interface MatchSnapshot {
   match: MatchInfo;
   teams: Team[];
@@ -380,10 +488,14 @@ export interface MatchSnapshot {
   phases: Phase[];
   clocks: Clock[];
   current_speech: Speech | null;
+  next_speaker: NextSpeaker | null;
+  integration_config: IntegrationConfig;
   free_debate: {
     current_turn_side: Side;
     turn_index: number;
     assignment_mode: string;
+    skip_votes?: Record<string, string[]>;
+    auto_handled?: Record<string, string>;
   };
   flow: FlowState;
   audio_output: AudioOutputState;
@@ -401,6 +513,63 @@ export interface MatchSnapshot {
     };
   };
   last_seq: number;
+}
+
+export interface RulesetFlowNode {
+  key: string;
+  name: string;
+  side: Side;
+  speaker: string;
+  duration_seconds: number;
+  phase_type: string;
+}
+
+export interface Ruleset {
+  id: string;
+  name: string;
+  summary: string;
+  template: string;
+  flow: RulesetFlowNode[];
+  other_info: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RulesetList {
+  rulesets: Ruleset[];
+  flow_template: string;
+}
+
+export interface GeneratedFlow {
+  nodes: RulesetFlowNode[];
+  warnings: string[];
+  mermaid: string;
+  ai_used: boolean;
+  normalized_template?: string;
+}
+
+export type XiaoqiCommand = "intro" | "commentary" | "result" | "custom";
+
+export interface XiaoqiConfig {
+  enabled: boolean;
+  name: string;
+  image_url: string;
+  endpoint: string;
+  request_method: string;
+  api_key_env: string;
+  timeout_ms: number;
+  prompts: Record<XiaoqiCommand, string>;
+  request_template: Record<string, unknown>;
+  api_key_configured?: boolean;
+  updated_at: string;
+}
+
+export interface XiaoqiCommandResult {
+  sent: boolean;
+  reason?: string;
+  status_code?: number;
+  response?: unknown;
+  payload: Record<string, unknown>;
 }
 
 export interface ApiResponse<T> {
