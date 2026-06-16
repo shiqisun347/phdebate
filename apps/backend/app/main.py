@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -14,17 +15,32 @@ from app.auth import (
     Principal,
     authorize_speaker_or_host,
     authorize_websocket,
+    hash_token,
     require_admin,
     require_host,
     require_read_access,
     require_speaker_or_host,
+    runtime_auth_status,
+    update_runtime_auth_config,
 )
 from app.services.match_store import MatchStateError, store
 from app.services.preflight_report import build_preflight_report
 from app.services.speech_diagnostics import build_speech_diagnostics
 
 
-app = FastAPI(title="Phdebate API", version="0.1.0")
+_timer_task: Optional[asyncio.Task] = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await start_timer_loop()
+    try:
+        yield
+    finally:
+        await stop_timer_loop()
+
+
+app = FastAPI(title="Phdebate API", version="0.1.0", lifespan=lifespan)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FRONTEND_DIST = PROJECT_ROOT / "apps" / "frontend" / "dist"
 FRONTEND_INDEX = FRONTEND_DIST / "index.html"
@@ -77,11 +93,47 @@ async def health() -> Dict[str, Any]:
     return {"ok": True, "service": "phdebate-api", "version": "0.1.0"}
 
 
+async def start_timer_loop() -> None:
+    global _timer_task
+    if _timer_task is None or _timer_task.done():
+        _timer_task = asyncio.create_task(_timer_loop())
+
+
+async def stop_timer_loop() -> None:
+    global _timer_task
+    if _timer_task is None:
+        return
+    _timer_task.cancel()
+    try:
+        await _timer_task
+    except asyncio.CancelledError:
+        pass
+    _timer_task = None
+
+
+async def _timer_loop() -> None:
+    while True:
+        try:
+            await store.tick_timers()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(0.35)
+
+
 @app.post("/api/demo/reset")
 async def reset_demo(_principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     store.reset_demo()
     await store.emit("match.updated", {"reason": "demo_reset"})
     return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/reset")
+async def reset_current_match(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    data = await store.reset_current_match(str(body.get("confirm_text", "")))
+    return {"ok": True, "data": data}
 
 
 @app.post("/api/matches")
@@ -95,17 +147,31 @@ async def create_match(body: Dict[str, Any], _principal: Principal = Depends(req
 
 @app.get("/api/matches/{match_id}")
 async def get_match(match_id: str, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
     snapshot = await store.get_snapshot()
-    if snapshot["match"]["id"] != match_id:
-        raise HTTPException(status_code=404, detail="match not found")
     return {"ok": True, "data": snapshot}
+
+
+@app.get("/api/current-match")
+async def get_current_match(_principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    snapshot = await store.get_snapshot()
+    return {
+        "ok": True,
+        "data": {
+            "id": snapshot["match"]["id"],
+            "title": snapshot["match"]["title"],
+            "topic": snapshot["match"]["topic"],
+            "status": snapshot["match"]["status"],
+            "screen_scene": snapshot["match"].get("screen_scene", "idle"),
+            "current_phase_id": snapshot["match"].get("current_phase_id"),
+        },
+    }
 
 
 @app.get("/api/public/matches/{match_id}/vote-options")
 async def get_public_vote_options(match_id: str) -> Dict[str, Any]:
+    await _ensure_match(match_id)
     snapshot = await store.get_snapshot()
-    if snapshot["match"]["id"] != match_id:
-        raise HTTPException(status_code=404, detail="match not found")
     return {
         "ok": True,
         "data": {
@@ -113,6 +179,7 @@ async def get_public_vote_options(match_id: str) -> Dict[str, Any]:
                 "id": snapshot["match"]["id"],
                 "title": snapshot["match"]["title"],
                 "topic": snapshot["match"]["topic"],
+                "status": snapshot["match"]["status"],
             },
             "teams": [
                 {
@@ -151,12 +218,46 @@ async def get_audit_logs(match_id: str, limit: int = 30, _principal: Principal =
     return {"ok": True, "data": {"items": await store.get_audit_logs(limit)}}
 
 
+@app.get("/api/matches/{match_id}/data-summary")
+async def get_data_summary(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.get_data_summary()}
+
+
 @app.get("/api/matches/{match_id}/preflight-report")
 async def get_preflight_report(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     snapshot = await store.get_snapshot()
     diagnostics = build_speech_diagnostics(store.audio_root_path())
     return {"ok": True, "data": build_preflight_report(snapshot, diagnostics)}
+
+
+@app.get("/api/admin/security/auth")
+async def get_security_auth(_principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    return {"ok": True, "data": runtime_auth_status()}
+
+
+@app.put("/api/admin/security/auth")
+async def put_security_auth(body: Dict[str, Any], principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    if "auth_required" not in body:
+        raise HTTPException(status_code=400, detail="auth_required is required")
+    token_hashes = _token_hashes_from_security_body(body)
+    status = update_runtime_auth_config(
+        bool(body.get("auth_required")),
+        token_hashes,
+        updated_by=principal.actor_id or principal.role,
+    )
+    await store.emit(
+        "security.auth_updated",
+        {
+            "auth_required": status["auth_required"],
+            "runtime_configured": status["runtime_configured"],
+            "reason": body.get("reason", "admin_security_update"),
+        },
+        principal.actor_type,
+        principal.actor_id,
+    )
+    return {"ok": True, "data": status}
 
 
 @app.post("/api/matches/{match_id}/exports")
@@ -167,8 +268,7 @@ async def create_export(match_id: str, _principal: Principal = Depends(require_h
 
 @app.get("/api/matches/{match_id}/exports/{export_id}/download")
 async def download_export(match_id: str, export_id: str, _principal: Principal = Depends(require_host)) -> FileResponse:
-    await _ensure_match(match_id)
-    path = await store.export_file_path(export_id)
+    path = await store.export_file_path(export_id, match_id)
     return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
@@ -193,6 +293,18 @@ async def update_speaker(match_id: str, speaker_id: str, body: Dict[str, Any], _
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.patch("/api/matches/{match_id}/speakers/{speaker_id}/profile")
+async def update_speaker_profile(match_id: str, speaker_id: str, body: Dict[str, Any], principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.update_speaker_profile(
+        speaker_id,
+        {"name": body.get("name", "")},
+        principal.actor_type,
+        principal.actor_id,
+    )
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
 @app.patch("/api/matches/{match_id}/phases/{phase_id}")
 async def update_phase(match_id: str, phase_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -202,6 +314,13 @@ async def update_phase(match_id: str, phase_id: str, body: Dict[str, Any], _prin
 
 @app.post("/api/matches/{match_id}/start")
 async def start_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.set_match_status("running")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/begin")
+async def begin_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.set_match_status("running")
     return {"ok": True, "data": await store.get_snapshot()}
@@ -228,8 +347,20 @@ async def finish_match(match_id: str, _principal: Principal = Depends(require_ho
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.put("/api/matches/{match_id}/audio-output")
+async def update_audio_output(match_id: str, body: Dict[str, Any], principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    actor_type = principal.actor_type if principal.actor_type in {"host", "admin"} else "host"
+    await store.set_audio_output(
+        str(body.get("mode", "host")),
+        str(body.get("reason", "manual")),
+        actor_type,
+    )
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
 @app.post("/api/matches/{match_id}/emergency-stop")
-async def emergency_stop(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+async def emergency_stop(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.set_match_status("intervention")
     await store.emit("match.emergency_stopped", {"reason": (body or {}).get("reason", "manual")}, "host")
@@ -247,18 +378,45 @@ async def set_screen_scene(match_id: str, body: Dict[str, Any], _principal: Prin
 async def start_phase(match_id: str, phase_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.start_phase(phase_id)
-    return {"ok": True, "data": await store.get_snapshot()}
+    snapshot = await store.get_snapshot()
+    phase = next((p for p in snapshot["phases"] if p["id"] == phase_id), None)
+    _auto_trigger_agent_speech_for_phase(phase, snapshot["speakers"])
+    return {"ok": True, "data": snapshot}
+
+
+@app.post("/api/matches/{match_id}/phases/next")
+async def start_next_phase(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    snapshot = await store.get_snapshot()
+    phases = sorted(snapshot["phases"], key=lambda item: item["display_order"])
+    current = next((item for item in phases if item["id"] == snapshot["match"]["current_phase_id"]), None)
+    if not current:
+        raise HTTPException(status_code=409, detail="current phase not found")
+    next_phase = next((item for item in phases if item["display_order"] > current["display_order"]), None)
+    if not next_phase:
+        await store.set_match_status("finished")
+        await store.emit("phase.next_started", {"phase_id": None, "finished": True}, "host")
+        return {"ok": True, "data": await store.get_snapshot()}
+    await store.start_phase(next_phase["id"])
+    await store.emit(
+        "phase.next_started",
+        {"phase_id": next_phase["id"], "previous_phase_id": current["id"], "name": next_phase["name"]},
+        "host",
+    )
+    snapshot = await store.get_snapshot()
+    _auto_trigger_agent_speech_for_phase(next_phase, snapshot["speakers"])
+    return {"ok": True, "data": snapshot}
 
 
 @app.post("/api/matches/{match_id}/phases/{phase_id}/skip")
-async def skip_phase(match_id: str, phase_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+async def skip_phase(match_id: str, phase_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.skip_phase(phase_id, (body or {}).get("reason", "manual_skip"))
     return {"ok": True, "data": await store.get_snapshot()}
 
 
 @app.post("/api/matches/{match_id}/phases/{phase_id}/rollback")
-async def rollback_phase(match_id: str, phase_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+async def rollback_phase(match_id: str, phase_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.rollback_phase(phase_id, (body or {}).get("reason", "manual_rollback"))
     return {"ok": True, "data": await store.get_snapshot()}
@@ -286,10 +444,18 @@ async def adjust_clock(match_id: str, clock_name: str, body: Dict[str, Any], _pr
 
 
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/activate")
-async def activate_speaker(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+async def activate_speaker(match_id: str, speaker_id: str, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.activate_speaker(speaker_id)
-    return {"ok": True, "data": await store.get_snapshot()}
+    snapshot = await store.get_snapshot()
+    activated = next((s for s in snapshot["speakers"] if s["id"] == speaker_id), None)
+    if activated and activated.get("speaker_type") == "agent":
+        try:
+            store.ensure_agent_speaker_for_current_phase(speaker_id)
+            asyncio.create_task(store.run_agent_speech(speaker_id))
+        except Exception:
+            pass
+    return {"ok": True, "data": snapshot}
 
 
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/start-speaking")
@@ -299,10 +465,90 @@ async def start_speaking(match_id: str, speaker_id: str, _principal: Principal =
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/start-agent-speaking")
+async def start_agent_speaking(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    store.ensure_agent_speaker_for_current_phase(speaker_id)
+    asyncio.create_task(store.run_agent_speech(speaker_id))
+    await store.emit("agent.speech.requested", {"speaker_id": speaker_id}, "speaker", speaker_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/free-debate-skip")
+async def free_debate_skip(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.record_free_debate_skip(speaker_id)}
+
+
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/stop-speaking")
 async def stop_speaking(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.stop_speaking(speaker_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/pause-speaking")
+async def pause_speaking(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.pause_speaking(speaker_id, (body or {}).get("reason", "manual"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/resume-speaking")
+async def resume_speaking(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.resume_speaking(speaker_id, (body or {}).get("reason", "manual"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speeches/current/stop")
+async def stop_current_speech(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    snapshot = await store.get_snapshot()
+    current = snapshot.get("current_speech")
+    if not current:
+        raise HTTPException(status_code=409, detail="no active speech")
+    speaker_id = current["speaker_id"]
+    await store.stop_speaking(speaker_id)
+    await store.emit(
+        "speech.force_stopped",
+        {"speaker_id": speaker_id, "reason": (body or {}).get("reason", "host_force_stop")},
+        "host",
+    )
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speeches/current/reset")
+async def reset_current_speech(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.reset_current_speech((body or {}).get("reason", "host_reset_current_speech"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/flow/confirm")
+async def confirm_flow(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.confirm_flow((body or {}).get("reason", "host_confirm"))
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/bell")
+async def trigger_bell(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    snapshot = await store.get_snapshot()
+    audio_output = snapshot.get("audio_output", {})
+    await store.emit(
+        "clock.bell_triggered",
+        {
+            "kind": payload.get("kind", "manual"),
+            "label": payload.get("label", "手动铃声"),
+            "duration_ms": int(payload.get("duration_ms", 800)),
+            "audio_output_mode": audio_output.get("mode", "host"),
+            "audio_output_label": audio_output.get("label", "主持导播台电脑"),
+        },
+        "host",
+    )
     return {"ok": True, "data": await store.get_snapshot()}
 
 
@@ -424,10 +670,11 @@ async def complete_speech_audio(match_id: str, speech_id: str, request: Request,
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/request-ai-teammate")
 async def request_ai_teammate(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
-    agent_id = body.get("agent_speaker_id") or speaker_id
-    await store.activate_speaker(agent_id)
-    asyncio.create_task(store.run_agent_speech(agent_id))
-    return {"ok": True, "data": await store.get_snapshot()}
+    raise MatchStateError(
+        "feature_deferred",
+        "自由辩论请求 AI 队友发言已暂缓；当前版本只允许赛制授权席位在对应辩手端自行开始发言。",
+        {"speaker_id": speaker_id, "agent_speaker_id": body.get("agent_speaker_id")},
+    )
 
 
 @app.post("/api/matches/{match_id}/agent/{speaker_id}/retry")
@@ -450,6 +697,27 @@ async def check_all_agent_health(match_id: str, _principal: Principal = Depends(
     await _ensure_match(match_id)
     results = await store.check_all_agent_health()
     return {"ok": True, "data": {"results": results, "snapshot": await store.get_snapshot()}}
+
+
+@app.post("/api/matches/{match_id}/agents/configs")
+async def create_agent_config(match_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.create_agent_config(body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.patch("/api/matches/{match_id}/agents/configs/{agent_config_id}")
+async def update_agent_config(match_id: str, agent_config_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.update_agent_config(agent_config_id, body)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.delete("/api/matches/{match_id}/agents/configs/{agent_config_id}")
+async def delete_agent_config(match_id: str, agent_config_id: str, _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    await store.delete_agent_config(agent_config_id)
+    return {"ok": True, "data": await store.get_snapshot()}
 
 
 @app.post("/api/matches/{match_id}/agent/{speaker_id}/interrupt")
@@ -481,7 +749,8 @@ async def submit_judge_votes(match_id: str, body: Dict[str, Any], _principal: Pr
 async def open_audience_votes(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.open_audience_votes()
-    return {"ok": True, "data": {"vote_url": f"/vote/{match_id}", "window_status": "open"}}
+    vote_url = "/vote" if match_id == "current" else f"/vote/{match_id}"
+    return {"ok": True, "data": {"vote_url": vote_url, "window_status": "open"}}
 
 
 @app.post("/api/matches/{match_id}/audience-votes/close")
@@ -499,9 +768,12 @@ async def publish_votes(match_id: str, body: Dict[str, Any], _principal: Princip
 
 
 @app.post("/api/public/matches/{match_id}/audience-votes")
-async def submit_audience_vote(match_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+async def submit_audience_vote(match_id: str, body: Dict[str, Any], request: Request) -> Dict[str, Any]:
     await _ensure_match(match_id)
-    await store.submit_vote(body, audience=True)
+    vote_body = dict(body)
+    vote_body["request_ip"] = _client_ip(request)
+    vote_body["request_user_agent"] = request.headers.get("user-agent", "")
+    await store.submit_vote(vote_body, audience=True)
     return {"ok": True, "data": {"received": True}}
 
 
@@ -513,16 +785,78 @@ async def match_ws(
     channel: str = "screen",
     speaker_id: Optional[str] = None,
 ) -> None:
+    snapshot = await store.get_snapshot()
+    if match_id not in {"current", snapshot["match"]["id"]}:
+        await websocket.close(code=1008)
+        return
     if authorize_websocket(websocket, channel, speaker_id) is None:
         await websocket.close(code=1008)
         return
     await store.websocket(websocket, last_seq=last_seq, channel=channel, speaker_id=speaker_id)
 
 
+def _token_hashes_from_security_body(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if isinstance(body.get("token_hashes"), dict):
+        return body["token_hashes"]
+    tokens = body.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+
+    def hash_values(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [hash_token(value.strip())] if value.strip() else []
+        if isinstance(value, list):
+            return [hash_token(str(item).strip()) for item in value if str(item).strip()]
+        return []
+
+    result: Dict[str, Any] = {}
+    for role in ("admin", "host", "screen", "speaker_shared"):
+        hashes = hash_values(tokens.get(role))
+        if hashes:
+            result[f"{role}_hashes"] = hashes
+    speaker_tokens = tokens.get("speakers")
+    if isinstance(speaker_tokens, dict):
+        speakers = {
+            str(speaker_id): hash_values(token)
+            for speaker_id, token in speaker_tokens.items()
+            if hash_values(token)
+        }
+        if speakers:
+            result["speaker_hashes"] = speakers
+    return result
+
+
+
+def _auto_trigger_agent_speech_for_phase(phase: Dict[str, Any], speakers: list) -> None:
+    """Fire-and-forget: if a single-speaker phase designates an AI speaker, auto-start their speech."""
+    if not phase or phase.get("phase_type") == "free_debate":
+        return
+    designated = next(
+        (s for s in speakers if s.get("side") == phase.get("side")
+         and s.get("seat") == phase.get("speaker_seat")
+         and s.get("speaker_type") == "agent"),
+        None,
+    )
+    if not designated:
+        return
+    try:
+        store.ensure_agent_speaker_for_current_phase(designated["id"])
+        asyncio.create_task(store.run_agent_speech(designated["id"]))
+    except Exception:
+        pass
+
+
 async def _ensure_match(match_id: str) -> None:
     snapshot = await store.get_snapshot()
-    if snapshot["match"]["id"] != match_id:
+    if match_id not in {"current", snapshot["match"]["id"]}:
         raise HTTPException(status_code=404, detail="match not found")
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else ""
 
 
 def _frontend_index() -> FileResponse:
@@ -547,6 +881,11 @@ async def frontend_screen() -> FileResponse:
 
 @app.get("/admin", include_in_schema=False)
 async def frontend_admin() -> FileResponse:
+    return _frontend_index()
+
+
+@app.get("/host", include_in_schema=False)
+async def frontend_host() -> FileResponse:
     return _frontend_index()
 
 

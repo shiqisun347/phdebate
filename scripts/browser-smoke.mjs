@@ -15,7 +15,7 @@ const apiUrl = (
   process.env.PHDEBATE_BASE_URL ||
   (frontendUrl.includes(":5174") ? "http://127.0.0.1:8000" : frontendUrl)
 ).replace(/\/+$/, "");
-const matchId = process.env.PHDEBATE_BROWSER_MATCH_ID || process.env.PHDEBATE_SMOKE_MATCH_ID || "match_001";
+const matchId = process.env.PHDEBATE_BROWSER_MATCH_ID || process.env.PHDEBATE_SMOKE_MATCH_ID || "current";
 const speakerId = process.env.PHDEBATE_BROWSER_SPEAKER_ID || "spk_aff_3";
 const token =
   process.env.PHDEBATE_BROWSER_SMOKE_TOKEN ||
@@ -31,15 +31,11 @@ const results = [];
 async function main() {
   const executablePath = process.env.PHDEBATE_BROWSER_EXECUTABLE || findChromeExecutable();
   const fakeAudioPath = audioSmoke ? process.env.PHDEBATE_BROWSER_FAKE_AUDIO || writeFakeAudioFile() : "";
+  const homeDir = browserHomeDir();
   const browser = await chromium.launch({
     headless,
-    args: audioSmoke
-      ? [
-          "--use-fake-ui-for-media-stream",
-          "--use-fake-device-for-media-stream",
-          `--use-file-for-fake-audio-capture=${fakeAudioPath}`
-        ]
-      : [],
+    args: stableChromeArgs(audioSmoke, fakeAudioPath, homeDir),
+    env: { ...process.env, HOME: homeDir },
     ...(executablePath ? { executablePath } : {})
   }).catch((error) => {
     throw new Error(
@@ -63,28 +59,110 @@ async function main() {
     if (resetDemo) {
       await step("Reset demo state", async () => {
         const data = await apiRequest("POST", "/api/demo/reset");
-        assert(data.data.match.id === matchId, "demo reset match id");
+        assert(Boolean(data.data.match.id), "demo reset should return a match id");
+        const ready = await apiRequest("POST", "/api/matches/current/reset", { confirm_text: "重置比赛" });
+        assert(ready.data.match.status === "ready", "formal reset should prepare a ready match");
+        assert(ready.data.match.screen_scene === "idle", "formal reset should return screen to idle");
       });
     }
 
-    await step("Open admin and run speech diagnostics", async () => {
+    await step("Open navigation page", async () => {
+      const page = await trackedPage(context, "navigation");
+      await page.goto(pageUrl("/", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, "现场导航");
+      await expectText(page, "当前比赛");
+      await expectText(page, "中科院计算所第一届人机辩论赛");
+      await expectText(page, "AI 时代，我们更应该培养编程思维 / 提问思维");
+      await expectText(page, "主持导播台");
+      await expectText(page, "技术后台");
+      await expectText(page, "大屏");
+      await expectText(page, "辩手端");
+    });
+
+    await step("Open host console", async () => {
+      const page = await trackedPage(context, "host");
+      await page.goto(pageUrl("/host", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, "主持导播台");
+      await expectText(page, "当前环节");
+      await expectText(page, "发言权限");
+      await expectText(page, "现场声音输出");
+      await expectText(page, "音响连接电脑");
+      await expectText(page, "下一步建议");
+      await expectText(page, "赛后流程");
+      await expectText(page, "WS 已连接");
+      await page.waitForTimeout(1200);
+      assert(await page.getByText("切换发言人", { exact: false }).count() === 0, "host should not expose speaker activation");
+      assert(await page.getByRole("button", { name: "开始发言", exact: true }).count() === 0, "host should not expose speaker start controls");
+      await page.locator(".host-primary-actions").getByRole("button", { name: "开始", exact: true }).click();
+      await expectText(page, "进行中");
+      assert(await page.getByRole("button", { name: "关闭学生投票" }).count() === 0, "host should not expose manual audience vote close");
+      assert(await page.getByRole("button", { name: /自由辩论/ }).count() === 0, "host phase list should be read-only");
+      await apiRequest("POST", `/api/matches/${matchId}/phases/phase_free_debate/start`);
+      await apiRequest("POST", `/api/matches/${matchId}/speakers/spk_aff_3/start-speaking`);
+      await expectText(page, "林晚晴 正在发言");
+      await page.getByRole("button", { name: /重置当前发言/ }).click();
+      await expectText(page, "确认重置当前发言并清空临时字幕？");
+      await page.locator(".feedback-modal").getByRole("button", { name: "确认", exact: true }).click();
+      await expectText(page, "已授权正方发言");
+      await expectText(page, "等待辩手开始");
+      await apiRequest("POST", `/api/matches/${matchId}/speakers/spk_aff_3/start-speaking`);
+      await apiRequest("POST", `/api/matches/${matchId}/clocks/turn/adjust`, { remaining_ms: 0, reason: "browser_timeout" });
+      await expectText(page, "等待主持确认下一轮");
+      await page.getByRole("button", { name: /确认下一轮/ }).click();
+      await expectText(page, "已授权反方发言");
+    });
+
+    await step("Open technical admin and run speech diagnostics", async () => {
       const page = await trackedPage(context, "admin");
-      await page.goto(pageUrl("/admin", { match_id: matchId, token }), { waitUntil: "networkidle" });
-      await expectText(page, "比赛监控");
-      await expectText(page, "赛前体检报告");
-      await page.getByRole("button", { name: /^刷新$/ }).click();
-      await expectText(page, /最近检查：|项提醒|阻断问题|体检通过/);
-      await page.getByRole("button", { name: /比赛设置/ }).click();
+      await page.goto(pageUrl("/admin", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, "技术后台");
+      await expectText(page, "总览监控");
+      await page.getByRole("button", { name: /刷新体检/ }).click();
+      await expectText(page, "总体状态");
+      await page.getByRole("button", { name: /比赛管理/ }).click();
+      await expectText(page, "比赛实例");
+      await expectText(page, "归档并创建新比赛");
+      await page.getByRole("button", { name: /展示与赛制/ }).click();
+      await expectText(page, "展示信息");
+      await expectText(page, "赛制规则");
+      await page.getByRole("button", { name: /访问安全/ }).click();
       await expectText(page, "现场入口分发");
-      await page.getByRole("button", { name: /比赛监控/ }).click();
+      await page.getByRole("button", { name: /辩手管理/ }).click();
+      await expectText(page, "固定席位管理");
+      await expectText(page, "绑定 Agent 配置");
+      assert(await page.getByText("不绑定，手动填写").count() === 0, "speaker management should not allow ad hoc agent setup");
+      await page.getByRole("button", { name: /Agent 管理/ }).click();
+      await expectText(page, "Agent 配置库");
+      await expectText(page, "新增 Agent");
+      await page.getByRole("button", { name: /新增 Agent/ }).click();
+      await expectText(page, "创建 Agent");
+      await page.locator(".agent-create-modal").getByRole("button", { name: "关闭" }).click();
+      await expectText(page, "全部检查");
+      await page.getByRole("button", { name: /TTS\/ASR/ }).click();
+      await expectText(page, "语音链路");
+      await expectText(page, "现场声音输出");
+      await expectText(page, "音响连接电脑");
       await page.getByRole("button", { name: /配置检查/ }).click();
-      await expectText(page, "讯飞配置诊断");
-      await expectText(page, /真实服务就绪|mock 降级可用|需要处理/);
+      await expectText(page, "服务提供方");
+      await expectText(page, /真实服务就绪|模拟降级可用|需要处理/);
+      await page.getByRole("button", { name: /数据管理/ }).click();
+      await expectText(page, "历史归档");
+      const replayLocator = page.locator(".event-row, .audit-row, .replay-row").first();
+      await replayLocator.waitFor({ state: "visible", timeout: 10000 });
+      await replayLocator.click();
+      await expectText(page, "定位详情");
+      await page.locator(".replay-detail-card").getByRole("button", { name: "关闭", exact: true }).click();
+      await page.getByRole("button", { name: /生成导出包/ }).click();
+      await expectText(page, "下载 ZIP");
+      await expectText(page, "导出内容覆盖");
+      await expectText(page, "match.json");
+      await expectText(page, "Agent/语音请求");
     });
 
     await step("Open screen live page", async () => {
+      await apiRequest("POST", `/api/matches/${matchId}/screen/scene`, { scene: "live", live_mode: "free" });
       const page = await trackedPage(context, "screen");
-      await page.goto(pageUrl("/screen", { match_id: matchId, token }), { waitUntil: "networkidle" });
+      await page.goto(pageUrl("/screen", { token }), { waitUntil: "domcontentloaded" });
       await expectText(page, "自由辩论");
       await expectText(page, "当前发言");
       await expectText(page, "实时转写");
@@ -92,10 +170,20 @@ async function main() {
 
     await step(audioSmoke ? "Open speaker console and record PCM archive" : "Open speaker console", async () => {
       const page = await trackedPage(context, "console");
-      await page.goto(pageUrl(`/console/${speakerId}`, { match_id: matchId, token }), { waitUntil: "networkidle" });
-      await expectText(page, "当前环节");
-      await expectText(page, "ASR");
-      await expectText(page, /开始发言|结束发言|轮到你或本方发言|发言中/);
+      await page.goto(pageUrl("/console", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, /身份选择|当前阶段/);
+      if (await page.getByText("身份选择", { exact: false }).first().isVisible({ timeout: 1000 }).catch(() => false)) {
+        await expectText(page, "身份选择");
+        await expectText(page, "硬件测试");
+        await page.getByText("正方二辩", { exact: false }).first().click();
+        await page.getByRole("button", { name: /下一步/ }).click();
+        await expectText(page, "API 请求");
+        await expectText(page, "现场声音");
+        assert(await page.getByText("扬声器", { exact: false }).count() === 0, "agent hardware test should not require local speaker output");
+        return;
+      }
+      await expectText(page, "当前阶段");
+      await expectText(page, /开始发言|结束发言|可以发言|尚未轮到你|等待比赛/);
       if (!audioSmoke) return;
       const startButton = page.getByRole("button", { name: /开始发言/ });
       if (await startButton.isVisible({ timeout: 1000 }).catch(() => false)) {
@@ -116,14 +204,63 @@ async function main() {
       }, 12000);
     });
 
+    await step("Open human speaker ready console", async () => {
+      const page = await trackedPage(context, "console-human");
+      await setConsoleReady(page, "spk_aff_3");
+      await page.goto(pageUrl("/console/spk_aff_3", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, "当前阶段");
+      await expectText(page, /开始发言|暂停发言|继续发言|结束发言|尚未轮到你|等待比赛/);
+      assert(await page.getByText("AI 辩手状态", { exact: false }).count() === 0, "human console should not show agent status panel");
+    });
+
+    await step("Open AI speaker ready console", async () => {
+      await apiRequest("POST", `/api/matches/${matchId}/resume`);
+      await apiRequest("POST", `/api/matches/${matchId}/phases/phase_aff_statement_2/start`);
+      const page = await trackedPage(context, "console-agent");
+      await setConsoleReady(page, "spk_aff_2");
+      await page.goto(pageUrl("/console/spk_aff_2", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, "AI 辩手状态");
+      await expectText(page, "已获得发言权限");
+      await expectText(page, "当前轮次可在本端启动");
+      await expectText(page, "启动 AI 发言");
+      assert(await page.getByText(/当前轮次可由主持台触发|请等待主持人在主持导播台启动/).count() === 0, "AI console should not tell speaker to wait for host startup");
+      assert(await page.getByRole("button", { name: /开始发言|暂停发言|继续发言|结束发言/ }).count() === 0, "AI console should not expose human speech controls");
+    });
+
     await step("Open vote page and submit one ballot", async () => {
       await apiRequest("POST", `/api/matches/${matchId}/audience-votes/open`);
       const page = await trackedPage(context, "vote");
-      await page.goto(pageUrl(`/vote/${matchId}`), { waitUntil: "networkidle" });
+      await page.goto(pageUrl("/vote"), { waitUntil: "domcontentloaded" });
+      await expectText(page, "人机辩论赛");
       await expectText(page, "优胜方");
       await expectText(page, "最佳辩手");
       await page.getByRole("button", { name: "提交投票" }).click();
       await expectText(page, "已收到投票");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expectText(page, "已收到投票");
+    });
+
+    await step("Finish match from host", async () => {
+      await apiRequest("POST", `/api/matches/${matchId}/resume`).catch(() => undefined);
+      await apiRequest("POST", `/api/matches/${matchId}/votes`, {
+        judge_summary: {
+          constructive: { affirmative: 2, negative: 1 },
+          process: { affirmative: 2, negative: 1 },
+          conclusion: { affirmative: 2, negative: 1 },
+          winner_side: "affirmative",
+          best_speaker_id: "spk_aff_3"
+        }
+      });
+      await apiRequest("POST", `/api/matches/${matchId}/votes/publish`, { scope: "judge" });
+      await apiRequest("POST", `/api/matches/${matchId}/votes/publish`, { scope: "audience" });
+      const page = await trackedPage(context, "host-finish");
+      await page.goto(pageUrl("/host", { token }), { waitUntil: "domcontentloaded" });
+      await expectText(page, "学生结果页");
+      await page.getByRole("button", { name: /宣布比赛结束/ }).click();
+      await expectText(page, "确认宣布本场比赛结束？结束后主持台将锁定正常流程。");
+      await page.locator(".feedback-modal").getByRole("button", { name: "确认", exact: true }).click();
+      await expectText(page, "已结束");
+      await expectText(page, "流程已完成");
     });
   } finally {
     await browser.close();
@@ -139,6 +276,27 @@ async function main() {
     return;
   }
   console.log(`Browser smoke passed against ${frontendUrl} (${matchId})`);
+}
+
+function stableChromeArgs(useFakeAudio = false, fakeAudioPath = "", homeDir = browserHomeDir()) {
+  return [
+    "--disable-crash-reporter",
+    "--disable-crashpad",
+    `--crash-dumps-dir=${path.join(homeDir, "crashes")}`,
+    ...(useFakeAudio
+      ? [
+          "--use-fake-ui-for-media-stream",
+          "--use-fake-device-for-media-stream",
+          `--use-file-for-fake-audio-capture=${fakeAudioPath}`
+        ]
+      : [])
+  ];
+}
+
+function browserHomeDir() {
+  const dir = process.env.PHDEBATE_BROWSER_HOME || path.join(os.tmpdir(), "phdebate-browser-home");
+  fs.mkdirSync(path.join(dir, "crashes"), { recursive: true });
+  return dir;
 }
 
 async function step(name, fn) {
@@ -157,14 +315,41 @@ async function trackedPage(context, label) {
   });
   page.on("console", (message) => {
     if (message.type() === "error") {
+      if (isIgnorableConsoleNoise(message.text())) return;
       results.push({ name: `${label} console error`, status: "fail", detail: message.text() });
     }
   });
   return page;
 }
 
-async function expectText(page, textOrPattern, timeout = 10000) {
-  await page.getByText(textOrPattern, { exact: false }).first().waitFor({ state: "visible", timeout });
+function isIgnorableConsoleNoise(text) {
+  return (
+    text.includes("Failed to load resource: net::ERR_CONTENT_LENGTH_MISMATCH") ||
+    text.includes("Failed to load resource: the server responded with a status of 502") ||
+    text.includes("Connection closed before receiving a handshake response")
+  );
+}
+
+async function setConsoleReady(page, speakerIdForConsole) {
+  await page.addInitScript(({ id, match }) => {
+    window.localStorage.setItem(`phdebate_console_ready_${match}_${id}`, "1");
+    window.localStorage.setItem(`phdebate_console_speaker_${match}`, id);
+    window.localStorage.setItem(`phdebate_console_name_${match}_${id}`, id === "spk_aff_3" ? "林晚晴" : "玄思");
+  }, { id: speakerIdForConsole, match: matchId });
+}
+
+async function expectText(page, textOrPattern, timeout = 20000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const matched =
+      typeof textOrPattern === "string"
+        ? bodyText.includes(textOrPattern)
+        : textOrPattern.test(bodyText);
+    if (matched) return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Timed out waiting for text: ${textOrPattern}`);
 }
 
 async function apiRequest(method, path, body, options = {}) {

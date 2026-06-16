@@ -138,6 +138,8 @@ PHDEBATE_TTS_FORMAL=
 
 管理端可调用 `GET /api/matches/{match_id}/speech/diagnostics` 检查当前进程是否已配置讯飞 ASR/TTS 环境变量、音频归档目录是否可写，以及当前是否只能使用 mock/人工降级链路。诊断结果不返回密钥明文。
 
+管理端结构化调试表单调用 `GET/PATCH /api/matches/{match_id}/integration-config` 管理 ASR/TTS/Agent 的非敏感接口模板。密钥字段只允许写入或清空，不从后端回显明文；完整输入输出约定见 [13-integration-io.md](13-integration-io.md)。
+
 后端讯飞适配层负责：
 
 - 使用 `XFYUN_API_KEY` 与 `XFYUN_API_SECRET` 生成 WebAPI WebSocket 握手 URL，签名算法为 `hmac-sha256`。

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -p 12201 -o StrictHostKeyChecking=no ubuntu@180.149.156.24 \"sed -n '326,400p' /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx\")",
+      "Bash(ssh -p 12201 -o StrictHostKeyChecking=no ubuntu@180.149.156.24 \"wc -l /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx && grep -n 'activeSection === .speakers.\\\\|activeSection === .agents.\\\\|agentCreateOpen &&\\\\|agentConfigDraftFromSnapshot\\\\|speakerDraftFromSnapshot\\\\|emptyAgentConfigDraft' /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx | head -20\")",
+      "Bash(ssh -p 12201 -o StrictHostKeyChecking=no ubuntu@180.149.156.24 \"sed -n '957,975p' /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx\")",
+      "Bash(ssh -p 12201 -o StrictHostKeyChecking=no ubuntu@180.149.156.24 \"sed -n '1050,1080p' /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx\")",
+      "Bash(ssh -p 12201 -o StrictHostKeyChecking=no ubuntu@180.149.156.24 \"sed -n '1033,1052p' /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx\")",
+      "Bash(ssh -p 12201 -o StrictHostKeyChecking=no ubuntu@180.149.156.24 \"sed -n '1293,1350p' /home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/AdminPage.tsx\")",
+      "Bash(ssh -p 12201 ubuntu@180.149.156.24 \"cat /home/ubuntu/sunsq/phdebate/.env 2>/dev/null || echo 'NO .env FILE'\")",
+      "Bash(ssh -p *)",
+      "Bash(scp -P 12201 ubuntu@180.149.156.24:/home/ubuntu/sunsq/phdebate/apps/backend/app/main.py /Users/sunshiqi/code/phdebate/apps/backend/app/main.py)",
+      "Bash(scp -P 12201 ubuntu@180.149.156.24:/home/ubuntu/sunsq/phdebate/apps/frontend/src/pages/ConsolePage.tsx /Users/sunshiqi/code/phdebate/apps/frontend/src/pages/ConsolePage.tsx)",
+      "Bash(npx tsc *)",
+      "Bash(/Users/sunshiqi/code/phdebate/.venv/bin/python -c \"import openai; print\\(openai.__version__\\)\")",
+      "Bash(npm run *)",
+      "Bash(rsync -avz --progress -e 'ssh -p 12201' /Users/sunshiqi/code/phdebate/apps/frontend/dist/ ubuntu@180.149.156.24:/home/ubuntu/sunsq/phdebate/apps/frontend/dist/)",
+      "Bash(rsync -avz -e 'ssh -p 12201' /Users/sunshiqi/code/phdebate/apps/backend/app/ ubuntu@180.149.156.24:/home/ubuntu/sunsq/phdebate/apps/backend/app/)",
+      "Bash(ssh -o ConnectTimeout=15 -p 12201 ubuntu@180.149.156.24 \"ps aux | grep uvicorn | grep 12292 | grep -v grep | head -3\")",
+      "Bash(ssh -o ConnectTimeout=15 -p 12201 ubuntu@180.149.156.24 \"curl -s http://localhost:12292/api/health 2>/dev/null | head -c 100 || echo 'backend not running'\")",
+      "Bash(ssh -o ConnectTimeout=15 -p 12201 ubuntu@180.149.156.24 ' *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/sunshiqi/code/phdebate/apps/backend/app/services/agent_gateway.py'\\).read\\(\\)\\); print\\('syntax ok'\\)\")"
+    ]
+  }
+}

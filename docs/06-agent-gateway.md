@@ -35,6 +35,18 @@
 
 ```json
 {
+  "model_name": "qwen3.6-plus",
+  "debater_name": "穷理",
+  "debate_position": "三辩",
+  "current_stage": "自由辩论",
+  "next_stage": "反方四辩总结",
+  "holder": "反方",
+  "debate_history": [
+    {
+      "stage": "正方一辩立论",
+      "message": [{ "speaker": "正方一辩 · 林晚晴", "content": "发言文本" }]
+    }
+  ],
   "match_id": "match_001",
   "task_id": "task_001",
   "topic": "AI 时代，我们更应该培养编程思维 / 提问思维",
@@ -61,6 +73,8 @@
   }
 }
 ```
+
+`model_name`、`debater_name`、`debate_position`、`current_stage`、`next_stage`、`holder`、`debate_history` 是正式 Agent 推荐消费字段；原有 `context.transcript_tail` 等字段继续作为兼容输入保留。
 
 非流式响应：
 

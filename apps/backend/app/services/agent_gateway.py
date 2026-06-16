@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, AsyncIterator, Dict, Iterable, Optional
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 import httpx
 
@@ -48,7 +48,16 @@ class AgentGateway:
         endpoint: str,
         payload: Dict[str, Any],
         fallback_chunks: Iterable[str],
+        *,
+        config: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
+        provider = (config or {}).get("provider_type", "rest_api")
+
+        if provider == "openai_sdk":
+            async for event in self._stream_openai_sdk_speech(config or {}, payload):
+                yield event
+            return
+
         if endpoint:
             async for event in self._stream_http_speech(endpoint, payload):
                 yield event
@@ -81,6 +90,93 @@ class AgentGateway:
                 return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise AgentGatewayError("agent_unavailable", "Agent 中断请求失败。", {"endpoint": endpoint, "error": str(exc)})
+
+    async def _stream_openai_sdk_speech(
+        self,
+        config: Dict[str, Any],
+        payload: Dict[str, Any],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise AgentGatewayError("openai_sdk_missing", "openai 包未安装，无法使用 OpenAI SDK 模式。", {"error": str(exc)})
+
+        base_url = config.get("base_url", "").strip()
+        api_key_env = config.get("api_key_env", "DASHSCOPE_API_KEY").strip()
+        api_key = os.getenv(api_key_env, "").strip()
+        model = config.get("model_name", "qwen3.6-plus").strip() or "qwen3.6-plus"
+
+        if not api_key:
+            raise AgentGatewayError(
+                "openai_sdk_no_key",
+                f"环境变量 {api_key_env} 未设置，无法调用 OpenAI SDK。",
+                {"api_key_env": api_key_env},
+            )
+
+        messages = self._build_openai_messages(payload)
+        task_id = payload.get("task_id", "")
+
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        try:
+            client = AsyncOpenAI(**client_kwargs)
+            content = ""
+            async with client.chat.completions.stream(
+                model=model,
+                messages=messages,
+                max_tokens=800,
+            ) as stream:
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        content += delta
+                        yield {"type": "delta", "task_id": task_id, "delta": delta}
+            yield {
+                "type": "final",
+                "task_id": task_id,
+                "content": content,
+                "usage": {"model": model, "latency_ms": 0},
+            }
+        except AgentGatewayError:
+            raise
+        except Exception as exc:
+            raise AgentGatewayError("openai_sdk_error", f"OpenAI SDK 调用失败：{exc}", {"model": model, "error": str(exc)})
+
+    def _build_openai_messages(self, payload: Dict[str, Any]) -> List[Dict[str, str]]:
+        topic = payload.get("debate_topic", "")
+        current_stage = payload.get("current_stage", "")
+        next_stage = payload.get("next_stage", "")
+        debater_name = payload.get("debater_name", "")
+        debate_position = payload.get("debate_position", "")
+        holder = payload.get("holder", "")
+        time_limit = payload.get("time_limit_seconds", 180)
+        target_chars = payload.get("target_chars", 400)
+        debate_history: list = payload.get("debate_history", [])
+
+        history_text = ""
+        for stage in debate_history:
+            stage_name = stage.get("stage", "")
+            history_text += f"\n【{stage_name}】\n"
+            for msg in stage.get("message", []):
+                history_text += f"  {msg.get('speaker', '')}: {msg.get('content', '')}\n"
+
+        system_prompt = (
+            f"你是辩论赛辩手【{debater_name}】，{holder}{debate_position}。"
+            f"辩题：{topic}。"
+            f"当前环节：{current_stage}，下一环节：{next_stage}。"
+            f"请用中文进行辩论发言，发言时间 {time_limit} 秒，目标 {target_chars} 字以内，"
+            "语言简洁有力，直接开始发言，不要有任何开场白或自我介绍。"
+        )
+
+        user_content = "以下是本场辩论的发言记录：\n" + (history_text.strip() or "（本场辩论刚刚开始，暂无发言记录）")
+        user_content += f"\n\n现在请你作为{holder}{debate_position}进行【{current_stage}】环节的发言。"
+
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
 
     async def _stream_http_speech(self, endpoint: str, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
         timeout = httpx.Timeout(self.connect_timeout_ms / 1000, read=self.read_timeout_ms / 1000)

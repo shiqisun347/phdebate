@@ -2,8 +2,9 @@ export type MatchStatus = "draft" | "ready" | "running" | "paused" | "interventi
 export type Side = "affirmative" | "negative" | "neutral";
 export type SpeakerType = "human" | "agent";
 export type ClockState = "idle" | "running" | "paused" | "expired" | "stopped";
-export type ScreenScene = "idle" | "opening" | "teams" | "live" | "intermission" | "result";
+export type ScreenScene = "idle" | "live" | "paused" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result";
 export type LiveMode = "single" | "free" | "prep";
+export type AudioOutputMode = "host" | "admin" | "screen" | "off";
 
 export interface MatchInfo {
   id: string;
@@ -16,6 +17,17 @@ export interface MatchInfo {
   status: MatchStatus;
   screen_scene: ScreenScene;
   live_mode: LiveMode;
+  current_phase_id: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CurrentMatchSummary {
+  id: string;
+  title: string;
+  topic: string;
+  status: MatchStatus;
+  screen_scene: ScreenScene;
   current_phase_id: string;
 }
 
@@ -37,6 +49,7 @@ export interface Speaker {
   model_name: string | null;
   model_kind: "open_source" | "closed_source" | null;
   status: string;
+  agent_config_id?: string | null;
   agent_endpoint?: string;
   mic_permission?: "granted" | "denied" | "prompt" | "unknown" | null;
   device_label?: string | null;
@@ -76,9 +89,12 @@ export interface Speech {
   side: Side;
   turn_index: number;
   source: "human_asr" | "agent_text" | "manual";
+  state?: "speaking" | "paused" | "ended" | string;
   content_final: string;
   content_partial?: string;
   started_at: string | null;
+  paused_at?: string | null;
+  ended_at?: string | null;
 }
 
 export interface TranscriptSegment {
@@ -133,8 +149,43 @@ export interface AudioAsset {
   completed_at?: string;
 }
 
+export interface FlowState {
+  awaiting_host_confirm: boolean;
+  reason: string | null;
+  message: string;
+  next_action: "free_turn_next" | "phase_next" | "judge_commentary" | string | null;
+  phase_id: string | null;
+  speech_id: string | null;
+  speaker_id: string | null;
+  expired_clocks: string[];
+  created_at: string | null;
+}
+
+export interface AudioOutputState {
+  mode: AudioOutputMode;
+  label: string;
+  updated_by?: string;
+  updated_at: string;
+}
+
+export interface AgentConfig {
+  id: string;
+  name: string;
+  provider_type: "rest_api" | "openai_sdk" | string;
+  model_name: string;
+  model_kind: "open_source" | "closed_source" | string;
+  endpoint: string;
+  base_url: string;
+  api_key_env: string;
+  timeout_ms: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AgentStatus {
   speaker_id: string;
+  agent_config_id?: string | null;
   name: string;
   model: string;
   status: "ready" | "streaming" | "failed" | string;
@@ -169,7 +220,7 @@ export interface VoteState {
 }
 
 export interface VoteOptions {
-  match: Pick<MatchInfo, "id" | "title" | "topic">;
+  match: Pick<MatchInfo, "id" | "title" | "topic" | "status">;
   teams: Array<Pick<Team, "id" | "side" | "name" | "position">>;
   speakers: Array<Pick<Speaker, "id" | "side" | "seat" | "name" | "speaker_type">>;
   vote_state: Pick<VoteState, "window_status" | "audience_count" | "judge_published" | "audience_published">;
@@ -334,9 +385,12 @@ export interface MatchSnapshot {
     turn_index: number;
     assignment_mode: string;
   };
+  flow: FlowState;
+  audio_output: AudioOutputState;
   recent_transcript: TranscriptSegment[];
   speech_revisions: SpeechRevision[];
   audio_assets: AudioAsset[];
+  agent_configs: AgentConfig[];
   agent_status: AgentStatus[];
   vote_state: VoteState;
   speech_service: SpeechServiceState;
@@ -390,4 +444,153 @@ export interface ExportBundle {
   size_bytes: number;
   entries: ExportEntry[];
   created_at: string;
+}
+
+export interface CompactExportBundle {
+  export_id: string;
+  match_id: string;
+  download_url: string;
+  size_bytes: number;
+  entry_count: number;
+  entries?: ExportEntry[];
+  created_at: string;
+}
+
+export interface DataSummaryArchive {
+  id: string;
+  archived_match_id: string;
+  new_match_id: string;
+  created_at: string;
+  title: string;
+  topic: string;
+  counts: {
+    transcript_segments: number;
+    audio_assets: number;
+    audience_votes: number;
+  };
+  export_bundle: CompactExportBundle | null;
+}
+
+export interface AgentRequestSummary {
+  id: string;
+  task_id: string;
+  speech_id?: string | null;
+  speaker_id: string;
+  endpoint: string;
+  status: string;
+  error_code?: string | null;
+  error_message?: string | null;
+  latency_ms?: number | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+export interface SpeechServiceRequestSummary {
+  id: string;
+  request_id: string;
+  service: string;
+  operation: string;
+  speech_id?: string | null;
+  speaker_id?: string | null;
+  status: string;
+  error_code?: string | null;
+  error_message?: string | null;
+  latency_ms?: number | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+export interface EventSummary {
+  id: string;
+  match_id: string;
+  seq: number;
+  type: string;
+  actor_type: string;
+  actor_id?: string | null;
+  created_at: string;
+}
+
+export interface DataSummary {
+  generated_at: string;
+  match: Pick<MatchInfo, "id" | "title" | "topic" | "status" | "screen_scene" | "current_phase_id">;
+  persistence: {
+    driver: string;
+    database_path: string;
+  };
+  counts: {
+    phases: number;
+    speakers: number;
+    human_speakers: number;
+    agent_speakers: number;
+    agent_configs: number;
+    transcript_segments: number;
+    final_transcript_segments: number;
+    speech_revisions: number;
+    audio_assets: number;
+    audio_chunks: number;
+    audience_votes: number;
+    audience_vote_keys: number;
+    agent_requests: number;
+    speech_service_requests: number;
+    export_bundles: number;
+    events: number;
+    audit_logs: number;
+    archives: number;
+  };
+  structured_counts: {
+    matches: number;
+    phases: number;
+    slots: number;
+    speeches: number;
+    transcript_segments: number;
+    speech_revisions: number;
+    agent_configs: number;
+    agent_status: number;
+    audio_assets: number;
+    audio_chunks: number;
+    votes: number;
+    runtime_settings: number;
+    agent_requests: number;
+    speech_service_requests: number;
+    export_bundles: number;
+  };
+  request_health: {
+    agent_status_counts: Record<string, number>;
+    speech_service_status_counts: Record<string, number>;
+    recent_agent_requests: AgentRequestSummary[];
+    recent_speech_service_requests: SpeechServiceRequestSummary[];
+    failed_agent_requests: AgentRequestSummary[];
+    failed_speech_service_requests: SpeechServiceRequestSummary[];
+  };
+  event_type_counts: Record<string, number>;
+  recent_events: EventSummary[];
+  latest_event: {
+    id: string;
+    match_id: string;
+    seq: number;
+    type: string;
+    payload: Record<string, unknown>;
+    actor_type: string;
+    actor_id?: string | null;
+    created_at: string;
+  } | null;
+  latest_export: CompactExportBundle | null;
+  archives: DataSummaryArchive[];
+}
+
+export interface RuntimeAuthStatus {
+  auth_required: boolean;
+  runtime_configured: boolean;
+  env_default_auth_required: boolean;
+  runtime_path: string;
+  token_file_path: string | null;
+  roles: string[];
+  token_sources: Record<string, {
+    env?: boolean;
+    runtime_count?: number;
+    file_count?: number;
+    env_count?: number;
+  }>;
+  updated_at?: number;
+  updated_by?: string;
 }

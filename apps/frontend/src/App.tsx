@@ -1,19 +1,33 @@
 import { AdminPage } from "./pages/AdminPage";
+import { FeedbackProvider } from "./components/Feedback";
 import { ConsolePage } from "./pages/ConsolePage";
+import { HostPage } from "./pages/HostPage";
+import { NavigationPage } from "./pages/NavigationPage";
 import { ScreenPage } from "./pages/ScreenPage";
 import { VotePage } from "./pages/VotePage";
 
 export function App() {
   const params = new URLSearchParams(window.location.search);
-  const matchId = params.get("match_id") ?? window.location.pathname.match(/\/vote\/([^/]+)/)?.[1] ?? "match_001";
   const path = window.location.pathname;
+  const matchId = routeMatchId(path, params);
 
-  if (path.startsWith("/admin")) return <AdminPage matchId={matchId} />;
-  if (path.startsWith("/console")) {
+  let page;
+  if (path.startsWith("/admin")) page = <AdminPage matchId={matchId} />;
+  else if (path.startsWith("/host")) page = <HostPage matchId={matchId} />;
+  else if (path.startsWith("/screen")) page = <ScreenPage matchId={matchId} />;
+  else if (path.startsWith("/console")) {
     const speakerId = path.split("/").filter(Boolean)[1] ?? "spk_aff_3";
-    return <ConsolePage matchId={matchId} speakerId={speakerId} />;
-  }
-  if (path.startsWith("/vote")) return <VotePage matchId={matchId} />;
-  return <ScreenPage matchId={matchId} />;
+    page = <ConsolePage matchId={matchId} speakerId={speakerId} />;
+  } else if (path.startsWith("/vote")) page = <VotePage matchId={matchId} />;
+  else page = <NavigationPage />;
+
+  return <FeedbackProvider>{page}</FeedbackProvider>;
 }
 
+function routeMatchId(path: string, params: URLSearchParams): string {
+  const queryMatchId = params.get("match_id");
+  if (queryMatchId) return queryMatchId;
+  const legacyVoteMatchId = path.match(/^\/vote\/([^/]+)/)?.[1];
+  if (legacyVoteMatchId) return decodeURIComponent(legacyVoteMatchId);
+  return "current";
+}

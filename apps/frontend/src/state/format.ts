@@ -1,4 +1,4 @@
-import type { Clock, Side, Speaker } from "../types/contracts";
+import type { Clock, ClockState, Side, Speaker } from "../types/contracts";
 
 export function sideLabel(side: Side): string {
   if (side === "affirmative") return "正方";
@@ -21,6 +21,15 @@ export function speakerLabel(speaker?: Speaker | null): string {
   return `${sideLabel(speaker.side)}${seatLabel(speaker.seat)} · ${speaker.name}`;
 }
 
+export function clockStateLabel(state?: ClockState | string | null): string {
+  if (state === "idle") return "未开始";
+  if (state === "running") return "计时中";
+  if (state === "paused") return "已暂停";
+  if (state === "expired") return "时间到";
+  if (state === "stopped") return "已停止";
+  return "未开始";
+}
+
 export function formatMs(ms: number): string {
   const safe = Math.max(0, Math.round(ms / 1000));
   const minutes = Math.floor(safe / 60);
@@ -29,9 +38,13 @@ export function formatMs(ms: number): string {
 }
 
 export function clockRemaining(clock?: Clock): number {
+  return clockRemainingAt(clock, Date.now());
+}
+
+export function clockRemainingAt(clock: Clock | undefined, now: number): number {
   if (!clock) return 0;
   if (clock.state === "running" && clock.deadline_at) {
-    return Math.max(0, new Date(clock.deadline_at).getTime() - Date.now());
+    return Math.max(0, new Date(clock.deadline_at).getTime() - now);
   }
   return clock.remaining_ms;
 }
@@ -39,4 +52,3 @@ export function clockRemaining(clock?: Clock): number {
 export function clockByName(clocks: Clock[], name: string): Clock | undefined {
   return clocks.find((clock) => clock.name === name);
 }
-

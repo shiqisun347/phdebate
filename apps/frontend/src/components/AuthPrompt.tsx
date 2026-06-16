@@ -11,6 +11,7 @@ interface AuthPromptProps {
 
 const roleLabel: Record<AuthRole, string> = {
   admin: "管理/主持人口令",
+  host: "主持导播口令",
   screen: "大屏只读 token",
   speaker: "辩手临时 token"
 };

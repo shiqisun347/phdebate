@@ -177,14 +177,14 @@ def _vote_section(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "学生投票入口",
             "ok" if vote_state.get("window_status") == "open" or int(vote_state.get("audience_count") or 0) > 0 else "warn",
             f"{vote_state.get('window_status')} · {vote_state.get('audience_count', 0)} 票",
-            "中场前确认二维码可打开，投票窗口开启/关闭顺序由主持人控制。",
+            "评委点评前确认二维码可打开，进入评委点评页会开启学生投票。",
         ),
         _check(
             "judge_vote",
             "评委票录入",
             "ok" if best_speaker_id and vote_state.get("winner_side") else "warn",
             f"winner={vote_state.get('winner_side')} · best={best_speaker_id or '-'}",
-            "结果页切换前先录入并公布评委结果，再公布学生结果。",
+            "先公布评委结果进入官方结果页，再公布学生投票结果。",
         ),
     ]
     return _section("votes", "投票与结果", checks)

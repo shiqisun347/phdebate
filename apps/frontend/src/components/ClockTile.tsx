@@ -1,5 +1,6 @@
 import type { Clock } from "../types/contracts";
-import { clockRemaining, formatMs } from "../state/format";
+import { clockStateLabel, formatMs } from "../state/format";
+import { useClockRemaining } from "../hooks/useClockRemaining";
 
 interface ClockTileProps {
   label: string;
@@ -9,7 +10,7 @@ interface ClockTileProps {
 }
 
 export function ClockTile({ label, clock, tone = "main", compact = false }: ClockTileProps) {
-  const remaining = clockRemaining(clock);
+  const remaining = useClockRemaining(clock);
   const ratio = clock ? Math.max(0, Math.min(1, remaining / (clock.total_seconds * 1000))) : 0;
 
   return (
@@ -19,8 +20,7 @@ export function ClockTile({ label, clock, tone = "main", compact = false }: Cloc
       <div className="clock-bar">
         <i style={{ width: `${ratio * 100}%` }} />
       </div>
-      <div className="clock-state">{clock?.state ?? "idle"}</div>
+      <div className="clock-state">{clockStateLabel(clock?.state)}</div>
     </div>
   );
 }
-

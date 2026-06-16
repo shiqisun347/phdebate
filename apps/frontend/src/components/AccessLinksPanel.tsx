@@ -81,29 +81,34 @@ export function AccessLinksPanel({ matchId, title, topic, speakers }: AccessLink
     const root = normalizeBaseUrl(baseUrl);
     return [
       {
+        id: "host",
+        title: "主持导播台",
+        subtitle: "主持人现场流程设备",
+        href: withParams(root, "/host", { token: hostToken })
+      },
+      {
         id: "admin",
-        title: "管理端",
-        subtitle: "主持人/管理员设备",
-        href: withParams(root, "/admin", { match_id: matchId, token: hostToken })
+        title: "技术后台",
+        subtitle: "技术统筹/管理员设备",
+        href: withParams(root, "/admin", { token: hostToken })
       },
       {
         id: "screen",
         title: "大屏",
         subtitle: "投屏电脑只读入口",
-        href: withParams(root, "/screen", { match_id: matchId, token: screenToken })
+        href: withParams(root, "/screen", { token: screenToken })
       },
       {
         id: "vote",
         title: "学生投票",
         subtitle: "可直接上屏或打印",
-        href: `${root}/vote/${encodeURIComponent(matchId)}`
+        href: `${root}/vote`
       },
       ...humanSpeakers.map((speaker) => ({
         id: speaker.id,
         title: `${sideLabel(speaker.side)}${seatLabel(speaker.seat)} · ${speaker.name}`,
         subtitle: "辩手控制台",
         href: withParams(root, `/console/${speaker.id}`, {
-          match_id: matchId,
           token: speakerTokens[speaker.id] || sharedSpeakerToken
         })
       }))
@@ -148,7 +153,7 @@ export function AccessLinksPanel({ matchId, title, topic, speakers }: AccessLink
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `phdebate-${matchId}-tokens.json`;
+    link.download = "phdebate-current-tokens.json";
     link.click();
     window.URL.revokeObjectURL(url);
     setToolMessage("已下载哈希 token 文件；现场推荐保存为 storage/tokens.json 并设置 PHDEBATE_TOKEN_FILE。");
@@ -313,7 +318,7 @@ function PrintableAccessSheet({
       <header>
         <h1>{title}</h1>
         <p>{topic}</p>
-        <span>Match ID: {matchId}</span>
+        <span>当前比赛现场入口</span>
       </header>
       <div className="print-link-grid">
         {links.map((item) => <PrintableLinkItem item={item} key={item.id} />)}

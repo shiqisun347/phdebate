@@ -60,7 +60,7 @@ function rehearsalItems(snapshot: MatchSnapshot, socketStatus: string): Rehearsa
     {
       id: "ws",
       label: "实时连接",
-      detail: `管理端 WebSocket ${socketStatus}`,
+      detail: `管理端实时通道${socketStatusLabel(socketStatus)}`,
       status: socketStatus === "open" ? "ok" : "fail"
     },
     {
@@ -90,13 +90,13 @@ function rehearsalItems(snapshot: MatchSnapshot, socketStatus: string): Rehearsa
     {
       id: "speech",
       label: "语音链路",
-      detail: `ASR ${snapshot.speech_service.asr.status}，TTS ${snapshot.speech_service.tts.status}`,
+      detail: `ASR ${serviceStatusLabel(snapshot.speech_service.asr.status)}，TTS ${serviceStatusLabel(snapshot.speech_service.tts.status)}`,
       status: snapshot.speech_service.asr.status === "failed" || snapshot.speech_service.tts.status === "failed" ? "fail" : "ok"
     },
     {
       id: "transcript",
       label: "转写/发言记录",
-      detail: hasTranscript ? "已有有效 transcript，可导出复盘" : "尚未产生有效发言记录",
+      detail: hasTranscript ? "已有有效转写文本，可导出复盘" : "尚未产生有效发言记录",
       status: hasTranscript ? "ok" : "warn"
     },
     {
@@ -114,8 +114,44 @@ function rehearsalItems(snapshot: MatchSnapshot, socketStatus: string): Rehearsa
     {
       id: "screen",
       label: "大屏场景",
-      detail: `${snapshot.match.screen_scene} / ${snapshot.match.live_mode}`,
+      detail: `${screenSceneLabel(snapshot.match.screen_scene)} / ${liveModeLabel(snapshot.match.live_mode)}`,
       status: snapshot.match.screen_scene ? "ok" : "warn"
     }
   ];
+}
+
+function socketStatusLabel(status: string): string {
+  if (status === "open") return "已连接";
+  if (status === "connecting") return "连接中";
+  if (status === "reconnecting") return "重连中";
+  if (status === "closed") return "已断开";
+  return `状态 ${status}`;
+}
+
+function serviceStatusLabel(status?: string | null): string {
+  if (!status) return "未开始";
+  if (status === "ok") return "正常";
+  if (status === "idle") return "未开始";
+  if (status === "ready") return "就绪";
+  if (status === "running") return "运行中";
+  if (status === "streaming") return "流式处理中";
+  if (status === "failed") return "异常";
+  return `状态 ${status}`;
+}
+
+function screenSceneLabel(scene?: string | null): string {
+  if (scene === "idle") return "候场";
+  if (scene === "live") return "实况";
+  if (scene === "paused") return "暂停";
+  if (scene === "judge_commentary") return "评委点评";
+  if (scene === "judge_result") return "评委结果";
+  if (scene === "audience_result") return "学生结果";
+  return scene ? `场景 ${scene}` : "未指定场景";
+}
+
+function liveModeLabel(mode?: string | null): string {
+  if (mode === "single") return "单人发言";
+  if (mode === "free") return "自由辩论";
+  if (mode === "prep") return "AI 准备";
+  return mode ? `模式 ${mode}` : "未指定模式";
 }

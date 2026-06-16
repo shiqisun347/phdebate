@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -18,6 +19,9 @@ class Principal:
 
 
 def auth_required() -> bool:
+    runtime = _runtime_auth_config()
+    if isinstance(runtime.get("auth_required"), bool):
+        return bool(runtime["auth_required"])
     override = os.getenv("PHDEBATE_AUTH_REQUIRED", "").strip().lower()
     if override in {"1", "true", "yes", "on"}:
         return True
@@ -58,6 +62,8 @@ def authorize_websocket(websocket: WebSocket, channel: str, speaker_id: Optional
     if not principal:
         return None
     if channel == "admin" and principal.role not in {"admin", "host"}:
+        return None
+    if channel == "host" and principal.role not in {"admin", "host"}:
         return None
     if channel == "screen" and principal.role not in {"admin", "host", "screen"}:
         return None
@@ -184,15 +190,19 @@ def _speaker_hashes_from_token_file() -> Dict[str, Sequence[str]]:
 
 
 def _token_file_config() -> Dict[str, Any]:
+    runtime = _runtime_auth_config().get("token_hashes")
+    merged: Dict[str, Any] = runtime if isinstance(runtime, dict) else {}
     path = _token_file_path()
     if not path or not path.exists():
-        return {}
+        return merged
     try:
         with path.open("r", encoding="utf-8") as file:
             data = json.load(file)
     except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        return merged
+    if isinstance(data, dict):
+        merged = {**data, **merged}
+    return merged
 
 
 def _token_file_path() -> Optional[Path]:
@@ -201,6 +211,68 @@ def _token_file_path() -> Optional[Path]:
         return None
     path = Path(raw)
     return path if path.is_absolute() else _project_root() / path
+
+
+def runtime_auth_status() -> Dict[str, Any]:
+    runtime = _runtime_auth_config()
+    runtime_hashes = runtime.get("token_hashes") if isinstance(runtime.get("token_hashes"), dict) else {}
+    configured_path = _token_file_path()
+    env_default = _env_default_auth_required()
+    return {
+        "auth_required": auth_required(),
+        "runtime_configured": isinstance(runtime.get("auth_required"), bool),
+        "env_default_auth_required": env_default,
+        "runtime_path": str(_runtime_auth_path()),
+        "token_file_path": str(configured_path) if configured_path else None,
+        "roles": ["admin", "host", "screen", "speaker"],
+        "token_sources": {
+            "admin": _source_summary(runtime_hashes, "admin_hashes", "admin", "PHDEBATE_ADMIN_TOKEN", "PHDEBATE_ADMIN_PASSWORD"),
+            "host": _source_summary(runtime_hashes, "host_hashes", "host", "PHDEBATE_HOST_TOKEN", "PHDEBATE_HOST_PASSWORD"),
+            "screen": _source_summary(runtime_hashes, "screen_hashes", "screen", "PHDEBATE_SCREEN_TOKEN"),
+            "speaker_shared": _source_summary(runtime_hashes, "speaker_shared_hashes", "speaker_shared", "PHDEBATE_SPEAKER_TOKEN"),
+            "speaker_specific": {
+                "runtime_count": len((runtime_hashes.get("speaker_hashes") or {}) if isinstance(runtime_hashes.get("speaker_hashes"), dict) else {}),
+                "env_count": len(_speaker_tokens()),
+                "file_count": len(_speaker_hashes_from_config_file_only()),
+            },
+        },
+        "updated_at": runtime.get("updated_at"),
+        "updated_by": runtime.get("updated_by"),
+    }
+
+
+def update_runtime_auth_config(auth_required_value: bool, token_hashes: Optional[Dict[str, Any]] = None, updated_by: str = "admin") -> Dict[str, Any]:
+    current = _runtime_auth_config()
+    next_hashes = current.get("token_hashes") if isinstance(current.get("token_hashes"), dict) else {}
+    if token_hashes is not None:
+        next_hashes = _normalize_token_hash_config(token_hashes)
+    if auth_required_value and not _has_admin_token(next_hashes):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "missing_admin_token",
+                "message": "开启登录前至少需要配置一个管理员 token。",
+                "details": {},
+            },
+        )
+
+    payload = {
+        "auth_required": bool(auth_required_value),
+        "token_hashes": next_hashes,
+        "updated_at": int(time.time()),
+        "updated_by": updated_by,
+    }
+    path = _runtime_auth_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path.replace(path)
+    return runtime_auth_status()
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _hash_values(value: Any) -> Sequence[str]:
@@ -219,6 +291,91 @@ def _normalize_hash(value: str) -> str:
     if normalized.startswith("sha256:"):
         normalized = normalized.removeprefix("sha256:")
     return normalized if len(normalized) == 64 and all(char in "0123456789abcdef" for char in normalized) else ""
+
+
+def _runtime_auth_path() -> Path:
+    raw = os.getenv("PHDEBATE_RUNTIME_AUTH_FILE", "").strip()
+    if raw:
+        path = Path(raw)
+        return path if path.is_absolute() else _project_root() / path
+    return _project_root() / "apps" / "backend" / "storage" / "runtime_auth.json"
+
+
+def _runtime_auth_config() -> Dict[str, Any]:
+    path = _runtime_auth_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _env_default_auth_required() -> bool:
+    override = os.getenv("PHDEBATE_AUTH_REQUIRED", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    return os.getenv("PHDEBATE_ENV", "development").strip().lower() in {"production", "prod"}
+
+
+def _source_summary(runtime_hashes: Dict[str, Any], hash_key: str, legacy_hash_key: str, *env_names: str) -> Dict[str, Any]:
+    return {
+        "env": bool(_tokens_from_env(*env_names)),
+        "runtime_count": len(_hash_values(runtime_hashes.get(hash_key)) or _hash_values(runtime_hashes.get(legacy_hash_key))),
+        "file_count": len(_hash_values(_token_file_config_file_only().get(hash_key)) or _hash_values(_token_file_config_file_only().get(legacy_hash_key))),
+    }
+
+
+def _token_file_config_file_only() -> Dict[str, Any]:
+    path = _token_file_path()
+    if not path or not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _speaker_hashes_from_config_file_only() -> Dict[str, Sequence[str]]:
+    config = _token_file_config_file_only()
+    raw = config.get("speaker_hashes") or config.get("speakers") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(speaker_id): _hash_values(value) for speaker_id, value in raw.items() if _hash_values(value)}
+
+
+def _normalize_token_hash_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key in ("admin_hashes", "host_hashes", "screen_hashes", "speaker_shared_hashes"):
+        hashes = _hash_values(config.get(key))
+        if hashes:
+            normalized[key] = list(hashes)
+    raw_speakers = config.get("speaker_hashes") or config.get("speakers") or {}
+    if isinstance(raw_speakers, dict):
+        speaker_hashes = {
+            str(speaker_id): list(_hash_values(value))
+            for speaker_id, value in raw_speakers.items()
+            if _hash_values(value)
+        }
+        if speaker_hashes:
+            normalized["speaker_hashes"] = speaker_hashes
+    return normalized
+
+
+def _has_admin_token(runtime_hashes: Dict[str, Any]) -> bool:
+    return bool(
+        _tokens_from_env("PHDEBATE_ADMIN_TOKEN", "PHDEBATE_ADMIN_PASSWORD")
+        or _hash_values(_token_file_config_file_only().get("admin_hashes"))
+        or _hash_values(_token_file_config_file_only().get("admin"))
+        or _hash_values(runtime_hashes.get("admin_hashes"))
+        or _hash_values(runtime_hashes.get("admin"))
+    )
 
 
 def _matches_any(token: str, candidates: Sequence[str]) -> bool:

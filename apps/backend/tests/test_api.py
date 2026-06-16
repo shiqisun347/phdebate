@@ -32,7 +32,8 @@ def load_mock_agent_app():
 
 
 @pytest.fixture(autouse=True)
-def reset_demo_state() -> None:
+def reset_demo_state(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PHDEBATE_RUNTIME_AUTH_FILE", str(tmp_path / "runtime_auth.json"))
     client.post("/api/demo/reset")
 
 
@@ -83,6 +84,13 @@ def test_production_auth_separates_admin_host_and_screen_permissions(monkeypatch
     )
     assert host_settings.status_code == 403
 
+    host_activate = client.post(
+        "/api/matches/match_001/speakers/spk_aff_2/activate",
+        headers={"Authorization": "Bearer host-secret"},
+    )
+    assert host_activate.status_code == 403
+    assert host_activate.json()["error"]["code"] == "forbidden"
+
     admin_settings = client.patch(
         "/api/matches/match_001",
         headers={"Authorization": "Bearer admin-secret"},
@@ -119,6 +127,35 @@ def test_production_speaker_token_can_only_control_matching_speaker(monkeypatch)
     )
     assert allowed.status_code == 200
     assert allowed.json()["data"]["current_speech"]["speaker_id"] == "spk_aff_3"
+
+
+def test_speaker_profile_endpoint_syncs_name_with_speaker_permission(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_ENV", "production")
+    monkeypatch.setenv("PHDEBATE_SPEAKER_TOKENS", '{"spk_aff_3":"aff-secret","spk_neg_2":"neg-secret"}')
+
+    wrong = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_3/profile",
+        headers={"Authorization": "Bearer neg-secret"},
+        json={"name": "不应更新"},
+    )
+    assert wrong.status_code == 403
+
+    updated = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_3/profile",
+        headers={"Authorization": "Bearer aff-secret"},
+        json={"name": "现场姓名"},
+    )
+    assert updated.status_code == 200
+    speaker = next(item for item in updated.json()["data"]["speakers"] if item["id"] == "spk_aff_3")
+    assert speaker["name"] == "现场姓名"
+
+    invalid = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_3/profile",
+        headers={"Authorization": "Bearer aff-secret"},
+        json={"name": "   "},
+    )
+    assert invalid.status_code == 409
+    assert invalid.json()["error"]["code"] == "invalid_speaker_profile"
 
 
 def test_production_auth_accepts_hashed_token_file(monkeypatch, tmp_path) -> None:
@@ -168,6 +205,110 @@ def test_production_auth_accepts_hashed_token_file(monkeypatch, tmp_path) -> Non
         headers={"Authorization": "Bearer speaker-from-file"},
     )
     assert right_speaker.status_code == 200
+
+
+def test_runtime_auth_toggle_persists_hashes_and_enforces_roles() -> None:
+    status = client.get("/api/admin/security/auth")
+    assert status.status_code == 200
+    assert status.json()["data"]["auth_required"] is False
+
+    missing_admin = client.put("/api/admin/security/auth", json={"auth_required": True})
+    assert missing_admin.status_code == 409
+    assert missing_admin.json()["error"]["code"] == "missing_admin_token"
+
+    enabled = client.put(
+        "/api/admin/security/auth",
+        json={
+            "auth_required": True,
+            "tokens": {
+                "admin": "runtime-admin",
+                "host": "runtime-host",
+                "screen": "runtime-screen",
+                "speaker_shared": "runtime-speaker",
+            },
+        },
+    )
+    assert enabled.status_code == 200
+    data = enabled.json()["data"]
+    assert data["auth_required"] is True
+    assert data["runtime_configured"] is True
+    assert data["token_sources"]["admin"]["runtime_count"] == 1
+
+    blocked = client.get("/api/matches/match_001")
+    assert blocked.status_code == 401
+
+    admin_read = client.get("/api/admin/security/auth", headers={"Authorization": "Bearer runtime-admin"})
+    assert admin_read.status_code == 200
+
+    host_control = client.post("/api/matches/match_001/pause", headers={"Authorization": "Bearer runtime-host"})
+    assert host_control.status_code == 200
+
+    host_emergency = client.post("/api/matches/match_001/emergency-stop", headers={"Authorization": "Bearer runtime-host"})
+    assert host_emergency.status_code == 403
+
+    admin_emergency = client.post("/api/matches/match_001/emergency-stop", headers={"Authorization": "Bearer runtime-admin"})
+    assert admin_emergency.status_code == 200
+
+
+def test_host_shortcut_endpoints_advance_bell_and_force_stop_current_speech() -> None:
+    before = client.get("/api/matches/match_001").json()["data"]
+    assert before["audio_output"]["mode"] == "host"
+    current_order = next(
+        phase["display_order"]
+        for phase in before["phases"]
+        if phase["id"] == before["match"]["current_phase_id"]
+    )
+
+    next_phase = client.post("/api/matches/match_001/phases/next")
+    assert next_phase.status_code == 200
+    after_next = next_phase.json()["data"]
+    assert next(
+        phase["display_order"]
+        for phase in after_next["phases"]
+        if phase["id"] == after_next["match"]["current_phase_id"]
+    ) == current_order + 1
+
+    audio_output = client.put("/api/matches/match_001/audio-output", json={"mode": "admin", "reason": "test_admin_output"})
+    assert audio_output.status_code == 200
+    assert audio_output.json()["data"]["audio_output"]["mode"] == "admin"
+    assert audio_output.json()["data"]["audio_output"]["updated_by"] == "host"
+
+    invalid_audio_output = client.put("/api/matches/match_001/audio-output", json={"mode": "console"})
+    assert invalid_audio_output.status_code == 409
+    assert invalid_audio_output.json()["error"]["code"] == "invalid_audio_output"
+
+    bell = client.post("/api/matches/match_001/bell", json={"kind": "manual", "label": "测试铃"})
+    assert bell.status_code == 200
+    assert bell.json()["data"]["last_seq"] >= after_next["last_seq"]
+    assert bell.json()["data"]["audio_output"]["mode"] == "admin"
+
+    current_phase = next(
+        phase
+        for phase in after_next["phases"]
+        if phase["id"] == after_next["match"]["current_phase_id"]
+    )
+    speaker = next(
+        speaker
+        for speaker in after_next["speakers"]
+        if (
+            current_phase["side"] == "neutral"
+            or speaker["side"] == current_phase["side"]
+        )
+        and (
+            current_phase["speaker_seat"] is None
+            or speaker["seat"] == current_phase["speaker_seat"]
+        )
+    )
+
+    start = client.post(f"/api/matches/match_001/speakers/{speaker['id']}/start-speaking")
+    assert start.status_code == 200
+    assert start.json()["data"]["current_speech"]["speaker_id"] == speaker["id"]
+
+    stopped = client.post("/api/matches/match_001/speeches/current/stop", json={"reason": "test"})
+    assert stopped.status_code == 200
+    data = stopped.json()["data"]
+    assert data["current_speech"] is None
+    assert any(segment["speaker_id"] == speaker["id"] and segment["is_final"] for segment in data["recent_transcript"])
 
 
 def test_speech_diagnostics_reports_mock_fallback_when_xfyun_missing(monkeypatch) -> None:
@@ -282,6 +423,14 @@ def test_tts_probe_synthesizes_and_archives_audio(monkeypatch, tmp_path) -> None
     assert data["result"]["chunk_count"] == 2
     assert Path(data["result"]["file_path"]).read_bytes() == b"mp3-bytes"
     assert data["snapshot"]["speech_service"]["tts"]["latency_ms"] == 123
+    requests = store.repo.load_speech_service_requests("match_001", 10)
+    assert len(requests) == 1
+    assert requests[0]["service"] == "tts"
+    assert requests[0]["operation"] == "probe"
+    assert requests[0]["status"] == "completed"
+    assert requests[0]["request"]["text"] == "语音合成自检"
+    assert requests[0]["response"]["size_bytes"] == len(b"mp3-bytes")
+    assert requests[0]["latency_ms"] == 123
 
 
 def test_asr_probe_recognizes_audio_and_updates_status(monkeypatch) -> None:
@@ -307,6 +456,14 @@ def test_asr_probe_recognizes_audio_and_updates_status(monkeypatch) -> None:
     assert data["result"]["text"] == "自检通过"
     assert data["result"]["latency_ms"] == 234
     assert data["snapshot"]["speech_service"]["asr"]["status"] == "ok"
+    requests = store.repo.load_speech_service_requests("match_001", 10)
+    assert len(requests) == 1
+    assert requests[0]["service"] == "asr"
+    assert requests[0]["operation"] == "probe"
+    assert requests[0]["status"] == "completed"
+    assert requests[0]["request"]["audio_bytes"] == len(b"pcm")
+    assert requests[0]["response"]["text"] == "自检通过"
+    assert requests[0]["latency_ms"] == 234
 
 
 def test_asr_probe_returns_clear_error_when_unconfigured(monkeypatch) -> None:
@@ -319,6 +476,19 @@ def test_asr_probe_returns_clear_error_when_unconfigured(monkeypatch) -> None:
     body = response.json()
     assert body["error"]["code"] == "speech_service_error"
     assert "XFYUN" in body["error"]["message"]
+    requests = store.repo.load_speech_service_requests("match_001", 10)
+    assert len(requests) == 1
+    assert requests[0]["service"] == "asr"
+    assert requests[0]["operation"] == "probe"
+    assert requests[0]["status"] == "failed"
+    assert "XFYUN" in requests[0]["error_message"]
+    summary = client.get("/api/matches/current/data-summary")
+    assert summary.status_code == 200
+    health = summary.json()["data"]["request_health"]
+    assert health["speech_service_status_counts"]["failed"] == 1
+    assert health["failed_speech_service_requests"][0]["service"] == "asr"
+    assert health["failed_speech_service_requests"][0]["operation"] == "probe"
+    assert "request" not in health["failed_speech_service_requests"][0]
 
 
 def test_tts_probe_returns_clear_error_when_unconfigured(monkeypatch) -> None:
@@ -331,6 +501,18 @@ def test_tts_probe_returns_clear_error_when_unconfigured(monkeypatch) -> None:
     body = response.json()
     assert body["error"]["code"] == "speech_service_error"
     assert "XFYUN" in body["error"]["message"]
+    requests = store.repo.load_speech_service_requests("match_001", 10)
+    assert len(requests) == 1
+    assert requests[0]["service"] == "tts"
+    assert requests[0]["operation"] == "probe"
+    assert requests[0]["status"] == "failed"
+    assert "XFYUN" in requests[0]["error_message"]
+    summary = client.get("/api/matches/current/data-summary")
+    assert summary.status_code == 200
+    health = summary.json()["data"]["request_health"]
+    assert health["speech_service_status_counts"]["failed"] == 1
+    assert health["failed_speech_service_requests"][0]["service"] == "tts"
+    assert health["failed_speech_service_requests"][0]["operation"] == "probe"
 
 
 def _sha256(value: str) -> str:
@@ -363,13 +545,168 @@ def test_demo_match_snapshot_contract() -> None:
     assert data["last_seq"] >= 0
 
 
+def test_current_match_alias_contract_for_official_entrypoints() -> None:
+    current = client.get("/api/current-match")
+    assert current.status_code == 200
+    assert current.json()["data"]["id"] == "match_001"
+
+    snapshot = client.get("/api/matches/current")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["data"]["match"]["id"] == "match_001"
+
+    vote_options = client.get("/api/public/matches/current/vote-options")
+    assert vote_options.status_code == 200
+    assert vote_options.json()["data"]["match"]["id"] == "match_001"
+
+    opened = client.post("/api/matches/current/audience-votes/open")
+    assert opened.status_code == 200
+    assert opened.json()["data"]["vote_url"] == "/vote"
+
+    with client.websocket_connect("/ws/matches/current?channel=screen") as websocket:
+        first = websocket.receive_json()
+        assert first["type"] == "snapshot"
+        assert first["payload"]["state"]["match"]["id"] == "match_001"
+
+
+def test_current_match_reset_archives_old_match_and_keeps_export_downloadable() -> None:
+    wrong = client.post("/api/matches/current/reset", json={"confirm_text": "reset"})
+    assert wrong.status_code == 409
+    assert wrong.json()["error"]["code"] == "invalid_confirmation"
+
+    reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
+    assert reset.status_code == 200
+    data = reset.json()["data"]
+    assert data["match"]["id"].startswith("match_")
+    assert data["match"]["id"] != "match_001"
+    assert data["match"]["status"] == "ready"
+    assert data["match"]["screen_scene"] == "idle"
+    assert data["match"]["current_phase_id"] == "phase_aff_constructive_1"
+    assert data["current_speech"] is None
+    assert data["recent_transcript"] == []
+    assert data["vote_state"]["audience_count"] == 0
+    assert data["vote_state"]["window_status"] == "closed"
+    assert data["clocks"][0]["name"] == "main"
+    assert data["clocks"][0]["state"] == "paused"
+
+    archives = store.repo.load_match_archives(1)
+    assert archives
+    archive = archives[0]
+    assert archive["archived_match_id"] == "match_001"
+    assert archive["new_match_id"] == data["match"]["id"]
+    export_bundle = archive["export_bundle"]
+    assert export_bundle["export_id"]
+    assert Path(export_bundle["file_path"]).exists()
+
+    download = client.get(export_bundle["download_url"])
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("application/zip")
+
+    summary = client.get("/api/matches/current/data-summary")
+    assert summary.status_code == 200
+    summary_data = summary.json()["data"]
+    assert summary_data["counts"]["events"] == 1
+    assert summary_data["counts"]["audit_logs"] == 1
+    assert summary_data["event_type_counts"]["match.reset"] == 1
+    assert summary_data["recent_events"][0]["type"] == "match.reset"
+    assert summary_data["recent_events"][0]["match_id"] == data["match"]["id"]
+
+
+def test_start_match_from_ready_switches_from_idle_to_live_and_resumes_clock() -> None:
+    reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
+    assert reset.status_code == 200
+    reset_data = reset.json()["data"]
+    assert reset_data["match"]["status"] == "ready"
+    assert reset_data["match"]["screen_scene"] == "idle"
+    assert reset_data["clocks"][0]["state"] == "paused"
+
+    started = client.post("/api/matches/current/start")
+    assert started.status_code == 200
+    data = started.json()["data"]
+    assert data["match"]["status"] == "running"
+    assert data["match"]["screen_scene"] == "live"
+    assert data["clocks"][0]["name"] == "main"
+    assert data["clocks"][0]["state"] == "running"
+    assert data["clocks"][0]["deadline_at"]
+
+
+def test_begin_match_alias_supports_host_browser_start_flow() -> None:
+    reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
+    assert reset.status_code == 200
+
+    started = client.post("/api/matches/current/begin")
+    assert started.status_code == 200
+    data = started.json()["data"]
+    assert data["match"]["status"] == "running"
+    assert data["match"]["screen_scene"] == "live"
+
+
+def test_pause_locks_vote_controls_until_match_resumes() -> None:
+    opened = client.post("/api/matches/current/audience-votes/open")
+    assert opened.status_code == 200
+
+    paused = client.post("/api/matches/current/pause")
+    assert paused.status_code == 200
+    assert paused.json()["data"]["match"]["status"] == "paused"
+
+    vote_options = client.get("/api/public/matches/current/vote-options")
+    assert vote_options.status_code == 200
+    assert vote_options.json()["data"]["match"]["status"] == "paused"
+
+    blocked_audience = client.post(
+        "/api/public/matches/current/audience-votes",
+        json={
+            "token": "paused-vote",
+            "winner_side": "affirmative",
+            "best_speaker_id": "spk_aff_3",
+        },
+    )
+    assert blocked_audience.status_code == 409
+    assert blocked_audience.json()["error"]["code"] == "vote_unavailable"
+
+    for path, body in [
+        ("/api/matches/current/audience-votes/open", {}),
+        ("/api/matches/current/audience-votes/close", {}),
+        ("/api/matches/current/screen/scene", {"scene": "judge_commentary"}),
+        (
+            "/api/matches/current/votes",
+            {
+                "judge_summary": {
+                    "constructive": {"affirmative": 2, "negative": 1},
+                    "process": {"affirmative": 2, "negative": 1},
+                    "conclusion": {"affirmative": 2, "negative": 1},
+                    "winner_side": "affirmative",
+                    "best_speaker_id": "spk_aff_3",
+                }
+            },
+        ),
+        ("/api/matches/current/votes/publish", {"scope": "judge"}),
+    ]:
+        blocked = client.post(path, json=body)
+        assert blocked.status_code == 409
+        assert blocked.json()["error"]["code"] == "vote_unavailable"
+
+    resumed = client.post("/api/matches/current/resume")
+    assert resumed.status_code == 200
+    accepted = client.post(
+        "/api/public/matches/current/audience-votes",
+        json={
+            "token": "resumed-vote",
+            "winner_side": "affirmative",
+            "best_speaker_id": "spk_aff_3",
+        },
+    )
+    assert accepted.status_code == 200
+
+
 def test_screen_scene_control_updates_snapshot() -> None:
     response = client.post(
         "/api/matches/match_001/screen/scene",
-        json={"scene": "teams"},
+        json={"scene": "judge_commentary"},
     )
     assert response.status_code == 200
-    assert response.json()["data"]["match"]["screen_scene"] == "teams"
+    data = response.json()["data"]
+    assert data["match"]["screen_scene"] == "judge_commentary"
+    assert data["vote_state"]["window_status"] == "open"
 
     response = client.post(
         "/api/matches/match_001/screen/scene",
@@ -424,8 +761,8 @@ def test_team_settings_patch_updates_safe_fields() -> None:
     assert team["side"] == "affirmative"
 
 
-def test_speaker_settings_patch_updates_agent_fields_and_rejects_invalid_kind() -> None:
-    response = client.patch(
+def test_speaker_settings_patch_uses_agent_configs_instead_of_inline_agent_fields() -> None:
+    direct_agent_fields = client.patch(
         "/api/matches/match_001/speakers/spk_aff_2",
         json={
             "name": "玄思升级版",
@@ -435,24 +772,156 @@ def test_speaker_settings_patch_updates_agent_fields_and_rejects_invalid_kind() 
             "seat": 4,
         },
     )
-    assert response.status_code == 200
-    data = response.json()["data"]
+    assert direct_agent_fields.status_code == 409
+    assert direct_agent_fields.json()["error"]["code"] == "agent_fields_managed_by_config"
+    assert "Agent 管理" in direct_agent_fields.json()["error"]["message"]
+
+    name_only = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_2",
+        json={"name": "玄思升级版", "seat": 4},
+    )
+    assert name_only.status_code == 200
+    data = name_only.json()["data"]
     speaker = next(item for item in data["speakers"] if item["id"] == "spk_aff_2")
     agent = next(item for item in data["agent_status"] if item["speaker_id"] == "spk_aff_2")
     assert speaker["name"] == "玄思升级版"
+    assert speaker["seat"] == 2
+    config = next(item for item in data["agent_configs"] if item["id"] == speaker["agent_config_id"])
+    assert config["name"] == "玄思 Agent"
+    assert config["model_name"] == "Qwen-Max"
+    assert agent["name"] == "玄思升级版"
+    assert agent["model"] == "Qwen-Max"
+
+    updated_config = client.patch(
+        f"/api/matches/match_001/agents/configs/{config['id']}",
+        json={"model_name": "Qwen-Plus", "model_kind": "closed_source", "endpoint": "http://127.0.0.1:8100"},
+    )
+    assert updated_config.status_code == 200
+    data = updated_config.json()["data"]
+    speaker = next(item for item in data["speakers"] if item["id"] == "spk_aff_2")
+    agent = next(item for item in data["agent_status"] if item["speaker_id"] == "spk_aff_2")
     assert speaker["model_name"] == "Qwen-Plus"
     assert speaker["model_kind"] == "closed_source"
     assert speaker["agent_endpoint"] == "http://127.0.0.1:8100"
-    assert speaker["seat"] == 2
-    assert agent["name"] == "玄思升级版"
     assert agent["model"] == "Qwen-Plus"
 
-    invalid = client.patch(
-        "/api/matches/match_001/speakers/spk_aff_2",
-        json={"model_kind": "local"},
+
+def test_agent_config_crud_and_speaker_binding() -> None:
+    initial = client.get("/api/matches/match_001")
+    assert initial.status_code == 200
+    data = initial.json()["data"]
+    assert len(data["agent_configs"]) == 4
+    assert all("api_key" not in item for item in data["agent_configs"])
+
+    created = client.post(
+        "/api/matches/match_001/agents/configs",
+        json={
+            "name": "共享测试 Agent",
+            "provider_type": "rest_api",
+            "model_name": "Shared-Agent-Model",
+            "model_kind": "closed_source",
+            "endpoint": "http://127.0.0.1:8199",
+            "timeout_ms": 12000,
+            "enabled": True,
+        },
     )
-    assert invalid.status_code == 409
-    assert invalid.json()["error"]["code"] == "invalid_speaker_config"
+    assert created.status_code == 200
+    data = created.json()["data"]
+    config = next(item for item in data["agent_configs"] if item["name"] == "共享测试 Agent")
+    assert config["endpoint"] == "http://127.0.0.1:8199"
+
+    bound = client.patch(
+        "/api/matches/match_001/speakers/spk_neg_3",
+        json={"agent_config_id": config["id"]},
+    )
+    assert bound.status_code == 200
+    data = bound.json()["data"]
+    speaker = next(item for item in data["speakers"] if item["id"] == "spk_neg_3")
+    agent = next(item for item in data["agent_status"] if item["speaker_id"] == "spk_neg_3")
+    assert speaker["agent_config_id"] == config["id"]
+    assert speaker["model_name"] == "Shared-Agent-Model"
+    assert speaker["agent_endpoint"] == "http://127.0.0.1:8199"
+    assert agent["agent_config_id"] == config["id"]
+
+    disabled = client.patch(
+        f"/api/matches/match_001/agents/configs/{config['id']}",
+        json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    data = disabled.json()["data"]
+    speaker = next(item for item in data["speakers"] if item["id"] == "spk_neg_3")
+    assert speaker["model_name"] == "Shared-Agent-Model"
+    config = next(item for item in data["agent_configs"] if item["id"] == config["id"])
+    assert config["enabled"] is False
+
+    health = client.post("/api/matches/match_001/agent/spk_neg_3/health")
+    assert health.status_code == 200
+    assert health.json()["data"]["result"]["status"] == "disabled"
+    agent = next(item for item in health.json()["data"]["snapshot"]["agent_status"] if item["speaker_id"] == "spk_neg_3")
+    assert agent["status"] == "failed"
+
+    delete_bound = client.delete(f"/api/matches/match_001/agents/configs/{config['id']}")
+    assert delete_bound.status_code == 409
+    assert delete_bound.json()["error"]["code"] == "agent_config_in_use"
+
+
+def test_speaker_settings_patch_switches_human_and_agent_type() -> None:
+    missing_config = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_1",
+        json={"speaker_type": "agent", "name": "启明"},
+    )
+    assert missing_config.status_code == 409
+    assert missing_config.json()["error"]["code"] == "agent_config_required"
+
+    created = client.post(
+        "/api/matches/match_001/agents/configs",
+        json={
+            "name": "启明 Agent",
+            "provider_type": "rest_api",
+            "model_name": "GLM-Test",
+            "model_kind": "closed_source",
+            "endpoint": "http://127.0.0.1:8123",
+            "timeout_ms": 12000,
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 200
+    config = next(item for item in created.json()["data"]["agent_configs"] if item["name"] == "启明 Agent")
+
+    to_agent = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_1",
+        json={
+            "speaker_type": "agent",
+            "name": "启明",
+            "agent_config_id": config["id"],
+        },
+    )
+    assert to_agent.status_code == 200
+    data = to_agent.json()["data"]
+    speaker = next(item for item in data["speakers"] if item["id"] == "spk_aff_1")
+    agent = next(item for item in data["agent_status"] if item["speaker_id"] == "spk_aff_1")
+    assert speaker["speaker_type"] == "agent"
+    assert speaker["model_name"] == "GLM-Test"
+    assert speaker["model_kind"] == "closed_source"
+    assert speaker["agent_endpoint"] == "http://127.0.0.1:8123"
+    assert speaker["agent_config_id"] == config["id"]
+    assert speaker["mic_permission"] is None
+    assert agent["name"] == "启明"
+    assert agent["model"] == "GLM-Test"
+
+    to_human = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_1",
+        json={"speaker_type": "human", "name": "陈思远"},
+    )
+    assert to_human.status_code == 200
+    data = to_human.json()["data"]
+    speaker = next(item for item in data["speakers"] if item["id"] == "spk_aff_1")
+    assert speaker["speaker_type"] == "human"
+    assert speaker["model_name"] is None
+    assert speaker["model_kind"] is None
+    assert "agent_endpoint" not in speaker
+    assert speaker["mic_permission"] == "unknown"
+    assert not any(item["speaker_id"] == "spk_aff_1" for item in data["agent_status"])
 
 
 def test_phase_settings_patch_updates_fixed_phase_clock_when_started() -> None:
@@ -511,6 +980,76 @@ def test_speaker_start_and_stop_flow() -> None:
     assert data["free_debate"]["turn_index"] == 15
 
 
+def test_speaker_pause_resume_and_current_speech_reset_flow(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
+    phase = client.post("/api/matches/match_001/phases/phase_free_debate/start")
+    assert phase.status_code == 200
+
+    start = client.post("/api/matches/match_001/speakers/spk_aff_3/start-speaking")
+    assert start.status_code == 200
+    start_data = start.json()["data"]
+    speech_id = start_data["current_speech"]["id"]
+    started_remaining = start_data["current_speech"]["started_clock_remaining_ms"]
+
+    partial = client.post(
+        "/api/matches/match_001/speakers/spk_aff_3/asr/partial",
+        json={"text": "这段发言准备被重置", "latency_ms": 120},
+    )
+    assert partial.status_code == 200
+    assert any(item["speech_id"] == speech_id for item in partial.json()["data"]["recent_transcript"])
+
+    chunk = client.post(
+        f"/api/matches/match_001/speeches/{speech_id}/audio-chunks",
+        data={"speaker_id": "spk_aff_3", "chunk_index": "0", "duration_ms": "500"},
+        files={"file": ("reset-target.pcm", b"pcm-to-reset", "audio/L16;rate=16000")},
+    )
+    assert chunk.status_code == 200
+    assert any(item["speech_id"] == speech_id for item in chunk.json()["data"]["audio_assets"])
+
+    adjusted_turn_ms = max(1000, int(started_remaining["turn"]) - 7000)
+    adjusted_side_ms = max(1000, int(started_remaining["affirmative_total"]) - 9000)
+    turn_adjust = client.post(
+        "/api/matches/match_001/clocks/turn/adjust",
+        json={"remaining_ms": adjusted_turn_ms, "reason": "unit_elapsed_turn"},
+    )
+    assert turn_adjust.status_code == 200
+    side_adjust = client.post(
+        "/api/matches/match_001/clocks/affirmative_total/adjust",
+        json={"remaining_ms": adjusted_side_ms, "reason": "unit_elapsed_total"},
+    )
+    assert side_adjust.status_code == 200
+
+    paused = client.post("/api/matches/match_001/speakers/spk_aff_3/pause-speaking", json={"reason": "unit_pause"})
+    assert paused.status_code == 200
+    data = paused.json()["data"]
+    assert data["current_speech"]["state"] == "paused"
+    assert next(item for item in data["clocks"] if item["name"] == "turn")["state"] == "paused"
+    paused_turn_remaining = next(item for item in data["clocks"] if item["name"] == "turn")["remaining_ms"]
+    assert 0 < paused_turn_remaining <= adjusted_turn_ms
+
+    resumed = client.post("/api/matches/match_001/speakers/spk_aff_3/resume-speaking", json={"reason": "unit_resume"})
+    assert resumed.status_code == 200
+    data = resumed.json()["data"]
+    assert data["current_speech"]["state"] == "speaking"
+    assert next(item for item in data["clocks"] if item["name"] == "turn")["state"] == "running"
+
+    reset = client.post("/api/matches/match_001/speeches/current/reset", json={"reason": "unit_reset"})
+    assert reset.status_code == 200
+    data = reset.json()["data"]
+    assert data["current_speech"] is None
+    assert not any(item["speech_id"] == speech_id for item in data["recent_transcript"])
+    assert not any(item["speech_id"] == speech_id for item in data["audio_assets"])
+    turn = next(item for item in data["clocks"] if item["name"] == "turn")
+    affirmative_total = next(item for item in data["clocks"] if item["name"] == "affirmative_total")
+    assert turn["state"] == "paused"
+    assert turn["remaining_ms"] == started_remaining["turn"]
+    assert affirmative_total["state"] == "paused"
+    assert affirmative_total["remaining_ms"] == started_remaining["affirmative_total"]
+    assert data["speech_service"]["asr"]["detail"] == "speech reset"
+    logs = client.get("/api/matches/match_001/audit-logs?limit=10").json()["data"]["items"]
+    assert any(item["action"] == "speech.reset" for item in logs)
+
+
 def test_agent_manual_input_writes_transcript_and_advances_turn() -> None:
     phase = client.post("/api/matches/match_001/phases/phase_free_debate/start")
     assert phase.status_code == 200
@@ -550,7 +1089,7 @@ def test_agent_manual_input_rejects_human_speaker_and_empty_content() -> None:
 def test_sqlite_snapshot_and_events_are_persisted() -> None:
     response = client.post(
         "/api/matches/match_001/screen/scene",
-        json={"scene": "teams"},
+        json={"scene": "judge_commentary"},
     )
     assert response.status_code == 200
     seq = response.json()["data"]["last_seq"]
@@ -570,17 +1109,17 @@ def test_sqlite_snapshot_and_events_are_persisted() -> None:
 
     assert state_row is not None
     persisted = json.loads(state_row[0])
-    assert persisted["match"]["screen_scene"] == "teams"
+    assert persisted["match"]["screen_scene"] == "judge_commentary"
 
     assert event_row is not None
     assert event_row[0] == "screen.scene_changed"
-    assert json.loads(event_row[1])["scene"] == "teams"
+    assert json.loads(event_row[1])["scene"] == "judge_commentary"
 
 
 def test_audit_logs_can_be_queried_for_admin_actions() -> None:
     action = client.post(
         "/api/matches/match_001/screen/scene",
-        json={"scene": "teams"},
+        json={"scene": "judge_commentary"},
     )
     assert action.status_code == 200
 
@@ -591,13 +1130,13 @@ def test_audit_logs_can_be_queried_for_admin_actions() -> None:
     assert items[0]["action"] == "screen.scene_changed"
     assert items[0]["actor_type"] == "host"
     assert items[0]["result"] == "success"
-    assert items[0]["request"]["scene"] == "teams"
+    assert items[0]["request"]["scene"] == "judge_commentary"
 
 
 def test_match_export_bundle_contains_core_files() -> None:
     client.post(
         "/api/matches/match_001/screen/scene",
-        json={"scene": "teams"},
+        json={"scene": "judge_commentary"},
     )
 
     response = client.post("/api/matches/match_001/exports")
@@ -608,12 +1147,29 @@ def test_match_export_bundle_contains_core_files() -> None:
     entry_paths = {item["path"] for item in data["entries"]}
     assert {
         "match.json",
+        "phases.json",
+        "phases.csv",
+        "speeches.json",
+        "speeches.csv",
         "transcript.json",
         "transcript.csv",
+        "transcripts.json",
+        "transcripts.csv",
         "events.jsonl",
+        "agent_requests.jsonl",
+        "speech_service_requests.jsonl",
         "votes.json",
         "audit_logs.jsonl",
         "audio_manifest.json",
+        "structured/summary.json",
+        "structured/matches.json",
+        "structured/phases.json",
+        "structured/slots.json",
+        "structured/agent_configs.json",
+        "structured/speeches.json",
+        "structured/transcript_segments.json",
+        "structured/votes.json",
+        "structured/runtime_settings.json",
     }.issubset(entry_paths)
 
     download = client.get(data["download_url"])
@@ -624,6 +1180,101 @@ def test_match_export_bundle_contains_core_files() -> None:
         assert "transcript.csv" in names
         exported_match = json.loads(bundle.read("match.json"))
         assert exported_match["match"]["id"] == "match_001"
+        structured_summary = json.loads(bundle.read("structured/summary.json"))
+        assert structured_summary["counts"]["phases"] == 10
+        assert structured_summary["counts"]["slots"] == 8
+        assert structured_summary["counts"]["agent_configs"] == 4
+        assert structured_summary["counts"]["votes"] == 1
+        assert structured_summary["counts"]["runtime_settings"] == 1
+        assert "speech_service_requests" in structured_summary["counts"]
+        speech_service_rows = [
+            json.loads(line)
+            for line in bundle.read("speech_service_requests.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        assert speech_service_rows == []
+        structured_votes = json.loads(bundle.read("structured/votes.json"))
+        assert structured_votes
+        assert "vote_state_json" not in structured_votes[0]
+        assert "audience_vote_keys" not in structured_votes[0]["vote_state"]
+        assert "used_audience_tokens" not in structured_votes[0]["vote_state"]
+        assert "audience_votes" not in structured_votes[0]["vote_state"]
+        runtime_settings = json.loads(bundle.read("structured/runtime_settings.json"))
+        assert runtime_settings[0]["key"] == "audio_output"
+        assert runtime_settings[0]["value"]["mode"] == "host"
+        phases_csv = bundle.read("phases.csv").decode("utf-8")
+        speeches_csv = bundle.read("speeches.csv").decode("utf-8")
+        transcripts_csv = bundle.read("transcripts.csv").decode("utf-8")
+        assert phases_csv.startswith("match_id,id,phase_key")
+        assert speeches_csv.startswith("match_id,speech_id,phase_id")
+        assert transcripts_csv.startswith("match_id,id,speech_id")
+
+
+def test_data_summary_reports_current_data_exports_and_archives() -> None:
+    created = client.post("/api/matches/current/exports")
+    assert created.status_code == 200
+    export_id = created.json()["data"]["export_id"]
+
+    summary = client.get("/api/matches/current/data-summary")
+    assert summary.status_code == 200
+    data = summary.json()["data"]
+    assert data["match"]["id"] == "match_001"
+    assert data["counts"]["speakers"] == 8
+    assert data["counts"]["phases"] == 10
+    assert data["counts"]["agent_configs"] == 4
+    assert data["counts"]["events"] >= 1
+    assert data["counts"]["audit_logs"] >= 1
+    assert data["structured_counts"]["matches"] == 1
+    assert data["structured_counts"]["phases"] == 10
+    assert data["structured_counts"]["slots"] == 8
+    assert data["structured_counts"]["agent_configs"] == 4
+    assert data["structured_counts"]["transcript_segments"] == data["counts"]["transcript_segments"]
+    assert data["structured_counts"]["votes"] == 1
+    assert data["structured_counts"]["runtime_settings"] == 1
+    assert data["counts"]["speech_service_requests"] == 0
+    assert data["structured_counts"]["speech_service_requests"] == 0
+    assert data["request_health"]["agent_status_counts"] == {}
+    assert data["request_health"]["speech_service_status_counts"] == {}
+    assert data["request_health"]["failed_agent_requests"] == []
+    assert data["request_health"]["failed_speech_service_requests"] == []
+    assert data["event_type_counts"]["export.created"] == 1
+    assert data["recent_events"][0]["type"] == "export.created"
+    assert data["recent_events"][0]["seq"] >= 1843
+    assert "payload" not in data["recent_events"][0]
+    assert data["latest_export"]["export_id"] == export_id
+    assert data["latest_export"]["entry_count"] >= 6
+    assert "file_path" not in data["latest_export"]
+    latest_entry_paths = {item["path"] for item in data["latest_export"]["entries"]}
+    assert {
+        "match.json",
+        "phases.json",
+        "speeches.json",
+        "transcripts.json",
+        "votes.json",
+        "events.jsonl",
+        "audit_logs.jsonl",
+        "audio_manifest.json",
+        "structured/summary.json",
+    }.issubset(latest_entry_paths)
+    assert data["persistence"]["driver"] == "sqlite"
+
+    reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
+    assert reset.status_code == 200
+    archived_summary = client.get("/api/matches/current/data-summary")
+    assert archived_summary.status_code == 200
+    archived_data = archived_summary.json()["data"]
+    assert archived_data["match"]["id"] != "match_001"
+    assert archived_data["counts"]["archives"] >= 1
+    assert archived_data["structured_counts"]["matches"] == 1
+    assert archived_data["structured_counts"]["slots"] == 8
+    assert archived_data["structured_counts"]["votes"] == 1
+    archive = archived_data["archives"][0]
+    assert archive["archived_match_id"] == "match_001"
+    assert archive["export_bundle"]["download_url"]
+    assert archive["export_bundle"]["entry_count"] >= 6
+    archived_entry_paths = {item["path"] for item in archive["export_bundle"]["entries"]}
+    assert "match.json" in archived_entry_paths
+    assert "audio_manifest.json" in archived_entry_paths
 
 
 def test_mock_agent_speech_records_final_transcript(monkeypatch) -> None:
@@ -720,6 +1371,113 @@ def test_agent_speech_can_use_injected_gateway(monkeypatch) -> None:
     data = client.get("/api/matches/match_001").json()["data"]
     assert data["recent_transcript"][0]["text"] == "外部 Agent 流式接入成功。"
     assert next(item for item in data["agent_status"] if item["speaker_id"] == "spk_aff_2")["status"] == "ready"
+    agent_requests = store.repo.load_agent_requests("match_001", 10)
+    assert len(agent_requests) == 1
+    assert agent_requests[0]["task_id"].startswith("task_")
+    assert agent_requests[0]["speech_id"] == data["recent_transcript"][0]["speech_id"]
+    assert agent_requests[0]["speaker_id"] == "spk_aff_2"
+    assert agent_requests[0]["endpoint"] == "http://fake-agent"
+    assert agent_requests[0]["status"] == "completed"
+    assert agent_requests[0]["response_text"] == "外部 Agent 流式接入成功。"
+    assert agent_requests[0]["request"]["speaker_id"] == "spk_aff_2"
+
+    export = client.post("/api/matches/current/exports")
+    assert export.status_code == 200
+    export_data = export.json()["data"]
+    export_rows = store.repo.load_export_bundles("match_001", 10)
+    assert export_rows[0]["export_id"] == export_data["export_id"]
+    assert export_rows[0]["entry_count"] == len(export_data["entries"])
+
+    download = client.get(export_data["download_url"])
+    assert download.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(download.content)) as bundle:
+        rows = [
+            json.loads(line)
+            for line in bundle.read("agent_requests.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        assert rows[0]["status"] == "completed"
+        assert rows[0]["response_text"] == "外部 Agent 流式接入成功。"
+        assert rows[0]["request"]["speaker_id"] == "spk_aff_2"
+
+    summary = client.get("/api/matches/current/data-summary")
+    assert summary.status_code == 200
+    summary_data = summary.json()["data"]
+    assert summary_data["counts"]["agent_requests"] == 1
+    assert summary_data["counts"]["export_bundles"] == 1
+    assert summary_data["structured_counts"]["agent_requests"] == 1
+    assert summary_data["structured_counts"]["export_bundles"] == 1
+    assert summary_data["latest_export"]["export_id"] == export_data["export_id"]
+
+
+def test_agent_gateway_failure_records_request_and_allows_manual_fallback(monkeypatch) -> None:
+    class FailingGateway:
+        def endpoint_for(self, speaker):
+            return "http://broken-agent"
+
+        async def stream_speech(self, endpoint, payload, fallback_chunks):
+            assert endpoint == "http://broken-agent"
+            assert payload["speaker_id"] == "spk_aff_2"
+            if False:
+                yield {}
+            raise AgentGatewayError("agent_timeout", "Agent 请求超时。", {"endpoint": endpoint})
+
+    original = store.agent_gateway
+    store.agent_gateway = FailingGateway()
+    try:
+        asyncio.run(store.run_agent_speech("spk_aff_2"))
+    finally:
+        store.agent_gateway = original
+
+    failed_snapshot = client.get("/api/matches/match_001").json()["data"]
+    failed_agent = next(item for item in failed_snapshot["agent_status"] if item["speaker_id"] == "spk_aff_2")
+    assert failed_agent["status"] == "failed"
+    assert failed_snapshot["speech_service"]["tts"]["status"] == "failed"
+    assert failed_snapshot["speech_service"]["tts"]["degraded_to"] == "manual_input"
+    assert failed_snapshot["current_speech"]["speaker_id"] == "spk_aff_2"
+
+    agent_requests = store.repo.load_agent_requests("match_001", 10)
+    assert len(agent_requests) == 1
+    assert agent_requests[0]["status"] == "failed"
+    assert agent_requests[0]["endpoint"] == "http://broken-agent"
+    assert agent_requests[0]["error_code"] == "agent_timeout"
+    assert agent_requests[0]["error_message"] == "Agent 请求超时。"
+
+    fallback = client.post(
+        "/api/matches/match_001/agent/spk_aff_2/manual-input",
+        json={"content": "人工接管后完成 AI 发言。", "reason": "agent_failed_fallback"},
+    )
+    assert fallback.status_code == 200
+    recovered = fallback.json()["data"]
+    assert recovered["current_speech"] is None
+    assert recovered["recent_transcript"][0]["text"] == "人工接管后完成 AI 发言。"
+    assert next(item for item in recovered["agent_status"] if item["speaker_id"] == "spk_aff_2")["status"] == "ready"
+
+    export = client.post("/api/matches/current/exports")
+    assert export.status_code == 200
+    export_data = export.json()["data"]
+    with zipfile.ZipFile(io.BytesIO(client.get(export_data["download_url"]).content)) as bundle:
+        rows = [
+            json.loads(line)
+            for line in bundle.read("agent_requests.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        assert rows[0]["status"] == "failed"
+        assert rows[0]["error_code"] == "agent_timeout"
+        assert rows[0]["error_message"] == "Agent 请求超时。"
+        assert rows[0]["request"]["speaker_id"] == "spk_aff_2"
+
+    summary = client.get("/api/matches/current/data-summary")
+    assert summary.status_code == 200
+    summary_data = summary.json()["data"]
+    assert summary_data["counts"]["agent_requests"] == 1
+    assert summary_data["structured_counts"]["agent_requests"] == 1
+    assert summary_data["latest_export"]["export_id"] == export_data["export_id"]
+    health = summary_data["request_health"]
+    assert health["agent_status_counts"]["failed"] == 1
+    assert health["failed_agent_requests"][0]["speaker_id"] == "spk_aff_2"
+    assert health["failed_agent_requests"][0]["error_code"] == "agent_timeout"
+    assert "request" not in health["failed_agent_requests"][0]
 
 
 def test_agent_speech_formal_tts_archives_audio(monkeypatch, tmp_path) -> None:
@@ -748,6 +1506,16 @@ def test_agent_speech_formal_tts_archives_audio(monkeypatch, tmp_path) -> None:
     assert Path(asset["chunks"][0]["file_path"]).read_bytes() == b"agent-mp3"
     assert data["speech_service"]["tts"]["status"] == "idle"
     assert data["speech_service"]["tts"]["latency_ms"] == 321
+    requests = store.repo.load_speech_service_requests("match_001", 10)
+    assert len(requests) == 1
+    assert requests[0]["service"] == "tts"
+    assert requests[0]["operation"] == "agent_synthesis"
+    assert requests[0]["speech_id"] == data["recent_transcript"][0]["speech_id"]
+    assert requests[0]["speaker_id"] == "spk_aff_2"
+    assert requests[0]["status"] == "completed"
+    assert requests[0]["request"]["speaker_id"] == "spk_aff_2"
+    assert requests[0]["response"]["size_bytes"] == len(b"agent-mp3")
+    assert requests[0]["latency_ms"] == 321
 
 
 def test_agent_speech_formal_tts_failure_keeps_text_transcript(monkeypatch) -> None:
@@ -769,6 +1537,14 @@ def test_agent_speech_formal_tts_failure_keeps_text_transcript(monkeypatch) -> N
     assert data["speech_service"]["tts"]["status"] == "failed"
     assert data["speech_service"]["tts"]["degraded_to"] == "text_only"
     assert data["current_speech"] is None
+    requests = store.repo.load_speech_service_requests("match_001", 10)
+    assert len(requests) == 1
+    assert requests[0]["service"] == "tts"
+    assert requests[0]["operation"] == "agent_synthesis"
+    assert requests[0]["status"] == "failed"
+    assert requests[0]["error_code"] == "500"
+    assert requests[0]["error_message"] == "tts unavailable"
+    assert requests[0]["response"]["degraded_to"] == "text_only"
 
 
 def test_agent_health_check_updates_agent_status() -> None:
@@ -852,6 +1628,47 @@ def test_agent_retry_rejects_invalid_phase_speaker() -> None:
     response = client.post("/api/matches/match_001/agent/spk_aff_2/retry")
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "invalid_speaker"
+
+
+def test_agent_speaker_console_can_request_authorized_agent_speech() -> None:
+    phase = client.post("/api/matches/match_001/phases/phase_aff_statement_2/start")
+    assert phase.status_code == 200
+
+    response = client.post("/api/matches/match_001/speakers/spk_aff_2/start-agent-speaking")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["match"]["id"] == "match_001"
+    assert data["last_seq"] > 1842
+    summary = client.get("/api/matches/match_001/data-summary")
+    assert summary.status_code == 200
+    assert summary.json()["data"]["event_type_counts"]["agent.speech.requested"] == 1
+
+
+def test_agent_speaker_console_rejects_human_and_locked_speech() -> None:
+    human = client.post("/api/matches/match_001/speakers/spk_aff_3/start-agent-speaking")
+    assert human.status_code == 409
+    assert human.json()["error"]["code"] == "invalid_speaker"
+
+    start_human = client.post("/api/matches/match_001/speakers/spk_aff_3/start-speaking")
+    assert start_human.status_code == 200
+    locked = client.post("/api/matches/match_001/speakers/spk_aff_2/start-agent-speaking")
+    assert locked.status_code == 409
+    assert locked.json()["error"]["code"] == "speaker_locked"
+
+
+def test_request_ai_teammate_is_deferred_for_mvp() -> None:
+    before = client.get("/api/matches/match_001").json()["data"]
+    response = client.post(
+        "/api/matches/match_001/speakers/spk_aff_3/request-ai-teammate",
+        json={"agent_speaker_id": "spk_aff_2"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "feature_deferred"
+    after = client.get("/api/matches/match_001").json()["data"]
+    assert after["current_speech"] == before["current_speech"]
+    assert after["match"]["live_mode"] == before["match"]["live_mode"]
+    assert after["last_seq"] == before["last_seq"]
 
 
 def test_speaker_websocket_heartbeat_updates_console_status() -> None:
@@ -949,6 +1766,45 @@ def test_clock_adjust_zero_expires_and_resume_rejects() -> None:
     assert resumed.json()["error"]["code"] == "clock_expired"
 
 
+def test_timer_tick_emits_expiry_and_auto_ends_current_speech() -> None:
+    phase = client.post("/api/matches/match_001/phases/phase_free_debate/start")
+    assert phase.status_code == 200
+    start = client.post("/api/matches/match_001/speakers/spk_aff_3/start-speaking")
+    assert start.status_code == 200
+    speech_id = start.json()["data"]["current_speech"]["id"]
+
+    adjusted = client.post(
+        "/api/matches/match_001/clocks/turn/adjust",
+        json={"remaining_ms": 0, "reason": "unit_timeout"},
+    )
+    assert adjusted.status_code == 200
+
+    emitted = asyncio.run(store.tick_timers())
+    assert [event["type"] for event in emitted] == [
+        "clock.expired",
+        "speech.timeout",
+        "speech.ended",
+        "flow.awaiting_host_confirm",
+    ]
+
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["recent_transcript"][0]["speech_id"] == speech_id
+    assert data["free_debate"]["current_turn_side"] == "negative"
+    assert data["flow"]["awaiting_host_confirm"] is True
+    assert data["flow"]["next_action"] == "free_turn_next"
+    assert data["flow"]["expired_clocks"] == ["turn"]
+
+    confirmed = client.post("/api/matches/match_001/flow/confirm", json={"reason": "unit_confirm_next_turn"})
+    assert confirmed.status_code == 200
+    confirmed_data = confirmed.json()["data"]
+    assert confirmed_data["flow"]["awaiting_host_confirm"] is False
+    assert next(item for item in confirmed_data["clocks"] if item["name"] == "turn")["state"] == "paused"
+
+    emitted_again = asyncio.run(store.tick_timers())
+    assert emitted_again == []
+
+
 def test_clock_control_rejects_unknown_and_negative_values() -> None:
     missing = client.post("/api/matches/match_001/clocks/not_real/pause")
     assert missing.status_code == 409
@@ -1043,6 +1899,33 @@ def test_audience_vote_rejects_duplicate_token() -> None:
     assert second.json()["error"]["code"] == "duplicate_vote"
 
 
+def test_audience_vote_rejects_same_browser_even_after_token_changes() -> None:
+    first = client.post(
+        "/api/public/matches/match_001/audience-votes",
+        headers={"user-agent": "same-browser"},
+        json={"token": "student-browser-1", "winner_side": "affirmative", "best_speaker_id": "spk_aff_3"},
+    )
+    assert first.status_code == 200
+
+    internal_keys = store.snapshot["vote_state"]["audience_vote_keys"]
+    assert len(internal_keys) == 2
+    assert all(key.startswith(("token_hash:", "browser_hash:")) for key in internal_keys)
+    assert not any("student-browser-1" in key for key in internal_keys)
+
+    second = client.post(
+        "/api/public/matches/match_001/audience-votes",
+        headers={"user-agent": "same-browser"},
+        json={"token": "student-browser-2", "winner_side": "negative", "best_speaker_id": "spk_neg_2"},
+    )
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "duplicate_vote"
+    assert "你已经投过票" in second.json()["error"]["message"]
+
+    public_snapshot = client.get("/api/matches/match_001").json()["data"]
+    assert "audience_vote_keys" not in public_snapshot["vote_state"]
+    assert "student-browser" not in json.dumps(public_snapshot, ensure_ascii=False)
+
+
 def test_judge_vote_items_build_summary_and_result_fields() -> None:
     response = client.post(
         "/api/matches/match_001/votes",
@@ -1073,15 +1956,45 @@ def test_vote_publish_order_requires_judge_before_audience() -> None:
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "publish_order"
 
+    blocked_scene = client.post("/api/matches/match_001/screen/scene", json={"scene": "audience_result"})
+    assert blocked_scene.status_code == 409
+    assert blocked_scene.json()["error"]["code"] == "publish_order"
+
     judge = client.post("/api/matches/match_001/votes/publish", json={"scope": "judge"})
     assert judge.status_code == 200
-    assert judge.json()["data"]["vote_state"]["judge_published"] is True
+    judge_data = judge.json()["data"]
+    assert judge_data["vote_state"]["judge_published"] is True
+    assert judge_data["vote_state"]["window_status"] == "closed"
+    assert judge_data["match"]["screen_scene"] == "judge_result"
 
     audience = client.post("/api/matches/match_001/votes/publish", json={"scope": "audience"})
     assert audience.status_code == 200
-    data = audience.json()["data"]["vote_state"]
-    assert data["judge_published"] is True
-    assert data["audience_published"] is True
+    data = audience.json()["data"]
+    assert data["vote_state"]["judge_published"] is True
+    assert data["vote_state"]["audience_published"] is True
+    assert data["match"]["screen_scene"] == "audience_result"
+
+    reopened = client.post("/api/matches/match_001/audience-votes/open")
+    assert reopened.status_code == 200
+    assert reopened.json()["data"]["window_status"] == "open"
+
+    finished = client.post("/api/matches/match_001/finish")
+    assert finished.status_code == 200
+    finished_data = finished.json()["data"]
+    assert finished_data["match"]["status"] == "finished"
+    assert finished_data["match"]["screen_scene"] == "audience_result"
+    assert finished_data["vote_state"]["window_status"] == "closed"
+
+    blocked_after_finish = client.post(
+        "/api/public/matches/match_001/audience-votes",
+        json={
+            "token": "vote-after-finish",
+            "winner_side": "affirmative",
+            "best_speaker_id": "spk_aff_3",
+        },
+    )
+    assert blocked_after_finish.status_code == 409
+    assert blocked_after_finish.json()["error"]["code"] == "vote_unavailable"
 
 
 def test_asr_partial_final_updates_live_speech_without_duplicate_segments() -> None:

@@ -1,11 +1,13 @@
-import { Bot, Mic, Square } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { post, uploadAudioChunk } from "../api/client";
+import { CheckCircle2, ClipboardCheck, Mic, Pause, Play, RadioTower, Square, UserRound } from "lucide-react";
+import { type ButtonHTMLAttributes, useEffect, useRef, useState } from "react";
+import { getMatch, patch, post, uploadAudioChunk } from "../api/client";
 import { AuthPrompt } from "../components/AuthPrompt";
 import { ClockTile } from "../components/ClockTile";
+import { useActionFeedback } from "../components/Feedback";
 import { StatusPill } from "../components/StatusPill";
-import { clockByName, seatLabel, sideClass, sideLabel } from "../state/format";
 import { useMatch } from "../realtime/useMatch";
+import { clockByName, clockStateLabel, seatLabel, sideClass, sideLabel, speakerLabel } from "../state/format";
+import type { AgentStatus, Clock as MatchClock, MatchSnapshot, Phase, Side, Speaker } from "../types/contracts";
 
 interface ConsolePageProps {
   matchId: string;
@@ -16,6 +18,9 @@ const PCM_SAMPLE_RATE = 16000;
 const PCM_CHUNK_MS = 500;
 const PCM_SAMPLES_PER_CHUNK = PCM_SAMPLE_RATE * (PCM_CHUNK_MS / 1000);
 const PCM_MIME_TYPE = "audio/L16;rate=16000";
+
+type EntryStep = "identity" | "mic" | "ready";
+type CheckStatus = "idle" | "testing" | "passed" | "failed";
 
 interface BrowserWindowWithAudioContext extends Window {
   webkitAudioContext?: typeof AudioContext;
@@ -33,9 +38,7 @@ function floatToPcmSample(value: number): number {
 }
 
 function downsampleToPcm(input: Float32Array, sourceRate: number): Int16Array {
-  if (sourceRate <= PCM_SAMPLE_RATE) {
-    return Int16Array.from(input, floatToPcmSample);
-  }
+  if (sourceRate <= PCM_SAMPLE_RATE) return Int16Array.from(input, floatToPcmSample);
   const ratio = sourceRate / PCM_SAMPLE_RATE;
   const length = Math.floor(input.length / ratio);
   const result = new Int16Array(length);
@@ -61,25 +64,53 @@ function pcmBlob(samples: number[]): Blob {
 }
 
 export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
-  const { snapshot, socketStatus, loadError, refresh, send } = useMatch(matchId, "speaker", speakerId);
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState(() => initialSpeakerId(speakerId));
+  const { snapshot, socketStatus, loadError, refresh, send } = useMatch(matchId, "speaker", selectedSpeakerId);
   const [error, setError] = useState<string | null>(null);
-  const [audioStatus, setAudioStatus] = useState("等待发言");
+  const [entryStep, setEntryStep] = useState<EntryStep>(() => initialEntryStep(matchId, selectedSpeakerId));
+  const [displayName, setDisplayName] = useState(() => initialDisplayName(matchId, selectedSpeakerId));
+  const [draftSpeakerId, setDraftSpeakerId] = useState(selectedSpeakerId);
+  const [draftName, setDraftName] = useState(displayName);
+  const [apiTestStatus, setApiTestStatus] = useState<CheckStatus>("idle");
+  const [micTestStatus, setMicTestStatus] = useState<CheckStatus>("idle");
+  const [audioStatus, setAudioStatus] = useState("待命");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunkIndexRef = useRef(0);
   const pendingUploadsRef = useRef<Promise<unknown>[]>([]);
+  const identityInitializedRef = useRef(false);
+  const { busyProps, notify, runAction } = useActionFeedback();
   const sendRef = useRef(send);
   sendRef.current = send;
 
-  const speaker = snapshot?.speakers.find((item) => item.id === speakerId) ?? snapshot?.speakers[0] ?? null;
+  const speaker = snapshot?.speakers.find((item) => item.id === selectedSpeakerId) ?? snapshot?.speakers[0] ?? null;
   const active = Boolean(snapshot?.current_speech?.speaker_id && speaker && snapshot.current_speech.speaker_id === speaker.id);
+  const speechPaused = active && snapshot?.current_speech?.state === "paused";
   const activeSpeechId = active ? snapshot?.current_speech?.id ?? null : null;
   const activeSpeakerId = speaker?.id ?? null;
   const speakerType = speaker?.speaker_type;
 
   useEffect(() => {
-    if (!activeSpeechId || !activeSpeakerId || speakerType !== "human") {
-      setAudioStatus("等待发言");
+    setDraftSpeakerId(selectedSpeakerId);
+  }, [selectedSpeakerId]);
+
+  useEffect(() => {
+    if (identityInitializedRef.current) return;
+    if (!snapshot) return;
+    const current = snapshot.speakers.find((item) => item.id === draftSpeakerId) ?? snapshot.speakers.find((item) => item.id === selectedSpeakerId);
+    if (!current) return;
+    identityInitializedRef.current = true;
+    if (!draftName) setDraftName(current.name);
+  }, [draftName, draftSpeakerId, selectedSpeakerId, snapshot]);
+
+  useEffect(() => {
+    if (!snapshot || !speaker || draftName) return;
+    setDraftName(speaker.name);
+  }, [draftName, snapshot, speaker]);
+
+  useEffect(() => {
+    if (!activeSpeechId || !activeSpeakerId || speakerType !== "human" || entryStep !== "ready") {
+      setAudioStatus("待命");
       return;
     }
 
@@ -97,12 +128,12 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       const upload = uploadAudioChunk(matchId, currentSpeechId, currentSpeakerId, chunkIndex, blob, durationMs, filename)
         .then((nextSnapshot) => {
           const asset = nextSnapshot.audio_assets.find((item) => item.speech_id === currentSpeechId);
-          if (!cancelled) setAudioStatus(`已归档 ${asset?.chunk_count ?? chunkIndex + 1} 段`);
+          if (!cancelled) setAudioStatus(asset?.chunk_count ? "记录中" : "待命");
         })
         .catch((err) => {
           if (!cancelled) {
-            setAudioStatus("音频归档上传失败");
-            setError(err instanceof Error ? err.message : "音频归档上传失败");
+            setAudioStatus("记录异常");
+            setError(err instanceof Error ? err.message : "录音上传失败");
           }
         });
       pendingUploadsRef.current.push(upload);
@@ -118,10 +149,10 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       void Promise.allSettled(uploads).then(() =>
         post(`/api/matches/${matchId}/speeches/${currentSpeechId}/audio/complete`, { speaker_id: currentSpeakerId })
           .then(() => {
-            if (!cancelled) setAudioStatus("音频归档已完成");
+            if (!cancelled) setAudioStatus("已记录");
           })
           .catch(() => {
-            if (!cancelled) setAudioStatus("音频归档完成确认失败");
+            if (!cancelled) setAudioStatus("记录确认失败");
           })
       );
     }
@@ -141,15 +172,13 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
           const take = force ? Math.min(sampleBuffer.length, PCM_SAMPLES_PER_CHUNK) : PCM_SAMPLES_PER_CHUNK;
           const samples = sampleBuffer.splice(0, take);
           const chunkNumber = chunkIndexRef.current;
-          const filename = `chunk_${String(chunkNumber).padStart(5, "0")}.pcm`;
-          enqueueUpload(pcmBlob(samples), Math.round((samples.length / PCM_SAMPLE_RATE) * 1000), filename);
+          enqueueUpload(pcmBlob(samples), Math.round((samples.length / PCM_SAMPLE_RATE) * 1000), `chunk_${String(chunkNumber).padStart(5, "0")}.pcm`);
         }
       }
 
       processor.onaudioprocess = (event) => {
         if (cancelled) return;
-        const input = event.inputBuffer.getChannelData(0);
-        const pcm = downsampleToPcm(input, audioContext.sampleRate);
+        const pcm = downsampleToPcm(event.inputBuffer.getChannelData(0), audioContext.sampleRate);
         for (const sample of pcm) sampleBuffer.push(sample);
         flush(false);
       };
@@ -157,7 +186,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       source.connect(processor);
       processor.connect(mute);
       mute.connect(audioContext.destination);
-      setAudioStatus("PCM/L16 归档中");
+      setAudioStatus("记录中");
 
       return () => {
         processor.onaudioprocess = null;
@@ -176,19 +205,15 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       const options = MediaRecorder.isTypeSupported(preferredMimeType) ? { mimeType: preferredMimeType } : undefined;
       localRecorder = new MediaRecorder(stream, options);
       recorderRef.current = localRecorder;
-      setAudioStatus("webm 归档中");
-
+      setAudioStatus("记录中");
       localRecorder.ondataavailable = (event) => {
         if (!event.data.size) return;
         const chunkNumber = chunkIndexRef.current;
-        const filename = `chunk_${String(chunkNumber).padStart(5, "0")}.webm`;
-        enqueueUpload(event.data, PCM_CHUNK_MS, filename);
+        enqueueUpload(event.data, PCM_CHUNK_MS, `chunk_${String(chunkNumber).padStart(5, "0")}.webm`);
       };
-
       localRecorder.onerror = () => {
-        if (!cancelled) setAudioStatus("录音归档异常");
+        if (!cancelled) setAudioStatus("记录异常");
       };
-
       localRecorder.onstop = queueArchiveComplete;
       localRecorder.start(PCM_CHUNK_MS);
       return true;
@@ -196,24 +221,16 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
 
     async function startArchive() {
       if (!navigator.mediaDevices?.getUserMedia) {
-        setAudioStatus("浏览器不支持录音归档");
-        sendRef.current("speaker.mic_error", {
-          speaker_id: currentSpeakerId,
-          mic_permission: "unknown",
-          device_label: "browser microphone",
-          message: "getUserMedia unavailable"
-        });
+        setAudioStatus("浏览器不支持录音");
         return;
       }
 
       try {
-        setAudioStatus("麦克风授权中");
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         if (cancelled) {
           localStream.getTracks().forEach((track) => track.stop());
           return;
         }
-
         streamRef.current = localStream;
         chunkIndexRef.current = 0;
         pendingUploadsRef.current = [];
@@ -224,17 +241,11 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
         }
         if (stopPcmArchive) return;
         if (startMediaRecorderArchive(localStream)) return;
-        setAudioStatus("浏览器不支持录音归档");
-        sendRef.current("speaker.mic_error", {
-          speaker_id: currentSpeakerId,
-          mic_permission: "unknown",
-          device_label: "browser microphone",
-          message: "AudioContext and MediaRecorder unavailable"
-        });
+        setAudioStatus("浏览器不支持录音");
       } catch (err) {
         if (!cancelled) {
-          setAudioStatus("麦克风不可用，已上报主持人");
-          setError(err instanceof Error ? err.message : "麦克风不可用");
+          setAudioStatus("麦克风不可用");
+          setError(err instanceof Error ? err.message : "麦克风不可用，请重新测试后进入。");
           sendRef.current("speaker.mic_error", {
             speaker_id: currentSpeakerId,
             mic_permission: "denied",
@@ -255,7 +266,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
         try {
           recorder.requestData();
         } catch {
-          // Browser may already have flushed data during stop.
+          // Some browsers already flush during stop.
         }
         recorder.stop();
       }
@@ -263,133 +274,743 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       recorderRef.current = null;
       streamRef.current = null;
     };
-  }, [activeSpeechId, activeSpeakerId, matchId, speakerType]);
+  }, [activeSpeechId, activeSpeakerId, entryStep, matchId, speakerType]);
 
   async function action(path: string, body: Record<string, unknown> = {}) {
     try {
-      setError(null);
-      await post(path, body);
-      await refresh();
+      const label = consoleActionLabel(path);
+      await runAction(actionKey(path, body), label, async () => {
+        setError(null);
+        await post(path, body);
+        await refresh();
+      }, {
+        successText: `${label}已同步`
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "操作失败");
     }
   }
 
-  if (!snapshot && loadError) return <AuthPrompt role="speaker" speakerId={speakerId} message={loadError} />;
-  if (!snapshot || !speaker) return <div className="loading">正在连接辩手控制台...</div>;
+  async function testMicrophone() {
+    try {
+      await runAction("console-mic-test", "麦克风测试", async () => {
+        setError(null);
+        setMicTestStatus("testing");
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+        stream.getTracks().forEach((track) => track.stop());
+        setMicTestStatus("passed");
+      }, {
+        successText: "麦克风可用"
+      });
+    } catch (err) {
+      setMicTestStatus("failed");
+      setError(err instanceof Error ? err.message : "无法使用麦克风，请检查浏览器授权。");
+    }
+  }
 
-  const currentSpeakerId = speaker.id;
-  const currentPhase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
-  const isFree = currentPhase?.phase_type === "free_debate";
-  const isCurrentTurnSide = !isFree || snapshot.free_debate.current_turn_side === speaker.side;
-  const canSpeak = snapshot.match.status === "running" && isCurrentTurnSide && (active || isFree || (!snapshot.current_speech && currentPhase?.side === speaker.side && currentPhase.speaker_seat === speaker.seat));
-  const aiTeammate = snapshot.speakers.find((item) => item.side === speaker.side && item.speaker_type === "agent");
-  const currentSpeechText = active ? snapshot.current_speech?.content_partial || snapshot.current_speech?.content_final : "";
-  const currentAudioAsset = snapshot.audio_assets.find((item) => item.speech_id === activeSpeechId) ?? snapshot.audio_assets.find((item) => item.speaker_id === speaker.id);
-  const micPermission = speaker.mic_permission ?? "unknown";
+  async function testApiRequest() {
+    try {
+      await runAction("console-api-test", "API 请求检测", async () => {
+        setError(null);
+        setApiTestStatus("testing");
+        await getMatch(matchId);
+        setApiTestStatus("passed");
+      }, {
+        successText: "API 请求正常"
+      });
+    } catch (err) {
+      setApiTestStatus("failed");
+      setError(err instanceof Error ? err.message : "API 请求失败，请联系工作人员。");
+    }
+  }
 
-  function reportMicError() {
-    const sent = send("speaker.mic_error", {
-      speaker_id: currentSpeakerId,
-      mic_permission: "denied",
-      device_label: "browser microphone",
-      message: "Speaker reported microphone issue"
-    });
-    if (!sent) {
-      setError("WebSocket 未连接，暂不能上报麦克风异常。");
+  async function saveIdentity() {
+    const nextName = draftName.trim();
+    const selected = snapshot?.speakers.find((item) => item.id === draftSpeakerId);
+    if (!draftSpeakerId || !selected) {
+      setError("请选择一个后台预设身份。");
       return;
     }
-    window.setTimeout(() => void refresh(), 300);
+    if (selected.speaker_type === "human" && !nextName) {
+      setError("请输入姓名。");
+      return;
+    }
+    try {
+      await runAction("console-save-identity", "确认身份", async () => {
+        setError(null);
+        if (selected.speaker_type === "human") {
+          await patch(`/api/matches/${matchId}/speakers/${draftSpeakerId}/profile`, { name: nextName });
+          await refresh();
+        }
+      }, {
+        successText: "身份已确认"
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "身份确认失败");
+      return;
+    }
+    window.localStorage.setItem(identityKey(matchId, draftSpeakerId), nextName);
+    window.localStorage.setItem(activeSpeakerKey(matchId), draftSpeakerId);
+    setSelectedSpeakerId(draftSpeakerId);
+    setDisplayName(selected.speaker_type === "human" ? nextName : selected.name);
+    setError(null);
+    if (selected.speaker_type === "agent") {
+      window.localStorage.setItem(entryReadyKey(matchId, draftSpeakerId), "1");
+      setEntryStep("ready");
+      notify({ tone: "success", title: "已进入辩手端", message: "AI 发言由主持人控制，页面会自动同步状态。" });
+    } else {
+      setEntryStep("mic");
+    }
+    setApiTestStatus("idle");
+    setMicTestStatus("idle");
+
+    const targetPath = `/console/${draftSpeakerId}`;
+    if (window.location.pathname !== targetPath) {
+      const params = new URLSearchParams(window.location.search);
+      if (matchId === "current") {
+        params.delete("match_id");
+      } else {
+        params.set("match_id", matchId);
+      }
+      const query = params.toString();
+      window.history.replaceState(null, "", query ? `${targetPath}?${query}` : targetPath);
+    }
+  }
+
+  function enterConsole() {
+    if (speaker?.speaker_type === "agent" && apiTestStatus !== "passed") {
+      setError("Agent 辩手请先完成 API 请求检测。");
+      return;
+    }
+    if (speaker?.speaker_type === "human" && micTestStatus !== "passed" && !canSkipMicTest()) {
+      setError("请先完成麦克风检测。");
+      return;
+    }
+    window.localStorage.setItem(entryReadyKey(matchId, selectedSpeakerId), "1");
+    setEntryStep("ready");
+    notify({ tone: "success", title: "已进入辩手端", message: "现场状态会自动同步。" });
+  }
+
+  function resetEntry() {
+    window.localStorage.removeItem(entryReadyKey(matchId, selectedSpeakerId));
+    identityInitializedRef.current = false;
+    setEntryStep("identity");
+    setApiTestStatus("idle");
+    setMicTestStatus("idle");
+    notify({ tone: "info", title: "已返回身份选择", message: "可重新选择后台预设身份。" });
+  }
+
+  if (!snapshot && loadError) return <AuthPrompt role="speaker" speakerId={selectedSpeakerId} message={loadError} />;
+  if (!snapshot || !speaker) return <div className="loading">正在连接辩手端...</div>;
+
+  const currentPhase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
+  const phaseTarget = phaseTargetLabel(currentPhase);
+  const isFree = currentPhase?.phase_type === "free_debate";
+  const isCurrentTurnSide = !isFree || snapshot.free_debate.current_turn_side === speaker.side;
+  const currentSpeaker = snapshot.speakers.find((item) => item.id === snapshot.current_speech?.speaker_id);
+  const hasOtherActiveSpeech = Boolean(snapshot.current_speech && snapshot.current_speech.speaker_id !== speaker.id);
+  const fixedSeatAllowed = !isFree && currentPhase?.side === speaker.side && currentPhase.speaker_seat === speaker.seat;
+  const canSpeak = snapshot.match.status === "running" && !snapshot.flow.awaiting_host_confirm && !hasOtherActiveSpeech && isCurrentTurnSide && (
+    active ||
+    isFree ||
+    fixedSeatAllowed
+  );
+  const prompt = buildPrompt({
+    active,
+    canSpeak,
+    displayName,
+    matchStatus: snapshot.match.status,
+    currentPhase,
+    speaker,
+    currentSpeaker,
+    freeTurnSide: snapshot.free_debate.current_turn_side,
+    flow: snapshot.flow
+  });
+  const currentSpeechText = active ? snapshot.current_speech?.content_partial || snapshot.current_speech?.content_final || "" : "";
+  const ownTeam = snapshot.teams.find((team) => team.id === speaker.team_id);
+  const clock = isFree ? clockByName(snapshot.clocks, "turn") : clockByName(snapshot.clocks, "main");
+  const agentStatus = snapshot.agent_status.find((item) => item.speaker_id === speaker.id);
+
+  if (entryStep !== "ready") {
+    return (
+      <main className="console-entry-shell">
+        <section className="console-entry-card">
+          <div className="entry-steps">
+            <span className={entryStep === "identity" ? "active" : "done"}>1 身份选择</span>
+            <span className={entryStep === "mic" ? "active" : ""}>2 硬件测试</span>
+          </div>
+          {entryStep === "identity" ? (
+            <form
+              className="console-entry-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveIdentity();
+              }}
+            >
+              <UserRound size={34} />
+              <h1>身份选择</h1>
+              <p>请选择后台提前预设好的身份。人类选手可在下方确认或修改姓名，修改后会同步到后台。</p>
+              <div className="identity-card-grid">
+                {snapshot.speakers.map((item) => (
+                  <button
+                    type="button"
+                    key={item.id}
+                    className={`identity-choice ${sideClass(item.side)} ${draftSpeakerId === item.id ? "active" : ""}`}
+                    onClick={() => {
+                      setDraftSpeakerId(item.id);
+                      setDraftName(item.name);
+                    }}
+                  >
+                    <span>{sideLabel(item.side)}{seatLabel(item.seat)}</span>
+                    <strong>{item.name}</strong>
+                    <em>{item.speaker_type === "agent" ? `Agent · ${item.model_name ?? "未填写模型"}` : "人类选手"}</em>
+                  </button>
+                ))}
+              </div>
+              {snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" ? (
+                <label>
+                  <span>姓名</span>
+                  <input value={draftName} placeholder="请输入你的姓名" onChange={(event) => setDraftName(event.target.value)} />
+                </label>
+              ) : (
+                <div className="entry-empty">
+                  {snapshot.speakers.find((item) => item.id === draftSpeakerId)?.agent_endpoint
+                    ? "该 Agent 已配置 API 地址。"
+                    : "该 Agent 暂未配置 API 地址，请先在后台确认。"}
+                </div>
+              )}
+              {error && <div className="console-error">{error}</div>}
+              <button {...busyProps("console-save-identity")} type="submit" disabled={!draftSpeakerId || (snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" && !draftName.trim())}>
+                <ClipboardCheck size={18} />下一步
+              </button>
+            </form>
+          ) : (
+            <section className="console-entry-form">
+              <RadioTower size={34} />
+              <h1>硬件测试</h1>
+              {speaker?.speaker_type === "agent" ? (
+                <>
+                  <p>Agent 辩手需要确认 API 请求连通。现场声音只从主持导播台或技术后台指定电脑输出，本机无需外放。</p>
+                  <div className="entry-check-list">
+                    <div className={`entry-check ${apiTestStatus}`}>
+                      <strong>API 请求</strong>
+                      <span>{checkLabel(apiTestStatus, "点击检测 API")}</span>
+                      <button {...busyProps("console-api-test")} type="button" onClick={testApiRequest} disabled={apiTestStatus === "testing"}>
+                        <RadioTower size={16} />检测
+                      </button>
+                    </div>
+                    <div className="entry-check passed">
+                      <strong>现场声音</strong>
+                      <span>{snapshot?.audio_output?.label ?? "主持导播台电脑"}统一输出，辩手端不播放铃声或 TTS。</span>
+                      <em>无需检测</em>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p>人类选手需要确认麦克风可用。当前通过 HTTP 访问时，浏览器可能不开放麦克风权限，可直接跳过。</p>
+                  <div className={`entry-check ${micTestStatus}`}>
+                    <strong>麦克风</strong>
+                    <span>{canSkipMicTest() ? "HTTP 访问，可跳过麦克风检测" : micTestLabel(micTestStatus)}</span>
+                    <button {...busyProps("console-mic-test")} type="button" onClick={testMicrophone} disabled={micTestStatus === "testing"}>
+                      <Mic size={16} />测试
+                    </button>
+                  </div>
+                </>
+              )}
+              {error && <div className="console-error">{error}</div>}
+              <div className="entry-button-row">
+                <button type="button" onClick={() => setEntryStep("identity")}>返回</button>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={enterConsole}
+                  disabled={speaker?.speaker_type === "agent" ? apiTestStatus !== "passed" : micTestStatus !== "passed" && !canSkipMicTest()}
+                >
+                  <CheckCircle2 size={18} />进入
+                </button>
+              </div>
+            </section>
+          )}
+        </section>
+      </main>
+    );
   }
 
   return (
     <main className="console-shell">
-      <section className="console-card identity-card">
-        <div className={`avatar big ${sideClass(speaker.side)}`}>{speaker.name.slice(0, 1)}</div>
-        <div>
-          <h1>{speaker.name}</h1>
-          <p>{snapshot.teams.find((team) => team.id === speaker.team_id)?.name} · {seatLabel(speaker.seat)}</p>
+      <section className="console-hero-card">
+        <div className={`avatar big ${sideClass(speaker.side)}`}>{displayName.slice(0, 1) || speaker.name.slice(0, 1)}</div>
+        <div className="console-identity">
+          <span>辩手端</span>
+          <h1>{displayName || speaker.name}</h1>
+          <p>{ownTeam?.name} · {sideLabel(speaker.side)}{seatLabel(speaker.seat)}</p>
         </div>
-        <StatusPill tone={speaker.side === "affirmative" ? "blue" : "red"}>{sideLabel(speaker.side)}</StatusPill>
+        <button className="quiet-button" onClick={resetEntry}>切换身份</button>
       </section>
 
-      <section className="console-card">
-        <div className="console-phase">
-          <span>当前环节</span>
-          <strong>{currentPhase?.name}</strong>
-          <StatusPill tone={socketStatus === "open" ? "green" : "red"}>{socketStatus}</StatusPill>
-        </div>
-        <div className={`console-banner ${active ? "speaking" : canSpeak ? "ready" : "waiting"}`}>
-          {active ? "发言中 · 正在记录" : canSpeak ? "轮到你或本方发言" : `等待中 · 当前发言：${snapshot.current_speech?.speaker_id ?? "未指定"}`}
-        </div>
-        {isFree && (
-          <div className="console-turn">当前轮次：{sideLabel(snapshot.free_debate.current_turn_side)} · 第 {snapshot.free_debate.turn_index} 轮</div>
-        )}
-      </section>
       {error && <div className="console-error">{error}</div>}
 
-      <section className="console-card timer-card">
-        {isFree ? (
-          <>
-            <ClockTile label="单次上限" clock={clockByName(snapshot.clocks, "turn")} tone="turn" />
-            <div className="console-free-row">
-              <span>本方剩余</span>
-              <ClockTile
-                label={sideLabel(speaker.side)}
-                clock={clockByName(snapshot.clocks, `${speaker.side}_total`)}
-                tone={speaker.side === "affirmative" ? "aff" : "neg"}
-                compact
-              />
-            </div>
-          </>
-        ) : (
-          <ClockTile label="本环节剩余" clock={clockByName(snapshot.clocks, "main")} tone={speaker.side === "affirmative" ? "aff" : "neg"} />
-        )}
+      <section className={`console-callout ${prompt.tone}`}>
+        <span>{prompt.eyebrow}</span>
+        <strong>{prompt.title}</strong>
+        <p>{prompt.detail}</p>
       </section>
 
-      <section className="console-card speech-monitor">
-        <div>
-          <span>ASR</span>
-          <strong>{snapshot.speech_service.asr.status} · {snapshot.speech_service.asr.latency_ms}ms</strong>
-        </div>
-        <div>
-          <span>麦克风</span>
-          <strong>{micPermission}</strong>
-        </div>
-        <div>
-          <span>录音归档</span>
-          <strong>{audioStatus}{currentAudioAsset ? ` · ${currentAudioAsset.chunk_count} 段` : ""}</strong>
-        </div>
-        {active && <p>{currentSpeechText || "等待转写输入..."}</p>}
-      </section>
-
-      <section className="console-actions">
-        {active ? (
-          <button className="mic-button stop" onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`)}>
-            <Square size={28} />结束发言
-          </button>
-        ) : (
-          <button
-            className={`mic-button ${canSpeak ? "start" : "disabled"}`}
-            disabled={!canSpeak}
-            onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`)}
-          >
-            <Mic size={28} />开始发言
-          </button>
-        )}
-        {isFree && aiTeammate && (
-          <button
-            className="ai-request"
-            disabled={!canSpeak}
-            onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/request-ai-teammate`, { agent_speaker_id: aiTeammate.id })}
-          >
-            <Bot size={20} />让 AI 队友发言（{aiTeammate.name}）
-          </button>
-        )}
-        <button className="ai-request" onClick={reportMicError}>
-          <Mic size={20} />报告麦克风异常
-        </button>
-      </section>
+      {speaker.speaker_type === "agent" ? (
+        <AgentConsoleView
+          matchId={matchId}
+          snapshot={snapshot}
+          speaker={speaker}
+          currentPhase={currentPhase}
+          currentSpeaker={currentSpeaker}
+          agentStatus={agentStatus}
+          active={active}
+          canSpeak={canSpeak}
+          phaseTarget={phaseTarget}
+          isFree={isFree}
+          socketStatus={socketStatus}
+          busyProps={busyProps}
+          action={action}
+        />
+      ) : (
+        <HumanConsoleView
+          matchId={matchId}
+          snapshot={snapshot}
+          speaker={speaker}
+          currentPhase={currentPhase}
+          currentSpeaker={currentSpeaker}
+          phaseTarget={phaseTarget}
+          isFree={isFree}
+          active={active}
+          speechPaused={speechPaused}
+          canSpeak={canSpeak}
+          clock={clock}
+          audioStatus={audioStatus}
+          currentSpeechText={currentSpeechText}
+          socketStatus={socketStatus}
+          busyProps={busyProps}
+          action={action}
+        />
+      )}
     </main>
   );
+}
+
+function HumanConsoleView({
+  matchId,
+  snapshot,
+  speaker,
+  currentPhase,
+  currentSpeaker,
+  phaseTarget,
+  isFree,
+  active,
+  speechPaused,
+  canSpeak,
+  clock,
+  audioStatus,
+  currentSpeechText,
+  socketStatus,
+  busyProps,
+  action
+}: {
+  matchId: string;
+  snapshot: MatchSnapshot;
+  speaker: Speaker;
+  currentPhase?: Phase;
+  currentSpeaker?: Speaker;
+  phaseTarget: string;
+  isFree: boolean;
+  active: boolean;
+  speechPaused: boolean;
+  canSpeak: boolean;
+  clock?: MatchClock;
+  audioStatus: string;
+  currentSpeechText: string;
+  socketStatus: string;
+  busyProps: (key: string) => ButtonHTMLAttributes<HTMLButtonElement>;
+  action: (path: string, body?: Record<string, unknown>) => Promise<void>;
+}) {
+  return (
+    <>
+      <section className="console-main-grid human-view">
+        <ConsoleStageCard
+          snapshot={snapshot}
+          currentPhase={currentPhase}
+          currentSpeaker={currentSpeaker}
+          phaseTarget={phaseTarget}
+          isFree={isFree}
+          socketStatus={socketStatus}
+        />
+
+        <div className="console-action-card">
+          <ClockTile
+            label={isFree ? "本次发言剩余" : "本环节剩余"}
+            clock={clock}
+            tone={speaker.side === "affirmative" ? "aff" : "neg"}
+          />
+          {isFree && (
+            <ClockTile
+              label="本方总时间"
+              clock={clockByName(snapshot.clocks, `${speaker.side}_total`)}
+              tone={speaker.side === "affirmative" ? "aff" : "neg"}
+              compact
+            />
+          )}
+          <div className="console-clock-note">
+            状态：{clockStateLabel(clock?.state)}{audioStatus === "记录异常" ? " · 录音异常，请联系工作人员" : ""}
+          </div>
+          {active ? (
+            <div className="console-speech-actions">
+              {speechPaused ? (
+                <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/resume-speaking`, { reason: "speaker_resume" }))} onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/resume-speaking`, { reason: "speaker_resume" })}>
+                  <Play size={20} />继续发言
+                </button>
+              ) : (
+                <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/pause-speaking`, { reason: "speaker_pause" }))} onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/pause-speaking`, { reason: "speaker_pause" })}>
+                  <Pause size={20} />暂停发言
+                </button>
+              )}
+              <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`))} className="mic-button stop" onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`)}>
+                <Square size={28} />结束发言
+              </button>
+            </div>
+          ) : (
+            <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`))} className={`mic-button ${canSpeak ? "start" : "disabled"}`} disabled={!canSpeak} onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`)}>
+              <Play size={28} />开始发言
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="console-secondary">
+        <div>
+          <h3>提示</h3>
+          <p>{phaseHelpText(currentPhase, speaker, snapshot.free_debate.current_turn_side)}</p>
+        </div>
+        {active && (
+          <div>
+            <h3>当前转写</h3>
+            <p>{currentSpeechText || "正在等待转写内容。"}</p>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function AgentConsoleView({
+  matchId,
+  snapshot,
+  speaker,
+  currentPhase,
+  currentSpeaker,
+  agentStatus,
+  active,
+  canSpeak,
+  phaseTarget,
+  isFree,
+  socketStatus,
+  busyProps,
+  action
+}: {
+  matchId: string;
+  snapshot: MatchSnapshot;
+  speaker: Speaker;
+  currentPhase?: Phase;
+  currentSpeaker?: Speaker;
+  agentStatus?: AgentStatus;
+  active: boolean;
+  canSpeak: boolean;
+  phaseTarget: string;
+  isFree: boolean;
+  socketStatus: string;
+  busyProps: (key: string) => ButtonHTMLAttributes<HTMLButtonElement>;
+  action: (path: string, body?: Record<string, unknown>) => Promise<void>;
+}) {
+  const allowed = isAgentAllowedForPhase(speaker, currentPhase, snapshot.free_debate.current_turn_side);
+  const modelLabel = speaker.model_name || agentStatus?.model || "未配置模型";
+  return (
+    <>
+      <section className="console-main-grid agent-view">
+        <ConsoleStageCard
+          snapshot={snapshot}
+          currentPhase={currentPhase}
+          currentSpeaker={currentSpeaker}
+          phaseTarget={phaseTarget}
+          isFree={isFree}
+          socketStatus={socketStatus}
+        />
+        <div className="console-agent-card">
+          <span>AI 辩手状态</span>
+          <strong>{active ? "正在发言" : canSpeak ? "已获得发言权限" : allowed ? "等待当前发言结束" : "等待轮次"}</strong>
+          <p>{active ? "AI 正在生成或播放发言，大屏同步显示文本。" : canSpeak ? "当前轮次已授权给该 AI 辩手，主持人激活后系统将自动开始生成。" : allowed ? "当前轮次匹配该 AI 辩手，等待当前发言结束后自动开始。" : phaseHelpText(currentPhase, speaker, snapshot.free_debate.current_turn_side)}</p>
+          <div className="agent-info-grid">
+            <div>
+              <em>模型</em>
+              <b>{modelLabel}</b>
+            </div>
+            <div>
+              <em>API</em>
+              <b>{speaker.agent_endpoint ? "已配置" : "未配置"}</b>
+            </div>
+            <div>
+              <em>连接</em>
+              <b>{agentStatusLabel(agentStatus?.status)}</b>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <section className="console-secondary agent-secondary">
+        <div>
+          <h3>提示</h3>
+          <p>AI 辩手无需手动操作。主持人激活发言席位后，系统将自动触发 AI 生成并在大屏输出。本页面仅用于监控状态。</p>
+        </div>
+        <div>
+          <h3>当前任务</h3>
+          <p>{currentSpeaker?.id === speaker.id ? "当前 AI 正在发言或等待生成完成。" : `当前发言：${speakerLabel(currentSpeaker)}`}</p>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function ConsoleStageCard({
+  snapshot,
+  currentPhase,
+  currentSpeaker,
+  phaseTarget,
+  isFree,
+  socketStatus
+}: {
+  snapshot: MatchSnapshot;
+  currentPhase?: Phase;
+  currentSpeaker?: Speaker;
+  phaseTarget: string;
+  isFree: boolean;
+  socketStatus: string;
+}) {
+  return (
+    <div className="console-stage-card">
+      <div className="console-section-head">
+        <span>当前阶段</span>
+        <StatusPill tone={socketStatus === "open" ? "green" : "red"}>{socketStatus === "open" ? "已连接" : "连接中"}</StatusPill>
+      </div>
+      <h2>{currentPhase?.name ?? "等待环节"}</h2>
+      <div className="console-stage-meta">
+        <p>本环节发言：<strong>{phaseTarget}</strong></p>
+        {snapshot.flow.awaiting_host_confirm && <p>现场状态：<strong>{snapshot.flow.message || "时间到，等待主持确认下一步"}</strong></p>}
+        {isFree && <p>当前轮到：<strong>{sideLabel(snapshot.free_debate.current_turn_side)} · 第 {snapshot.free_debate.turn_index} 轮</strong></p>}
+        <p>当前发言：<strong>{speakerLabel(currentSpeaker)}</strong></p>
+      </div>
+      <div className="console-timeline">
+        {snapshot.phases.map((item) => (
+          <span key={item.id} className={`${item.id === snapshot.match.current_phase_id ? "active" : ""} ${item.status}`}>
+            {item.display_order}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function initialSpeakerId(fallback: string): string {
+  const params = new URLSearchParams(window.location.search);
+  const pathSpeakerId = window.location.pathname.match(/^\/console\/([^/]+)/)?.[1];
+  return (
+    params.get("speaker_id")
+    ?? (pathSpeakerId ? decodeURIComponent(pathSpeakerId) : null)
+    ?? window.localStorage.getItem(activeSpeakerKey(params.get("match_id") ?? "current"))
+    ?? fallback
+  );
+}
+
+function initialDisplayName(matchId: string, speakerId: string): string {
+  return window.localStorage.getItem(identityKey(matchId, speakerId)) ?? "";
+}
+
+function initialEntryStep(matchId: string, speakerId: string): EntryStep {
+  return window.localStorage.getItem(entryReadyKey(matchId, speakerId)) === "1" ? "ready" : "identity";
+}
+
+function identityKey(matchId: string, speakerId: string): string {
+  return `phdebate_console_name_${matchId}_${speakerId}`;
+}
+
+function activeSpeakerKey(matchId: string): string {
+  return `phdebate_console_speaker_${matchId}`;
+}
+
+function entryReadyKey(matchId: string, speakerId: string): string {
+  return `phdebate_console_ready_${matchId}_${speakerId}`;
+}
+
+function micTestLabel(status: "idle" | "testing" | "passed" | "failed"): string {
+  if (status === "testing") return "正在请求麦克风权限...";
+  if (status === "passed") return "麦克风可用，可以进入。";
+  if (status === "failed") return "麦克风不可用，请检查浏览器授权。";
+  return "尚未测试";
+}
+
+function checkLabel(status: CheckStatus, idleText: string): string {
+  if (status === "testing") return "检测中...";
+  if (status === "passed") return "检测通过";
+  if (status === "failed") return "检测失败";
+  return idleText;
+}
+
+function actionKey(path: string, body: Record<string, unknown> = {}): string {
+  return `${path}:${JSON.stringify(body)}`;
+}
+
+function consoleActionLabel(path: string): string {
+  if (path.endsWith("/start-speaking")) return "开始发言";
+  if (path.endsWith("/start-agent-speaking")) return "启动 AI 发言";
+  if (path.endsWith("/stop-speaking")) return "结束发言";
+  if (path.endsWith("/pause-speaking")) return "暂停发言";
+  if (path.endsWith("/resume-speaking")) return "继续发言";
+  return "同步状态";
+}
+
+function canSkipMicTest(): boolean {
+  return window.location.protocol === "http:" && !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+}
+
+function phaseTargetLabel(phase?: Phase): string {
+  if (!phase) return "等待主持人安排";
+  if (phase.phase_type === "free_debate") return "自由辩论，本方轮次内可发言";
+  if (phase.side === "neutral") return "主持/评委环节";
+  return `${sideLabel(phase.side)}${phase.speaker_seat ? seatLabel(phase.speaker_seat) : ""}`;
+}
+
+function phaseHelpText(phase: Phase | undefined, speaker: Speaker, freeTurnSide: Side): string {
+  if (!phase) return "请等待主持人开始比赛。";
+  if (phase.phase_type === "free_debate") {
+    return freeTurnSide === speaker.side
+      ? "当前轮到本方。主持人示意后，你可以点击开始发言。"
+      : `当前轮到${sideLabel(freeTurnSide)}。轮到${sideLabel(speaker.side)}时再发言。`;
+  }
+  if (phase.side === speaker.side && phase.speaker_seat === speaker.seat) {
+    return "本环节指定你发言。主持人示意后，点击开始发言。";
+  }
+  return `请等待${phaseTargetLabel(phase)}发言。`;
+}
+
+function isAgentAllowedForPhase(speaker: Speaker, phase: Phase | undefined, freeTurnSide: Side): boolean {
+  if (!phase) return false;
+  if (phase.phase_type === "free_debate") return speaker.side === freeTurnSide;
+  return phase.side === speaker.side && phase.speaker_seat === speaker.seat;
+}
+
+function agentStatusLabel(status?: string): string {
+  if (!status) return "未检测";
+  if (status === "ready") return "就绪";
+  if (status === "streaming") return "生成中";
+  if (status === "failed") return "异常";
+  if (status === "ok") return "正常";
+  return status;
+}
+
+function buildPrompt({
+  active,
+  canSpeak,
+  displayName,
+  matchStatus,
+  currentPhase,
+  speaker,
+  currentSpeaker,
+  freeTurnSide,
+  flow
+}: {
+  active: boolean;
+  canSpeak: boolean;
+  displayName: string;
+  matchStatus: string;
+  currentPhase?: Phase;
+  speaker: Speaker;
+  currentSpeaker?: Speaker;
+  freeTurnSide: Side;
+  flow: MatchSnapshot["flow"];
+}): { tone: "ready" | "speaking" | "waiting"; eyebrow: string; title: string; detail: string } {
+  if (!active && flow.awaiting_host_confirm) {
+    return {
+      tone: "waiting",
+      eyebrow: "时间到",
+      title: "请等待主持确认下一步",
+      detail: flow.message || "现场正在切换节奏，页面会自动更新。"
+    };
+  }
+  if (speaker.speaker_type === "agent") {
+    if (active) {
+      return {
+        tone: "speaking",
+        eyebrow: "AI 发言中",
+        title: `${speaker.name} 正在生成或播放发言`,
+        detail: "请保持页面在线，主持台会同步发言状态。"
+      };
+    }
+    if (canSpeak) {
+      return {
+        tone: "ready",
+        eyebrow: "已获授权",
+        title: `${speaker.name} 当前轮次可在本端启动`,
+        detail: "赛制规则已把发言权限授予该 AI 席位，主持人激活后系统将自动开始生成发言。"
+      };
+    }
+    if (matchStatus !== "running") {
+      return {
+        tone: "waiting",
+        eyebrow: "等待比赛",
+        title: "请等待主持人开始或继续比赛",
+        detail: "当前页面会自动更新。"
+      };
+    }
+    return {
+      tone: "waiting",
+      eyebrow: "等待轮次",
+      title: `请等待${phaseWaitTarget(currentPhase, speaker, freeTurnSide)}`,
+      detail: currentSpeaker ? `当前发言：${speakerLabel(currentSpeaker)}` : "当前尚未指定发言人。"
+    };
+  }
+  if (active) {
+    return {
+      tone: "speaking",
+      eyebrow: "正在发言",
+      title: `${displayName || speaker.name}，保持发言`,
+      detail: "发言结束后点击“结束发言”，系统会自动停止计时并保存记录。"
+    };
+  }
+  if (canSpeak) {
+    return {
+      tone: "ready",
+      eyebrow: "可以发言",
+      title: `${displayName || speaker.name}，现在轮到你或本方`,
+      detail: "主持人示意后点击“开始发言”。"
+    };
+  }
+  if (matchStatus !== "running") {
+    return {
+      tone: "waiting",
+      eyebrow: "等待比赛",
+      title: "请等待主持人开始或继续比赛",
+      detail: "当前页面会自动更新。"
+    };
+  }
+  return {
+    tone: "waiting",
+    eyebrow: "尚未轮到你",
+    title: `请等待${phaseWaitTarget(currentPhase, speaker, freeTurnSide)}`,
+    detail: currentSpeaker ? `当前发言：${speakerLabel(currentSpeaker)}` : "当前尚未指定发言人。"
+  };
+}
+
+function phaseWaitTarget(phase: Phase | undefined, speaker: Speaker, freeTurnSide: Side): string {
+  if (!phase) return "主持人安排";
+  if (phase.phase_type === "free_debate") return `${sideLabel(freeTurnSide)}发言`;
+  if (phase.side === speaker.side && phase.speaker_seat === speaker.seat) return "主持人示意";
+  return `${phaseTargetLabel(phase)}`;
 }

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import os
+import time
 import zipfile
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -83,7 +85,7 @@ class MatchStore:
                 "organizer": "中国科学院计算技术研究所",
                 "venue": "现场会场",
                 "status": "running",
-                "screen_scene": "live",
+                "screen_scene": "idle",
                 "live_mode": "free",
                 "current_phase_id": "phase_free_debate",
                 "created_at": to_iso(now),
@@ -106,6 +108,7 @@ class MatchStore:
                 },
             ],
             "speakers": self._demo_speakers(),
+            "agent_configs": self._demo_agent_configs(now),
             "phases": self._demo_phases(),
             "clocks": [
                 {
@@ -152,6 +155,8 @@ class MatchStore:
                 "turn_index": 14,
                 "assignment_mode": "teammate_control",
             },
+            "flow": self._fresh_flow_state(),
+            "audio_output": self._fresh_audio_output_state(),
             "recent_transcript": [
                 {
                     "id": "seg_003",
@@ -304,8 +309,17 @@ class MatchStore:
             "last_seen_at": None,
         }
         if speaker_type == "agent":
+            speaker["agent_config_id"] = self._default_agent_config_id(speaker_id)
             speaker["agent_endpoint"] = self._agent_endpoint_for_speaker(speaker_id)
         return speaker
+
+    def _demo_agent_configs(self, now: datetime) -> List[Dict[str, Any]]:
+        configs: List[Dict[str, Any]] = []
+        for speaker in self._demo_speakers():
+            if speaker.get("speaker_type") != "agent":
+                continue
+            configs.append(self._agent_config_from_speaker(speaker, to_iso(now)))
+        return configs
 
     def _demo_phases(self) -> List[Dict[str, Any]]:
         rows = [
@@ -352,6 +366,107 @@ class MatchStore:
             match_id = self.snapshot["match"]["id"]
         return self.repo.load_audit_logs(match_id, limit)
 
+    async def get_data_summary(self) -> Dict[str, Any]:
+        async with self._lock:
+            self._refresh_clocks()
+            snapshot = deepcopy(self.snapshot)
+            snapshot["last_seq"] = self.seq
+            match_id = snapshot["match"]["id"]
+
+        events = self.repo.load_events(match_id, 10000)
+        audit_logs = self.repo.load_audit_logs(match_id, 10000)
+        archives = self.repo.load_match_archives(12)
+        structured_counts = self.repo.load_structured_counts(match_id)
+        agent_requests = self.repo.load_agent_requests(match_id, 10000)
+        speech_service_requests = self.repo.load_speech_service_requests(match_id, 10000)
+        export_bundles = self.repo.load_export_bundles(match_id, 20)
+        latest_export = export_bundles[0] if export_bundles else self._latest_export_from_events(events)
+        vote_state = snapshot.get("vote_state", {})
+        audio_assets = snapshot.get("audio_assets", [])
+        transcript = snapshot.get("recent_transcript", [])
+        speakers = snapshot.get("speakers", [])
+
+        archive_items = []
+        for archive in archives:
+            archived_snapshot = archive.get("snapshot", {})
+            archived_vote = archived_snapshot.get("vote_state", {})
+            archived_audio = archived_snapshot.get("audio_assets", [])
+            archived_transcript = archived_snapshot.get("recent_transcript", [])
+            export_bundle = archive.get("export_bundle", {}) or {}
+            archive_items.append(
+                {
+                    "id": archive.get("id"),
+                    "archived_match_id": archive.get("archived_match_id"),
+                    "new_match_id": archive.get("new_match_id"),
+                    "created_at": archive.get("created_at"),
+                    "title": archived_snapshot.get("match", {}).get("title", ""),
+                    "topic": archived_snapshot.get("match", {}).get("topic", ""),
+                    "counts": {
+                        "transcript_segments": len(archived_transcript),
+                        "audio_assets": len(archived_audio),
+                        "audience_votes": int(archived_vote.get("audience_count", archived_vote.get("audience_summary", {}).get("total", 0)) or 0),
+                    },
+                    "export_bundle": self._compact_export_bundle(export_bundle),
+                }
+            )
+
+        return {
+            "generated_at": iso_now(),
+            "match": {
+                "id": match_id,
+                "title": snapshot["match"].get("title", ""),
+                "topic": snapshot["match"].get("topic", ""),
+                "status": snapshot["match"].get("status", ""),
+                "screen_scene": snapshot["match"].get("screen_scene", ""),
+                "current_phase_id": snapshot["match"].get("current_phase_id", ""),
+            },
+            "persistence": snapshot.get("system", {}).get("persistence", self._system_info().get("persistence", {})),
+            "counts": {
+                "phases": len(snapshot.get("phases", [])),
+                "speakers": len(speakers),
+                "human_speakers": len([speaker for speaker in speakers if speaker.get("speaker_type") == "human"]),
+                "agent_speakers": len([speaker for speaker in speakers if speaker.get("speaker_type") == "agent"]),
+                "agent_configs": len(snapshot.get("agent_configs", [])),
+                "transcript_segments": len(transcript),
+                "final_transcript_segments": len([segment for segment in transcript if segment.get("is_final")]),
+                "speech_revisions": len(snapshot.get("speech_revisions", [])),
+                "audio_assets": len(audio_assets),
+                "audio_chunks": sum(len(asset.get("chunks", [])) for asset in audio_assets),
+                "audience_votes": int(vote_state.get("audience_count", vote_state.get("audience_summary", {}).get("total", 0)) or 0),
+                "audience_vote_keys": len(vote_state.get("audience_vote_keys", [])) + len(vote_state.get("used_audience_tokens", [])),
+                "agent_requests": len(agent_requests),
+                "speech_service_requests": len(speech_service_requests),
+                "export_bundles": len(export_bundles),
+                "events": len(events),
+                "audit_logs": len(audit_logs),
+                "archives": len(archives),
+            },
+            "structured_counts": structured_counts,
+            "request_health": {
+                "agent_status_counts": self._status_counts(agent_requests),
+                "speech_service_status_counts": self._status_counts(speech_service_requests),
+                "recent_agent_requests": [self._compact_agent_request(item) for item in agent_requests[:5]],
+                "recent_speech_service_requests": [
+                    self._compact_speech_service_request(item) for item in speech_service_requests[:5]
+                ],
+                "failed_agent_requests": [
+                    self._compact_agent_request(item)
+                    for item in agent_requests
+                    if item.get("status") in {"failed", "cancelled"}
+                ][:5],
+                "failed_speech_service_requests": [
+                    self._compact_speech_service_request(item)
+                    for item in speech_service_requests
+                    if item.get("status") in {"failed", "cancelled"}
+                ][:5],
+            },
+            "event_type_counts": self._event_type_counts(events),
+            "recent_events": [self._compact_event(event) for event in reversed(events[-30:])],
+            "latest_event": events[-1] if events else None,
+            "latest_export": self._compact_export_bundle(latest_export),
+            "archives": archive_items,
+        }
+
     async def create_export_bundle(self) -> Dict[str, Any]:
         async with self._lock:
             self._refresh_clocks()
@@ -364,6 +479,15 @@ class MatchStore:
         if not events:
             events = self.repo.load_events(match_id, 10000)
         audit_logs = self.repo.load_audit_logs(match_id, 10000)
+        structured = self.repo.load_structured_export(match_id)
+        structured_summary = {
+            "match_id": match_id,
+            "generated_at": iso_now(),
+            "source": "sqlite_structured_mirror",
+            "counts": {name: len(rows) for name, rows in structured.items()},
+        }
+        agent_requests = structured.get("agent_requests", []) or self._agent_events_for_export(events)
+        speech_service_requests = structured.get("speech_service_requests", [])
         export_dir = self.repo.db_path.parent / "exports" / match_id
         export_dir.mkdir(parents=True, exist_ok=True)
         export_id = f"{match_id}_{utc_now().strftime('%Y%m%dT%H%M%SZ')}_{self.seq}"
@@ -377,12 +501,30 @@ class MatchStore:
             self._zip_writestr(bundle, "match.json", snapshot, entries)
             self._zip_writestr(bundle, "transcript.json", transcript, entries)
             self._zip_writestr(bundle, "transcript.csv", self._transcript_csv(transcript), entries, text=True)
+            self._zip_writestr(bundle, "phases.json", structured.get("phases", []), entries)
+            self._zip_writestr(bundle, "phases.csv", self._rows_csv(structured.get("phases", []), STRUCTURED_CSV_FIELDS["phases"]), entries, text=True)
+            self._zip_writestr(bundle, "speeches.json", structured.get("speeches", []), entries)
+            self._zip_writestr(bundle, "speeches.csv", self._rows_csv(structured.get("speeches", []), STRUCTURED_CSV_FIELDS["speeches"]), entries, text=True)
+            self._zip_writestr(bundle, "transcripts.json", structured.get("transcript_segments", []), entries)
+            self._zip_writestr(
+                bundle,
+                "transcripts.csv",
+                self._rows_csv(structured.get("transcript_segments", []), STRUCTURED_CSV_FIELDS["transcript_segments"]),
+                entries,
+                text=True,
+            )
             self._zip_writestr(bundle, "events.jsonl", self._jsonl(events), entries, text=True)
+            self._zip_writestr(bundle, "agent_requests.jsonl", self._jsonl(agent_requests), entries, text=True)
+            self._zip_writestr(bundle, "speech_service_requests.jsonl", self._jsonl(speech_service_requests), entries, text=True)
             self._zip_writestr(bundle, "votes.json", votes, entries)
             self._zip_writestr(bundle, "audit_logs.jsonl", self._jsonl(audit_logs), entries, text=True)
             self._zip_writestr(bundle, "audio_manifest.json", audio_assets, entries)
+            self._zip_writestr(bundle, "structured/summary.json", structured_summary, entries)
+            for name, rows in structured.items():
+                self._zip_writestr(bundle, f"structured/{name}.json", rows, entries)
             self._zip_audio_assets(bundle, audio_assets, entries)
 
+        created_at = iso_now()
         payload = {
             "export_id": export_id,
             "match_id": match_id,
@@ -390,19 +532,64 @@ class MatchStore:
             "download_url": f"/api/matches/{match_id}/exports/{export_id}/download",
             "size_bytes": zip_path.stat().st_size,
             "entries": entries,
-            "created_at": iso_now(),
+            "created_at": created_at,
         }
+        self.repo.save_export_bundle(payload)
         await self.emit("export.created", payload, "admin")
         return payload
 
-    async def export_file_path(self, export_id: str) -> Path:
-        async with self._lock:
-            match_id = self.snapshot["match"]["id"]
+    async def export_file_path(self, export_id: str, match_id: Optional[str] = None) -> Path:
+        if match_id is None or match_id == "current":
+            async with self._lock:
+                match_id = self.snapshot["match"]["id"]
+        safe_match_id = self._safe_path_part(match_id)
         safe_id = self._safe_path_part(export_id)
-        path = self.repo.db_path.parent / "exports" / match_id / f"{safe_id}.zip"
+        path = self.repo.db_path.parent / "exports" / safe_match_id / f"{safe_id}.zip"
         if not path.exists():
             raise MatchStateError("export_not_found", "未找到指定导出文件。", {"export_id": export_id})
         return path
+
+    async def reset_current_match(self, confirm_text: str) -> Dict[str, Any]:
+        if confirm_text != "重置比赛":
+            raise MatchStateError("invalid_confirmation", "重置比赛需要输入确认文本“重置比赛”。")
+
+        export_bundle = await self.create_export_bundle()
+        async with self._lock:
+            self._refresh_clocks()
+            archived_snapshot = deepcopy(self.snapshot)
+            archived_snapshot["last_seq"] = self.seq
+            archived_match_id = archived_snapshot["match"]["id"]
+            now = utc_now()
+            new_match_id = f"match_{now.strftime('%Y%m%d_%H%M%S_%f')}"
+            archive_id = f"archive_{archived_match_id}_{now.strftime('%Y%m%dT%H%M%S%fZ')}"
+            new_snapshot = self._new_match_snapshot_from_archive(archived_snapshot, new_match_id, now)
+
+            self.repo.save_match_archive(
+                archive_id=archive_id,
+                archived_match_id=archived_match_id,
+                new_match_id=new_match_id,
+                snapshot=archived_snapshot,
+                export_bundle=export_bundle,
+                created_at=to_iso(now),
+            )
+            self.seq = 0
+            self.events = []
+            self._asr_streams = {}
+            self.snapshot = new_snapshot
+            self._persist_snapshot()
+
+        await self.emit(
+            "match.reset",
+            {
+                "archive_id": archive_id,
+                "previous_match_id": archived_match_id,
+                "new_match_id": new_match_id,
+                "export_id": export_bundle.get("export_id"),
+                "export_download_url": export_bundle.get("download_url"),
+            },
+            "admin",
+        )
+        return await self.get_snapshot()
 
     async def emit(
         self,
@@ -413,10 +600,11 @@ class MatchStore:
     ) -> Dict[str, Any]:
         async with self._lock:
             self.seq += 1
+            match_id = self.snapshot["match"]["id"]
             event = {
-                "id": f"evt_{self.seq}",
+                "id": f"evt_{match_id}_{self.seq}",
                 "type": event_type,
-                "match_id": self.snapshot["match"]["id"],
+                "match_id": match_id,
                 "seq": self.seq,
                 "server_time_ms": int(utc_now().timestamp() * 1000),
                 "payload": payload,
@@ -439,10 +627,16 @@ class MatchStore:
             self.snapshot["match"]["updated_at"] = iso_now()
             if status == "paused":
                 self._pause_running_clocks()
+                self.snapshot["match"]["screen_scene"] = "paused"
             elif status == "running":
                 self._resume_paused_clocks()
+                if self.snapshot["match"].get("screen_scene") in {"idle", "paused"}:
+                    self.snapshot["match"]["screen_scene"] = "live"
             elif status in {"finished", "intervention"}:
                 self._pause_running_clocks()
+                self._clear_flow_state()
+                if status == "finished":
+                    self.snapshot["vote_state"]["window_status"] = "closed"
             self._persist_snapshot()
         event_type = {
             "running": "match.resumed",
@@ -469,6 +663,27 @@ class MatchStore:
             self._persist_snapshot()
         return await self.emit("match.updated", {"fields": sorted(set(fields) & allowed)}, "admin")
 
+    async def set_audio_output(self, mode: str, reason: str = "manual", actor_type: str = "host") -> Dict[str, Any]:
+        next_mode = self._normalize_audio_output_mode(mode)
+        async with self._lock:
+            audio_output = self.snapshot.setdefault("audio_output", self._fresh_audio_output_state())
+            updated_at = iso_now()
+            audio_output.update(
+                {
+                    "mode": next_mode,
+                    "label": self._audio_output_label(next_mode),
+                    "updated_by": actor_type,
+                    "updated_at": updated_at,
+                }
+            )
+            self.snapshot["match"]["updated_at"] = updated_at
+            self._persist_snapshot()
+        return await self.emit(
+            "audio_output.updated",
+            {"mode": next_mode, "label": self._audio_output_label(next_mode), "reason": reason},
+            actor_type,
+        )
+
     async def update_team(self, team_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             team = self._find_team(team_id)
@@ -485,23 +700,159 @@ class MatchStore:
     async def update_speaker(self, speaker_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             speaker = self._find_speaker(speaker_id)
-            allowed = {"name", "model_name", "model_kind", "agent_endpoint"}
+            allowed = {"name", "speaker_type", "agent_config_id"}
+            managed_agent_fields = {"model_name", "model_kind", "agent_endpoint"}
+            if managed_agent_fields.intersection(fields):
+                raise MatchStateError(
+                    "agent_fields_managed_by_config",
+                    "Agent 模型、模型类型和请求地址请在 Agent 管理中维护；辩手管理只能绑定已有 Agent 配置。",
+                    {"fields": sorted(managed_agent_fields.intersection(fields))},
+                )
             updated = []
+
+            if "speaker_type" in fields:
+                next_type = fields.get("speaker_type")
+                if next_type not in {"human", "agent"}:
+                    raise MatchStateError("invalid_speaker_config", "辩手类型必须为 human 或 agent。", {"speaker_type": next_type})
+                if next_type != speaker["speaker_type"]:
+                    target_config_id = str(fields.get("agent_config_id") or speaker.get("agent_config_id") or "").strip()
+                    if next_type == "agent":
+                        if not target_config_id:
+                            raise MatchStateError(
+                                "agent_config_required",
+                                "Agent 辩手必须绑定 Agent 管理中已有的配置。",
+                                {"speaker_id": speaker_id},
+                            )
+                        self._find_agent_config(target_config_id)
+                    speaker["speaker_type"] = next_type
+                    updated.append("speaker_type")
+                    if next_type == "human":
+                        speaker["model_name"] = None
+                        speaker["model_kind"] = None
+                        speaker.pop("agent_config_id", None)
+                        speaker.pop("agent_endpoint", None)
+                        speaker["status"] = "online"
+                        speaker["mic_permission"] = "unknown"
+                    else:
+                        speaker["status"] = "ready"
+                        speaker["mic_permission"] = None
+                        speaker["agent_config_id"] = target_config_id
+                        speaker["model_name"] = None
+                        speaker["model_kind"] = None
+                        speaker["agent_endpoint"] = ""
+                        self._apply_agent_config_to_speaker(speaker)
+
             for key, value in fields.items():
                 if key not in allowed:
                     continue
-                if key == "model_kind" and value not in {None, "", "open_source", "closed_source"}:
-                    raise MatchStateError("invalid_speaker_config", "AI 模型类型必须为 open_source 或 closed_source。", {"model_kind": value})
-                if key in {"model_name", "model_kind", "agent_endpoint"} and speaker["speaker_type"] != "agent":
+                if key == "speaker_type":
+                    continue
+                if key == "agent_config_id":
+                    if speaker["speaker_type"] != "agent":
+                        continue
+                    config_id = str(value or "").strip()
+                    if not config_id:
+                        raise MatchStateError(
+                            "agent_config_required",
+                            "Agent 辩手必须绑定 Agent 管理中已有的配置。",
+                            {"speaker_id": speaker_id},
+                        )
+                    self._find_agent_config(config_id)
+                    speaker["agent_config_id"] = config_id
+                    speaker["agent_endpoint"] = ""
+                    self._apply_agent_config_to_speaker(speaker)
+                    updated.append(key)
                     continue
                 speaker[key] = None if value == "" and key in {"model_name", "model_kind"} else value
                 updated.append(key)
 
-            if "name" in updated or "model_name" in updated:
+            if "agent_config_id" in updated and speaker.get("speaker_type") == "agent" and speaker.get("agent_config_id"):
+                self._apply_agent_config_to_speaker(speaker)
+            if "speaker_type" in updated or "name" in updated or "agent_config_id" in updated:
                 self._sync_agent_status_for_speaker(speaker)
             self.snapshot["match"]["updated_at"] = iso_now()
             self._persist_snapshot()
         return await self.emit("speaker.updated", {"speaker_id": speaker_id, "fields": sorted(set(updated))}, "admin")
+
+    async def create_agent_config(self, fields: Dict[str, Any]) -> Dict[str, Any]:
+        async with self._lock:
+            now = iso_now()
+            config = self._normalize_agent_config_fields(fields, now=now, create=True)
+            config["id"] = self._unique_agent_config_id(str(config["name"]))
+            self.snapshot.setdefault("agent_configs", []).append(config)
+            self.snapshot["match"]["updated_at"] = now
+            self._persist_snapshot()
+        return await self.emit("agent_config.created", {"agent_config_id": config["id"], "name": config["name"]}, "admin")
+
+    async def update_agent_config(self, agent_config_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+        async with self._lock:
+            config = self._find_agent_config(agent_config_id)
+            updated = self._normalize_agent_config_fields(fields, existing=config, now=iso_now(), create=False)
+            changed_fields = []
+            for key, value in updated.items():
+                if key == "id":
+                    continue
+                if config.get(key) != value:
+                    config[key] = value
+                    changed_fields.append(key)
+            config["updated_at"] = iso_now()
+            changed_fields.append("updated_at")
+            for speaker in self.snapshot.get("speakers", []):
+                if speaker.get("agent_config_id") == agent_config_id:
+                    self._apply_agent_config_to_speaker(speaker)
+                    self._sync_agent_status_for_speaker(speaker)
+            self.snapshot["match"]["updated_at"] = config["updated_at"]
+            self._persist_snapshot()
+        return await self.emit(
+            "agent_config.updated",
+            {"agent_config_id": agent_config_id, "fields": sorted(set(changed_fields))},
+            "admin",
+        )
+
+    async def delete_agent_config(self, agent_config_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            self._find_agent_config(agent_config_id)
+            bound_speakers = [
+                speaker["id"]
+                for speaker in self.snapshot.get("speakers", [])
+                if speaker.get("agent_config_id") == agent_config_id
+            ]
+            if bound_speakers:
+                raise MatchStateError(
+                    "agent_config_in_use",
+                    "该 Agent 配置仍绑定辩手，请先在辩手管理中更换绑定。",
+                    {"agent_config_id": agent_config_id, "speaker_ids": bound_speakers},
+                )
+            self.snapshot["agent_configs"] = [
+                config for config in self.snapshot.get("agent_configs", []) if config.get("id") != agent_config_id
+            ]
+            self.snapshot["match"]["updated_at"] = iso_now()
+            self._persist_snapshot()
+        return await self.emit("agent_config.deleted", {"agent_config_id": agent_config_id}, "admin")
+
+    async def update_speaker_profile(
+        self,
+        speaker_id: str,
+        fields: Dict[str, Any],
+        actor_type: str = "speaker",
+        actor_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        name = str(fields.get("name", "")).strip()
+        if not name:
+            raise MatchStateError("invalid_speaker_profile", "姓名不能为空。", {"speaker_id": speaker_id})
+        async with self._lock:
+            speaker = self._find_speaker(speaker_id)
+            speaker["name"] = name
+            if speaker["speaker_type"] == "agent":
+                self._sync_agent_status_for_speaker(speaker)
+            self.snapshot["match"]["updated_at"] = iso_now()
+            self._persist_snapshot()
+        return await self.emit(
+            "speaker.profile_updated",
+            {"speaker_id": speaker_id, "fields": ["name"]},
+            actor_type,
+            actor_id,
+        )
 
     async def update_phase(self, phase_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
@@ -545,19 +896,35 @@ class MatchStore:
         )
 
     async def set_screen_scene(self, scene: str, live_mode: Optional[str]) -> Dict[str, Any]:
+        normalized_scene = self._normalize_screen_scene(scene)
         async with self._lock:
-            self.snapshot["match"]["screen_scene"] = scene
+            if normalized_scene in {"judge_commentary", "judge_result", "audience_result"}:
+                self._ensure_vote_controls_available("set_result_screen_scene")
+            if normalized_scene == "judge_commentary":
+                self.snapshot["vote_state"]["window_status"] = "open"
+            elif normalized_scene == "judge_result":
+                self.snapshot["vote_state"]["window_status"] = "closed"
+            elif normalized_scene == "audience_result" and not self.snapshot["vote_state"].get("judge_published"):
+                raise MatchStateError(
+                    "publish_order",
+                    "需要先公布评委结果，再切换到学生投票结果。",
+                    {"judge_published": False},
+                )
+            if normalized_scene in {"judge_commentary", "judge_result", "audience_result"}:
+                self._clear_flow_state()
+            self.snapshot["match"]["screen_scene"] = normalized_scene
             if live_mode:
                 self.snapshot["match"]["live_mode"] = live_mode
             self.snapshot["match"]["updated_at"] = iso_now()
             self._persist_snapshot()
-        return await self.emit("screen.scene_changed", {"scene": scene, "live_mode": live_mode}, "host")
+        return await self.emit("screen.scene_changed", {"scene": normalized_scene, "requested_scene": scene, "live_mode": live_mode}, "host")
 
     async def start_phase(self, phase_id: str) -> Dict[str, Any]:
         async with self._lock:
             self._ensure_match_allows_control("start_phase")
             phase = self._find_phase(phase_id)
             self.snapshot["current_speech"] = None
+            self._clear_flow_state()
             for item in self.snapshot["phases"]:
                 if item["id"] == phase_id:
                     item["status"] = "active"
@@ -587,6 +954,7 @@ class MatchStore:
                     {"phase_id": phase_id, "current_phase_id": self.snapshot["match"]["current_phase_id"]},
                 )
             self.snapshot["current_speech"] = None
+            self._clear_flow_state()
             self._pause_running_clocks()
             phase["status"] = "skipped"
             next_phase = self._next_phase(phase)
@@ -617,6 +985,7 @@ class MatchStore:
             phase = self._find_phase(phase_id)
             target_order = phase["display_order"]
             self.snapshot["current_speech"] = None
+            self._clear_flow_state()
             self._pause_running_clocks()
             for item in self.snapshot["phases"]:
                 if item["display_order"] < target_order:
@@ -649,6 +1018,7 @@ class MatchStore:
             speaker = self._find_speaker(speaker_id)
             self._ensure_speaker_allowed_for_current_phase(speaker)
             phase_id = self.snapshot["match"]["current_phase_id"]
+            self._clear_flow_state()
             self.snapshot["current_speech"] = {
                 "id": f"speech_{self.seq + 1}",
                 "phase_id": phase_id,
@@ -668,26 +1038,82 @@ class MatchStore:
             "host",
         )
 
+    async def record_free_debate_skip(self, speaker_id: str) -> Dict[str, Any]:
+        """Human debater skips their turn in free debate; if all humans on side skip, auto-trigger agent."""
+        import random
+        speaker = self._find_speaker(speaker_id)
+        if speaker["speaker_type"] != "human":
+            raise MatchStateError("not_human_speaker", "只有人类辩手可以跳过发言。", {"speaker_id": speaker_id})
+        phase = self._current_phase()
+        if phase["phase_type"] != "free_debate":
+            raise MatchStateError("not_free_debate", "跳过功能仅在自由辩论阶段可用。", {"phase_type": phase["phase_type"]})
+        self._ensure_match_allows_control("record_free_debate_skip")
+        side = speaker["side"]
+        current_side = self.snapshot["free_debate"]["current_turn_side"]
+        if side != current_side:
+            raise MatchStateError("wrong_side", "当前不是你方的发言轮次。", {"expected": current_side, "got": side})
+        turn_index = int(self.snapshot["free_debate"]["turn_index"])
+        turn_key = f"{side}_{turn_index}"
+        async with self._lock:
+            skip_votes = self.snapshot["free_debate"].setdefault("skip_votes", {})
+            turn_votes: list = skip_votes.setdefault(turn_key, [])
+            if speaker_id not in turn_votes:
+                turn_votes.append(speaker_id)
+            all_humans_on_side = [s["id"] for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "human"]
+            skipped_all = all(uid in turn_votes for uid in all_humans_on_side)
+            self._persist_snapshot()
+        await self.emit("free_debate.skip_voted", {"speaker_id": speaker_id, "side": side, "turn_key": turn_key, "skip_count": len(turn_votes), "total_humans": len(all_humans_on_side)}, "system")
+        if skipped_all:
+            agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
+            if agents_on_side:
+                chosen = random.choice(agents_on_side)
+                try:
+                    self.ensure_agent_speaker_for_current_phase(chosen["id"])
+                    asyncio.create_task(self.run_agent_speech(chosen["id"]))
+                except Exception:
+                    pass
+        return await self.get_snapshot()
+
     async def run_agent_speech(self, speaker_id: str) -> None:
         speaker = self._find_speaker(speaker_id)
         if speaker["speaker_type"] != "agent":
             return
         self._ensure_match_allows_control("run_agent_speech")
         self._ensure_speaker_allowed_for_current_phase(speaker)
+        config = self._agent_config_for_speaker(speaker)
+        if config and not config.get("enabled", True):
+            raise MatchStateError(
+                "agent_config_disabled",
+                "该 Agent 配置已停用，不能触发发言。",
+                {"speaker_id": speaker_id, "agent_config_id": config.get("id")},
+            )
 
         task_id = f"task_{self.seq + 1}"
         speech_id = f"speech_{self.seq + 1}"
         endpoint = self.agent_gateway.endpoint_for(speaker)
         payload = self._build_agent_payload(task_id, speech_id, speaker)
+        endpoint_label = endpoint or "embedded://mock"
+        agent_started_at = iso_now()
+        agent_started_time = time.perf_counter()
+        self.repo.save_agent_request_started(
+            match_id=payload["match_id"],
+            task_id=task_id,
+            speech_id=speech_id,
+            speaker_id=speaker_id,
+            endpoint=endpoint_label,
+            request=payload,
+            started_at=agent_started_at,
+        )
         await self.emit(
             "agent.task.created",
-            {"task_id": task_id, "speaker_id": speaker_id, "endpoint": endpoint or "embedded://mock"},
+            {"task_id": task_id, "speaker_id": speaker_id, "agent_config_id": speaker.get("agent_config_id"), "endpoint": endpoint_label},
             "system",
         )
 
         async with self._lock:
             phase_id = self.snapshot["match"]["current_phase_id"]
             self.snapshot["match"]["live_mode"] = "prep"
+            self._clear_flow_state()
             self.snapshot["current_speech"] = {
                 "id": speech_id,
                 "phase_id": phase_id,
@@ -711,7 +1137,7 @@ class MatchStore:
         full_text = ""
         playback_started = False
         try:
-            async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker)):
+            async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
                 event_type = event.get("type")
                 if event_type == "delta":
                     delta = event.get("delta", "")
@@ -721,6 +1147,14 @@ class MatchStore:
                     full_text += delta
                     async with self._lock:
                         if not self.snapshot.get("current_speech"):
+                            self.repo.finish_agent_request(
+                                match_id=payload["match_id"],
+                                task_id=task_id,
+                                status="cancelled",
+                                response_text=full_text,
+                                latency_ms=max(0, int((time.perf_counter() - agent_started_time) * 1000)),
+                                completed_at=iso_now(),
+                            )
                             return
                         self.snapshot["current_speech"]["content_partial"] = full_text
                         self._persist_snapshot()
@@ -741,8 +1175,27 @@ class MatchStore:
                     full_text = event.get("content", full_text)
                     break
         except AgentGatewayError as exc:
+            self.repo.finish_agent_request(
+                match_id=payload["match_id"],
+                task_id=task_id,
+                status="failed",
+                response_text=full_text or None,
+                error_code=exc.code,
+                error_message=exc.message,
+                latency_ms=max(0, int((time.perf_counter() - agent_started_time) * 1000)),
+                completed_at=iso_now(),
+            )
             await self._fail_agent_task(task_id, speaker_id, exc)
             return
+
+        self.repo.finish_agent_request(
+            match_id=payload["match_id"],
+            task_id=task_id,
+            status="completed",
+            response_text=full_text,
+            latency_ms=max(0, int((time.perf_counter() - agent_started_time) * 1000)),
+            completed_at=iso_now(),
+        )
 
         if not playback_started:
             await self._start_agent_playback(task_id, speaker)
@@ -845,6 +1298,7 @@ class MatchStore:
             )
             self._upsert_transcript_segment(speech, speaker_id, text, True, "manual")
             self.snapshot["current_speech"] = None
+            self._clear_flow_state()
             self._pause_running_clocks()
             self._advance_free_debate_turn_if_needed(speaker["side"])
             self.snapshot["match"]["live_mode"] = "free" if phase["phase_type"] == "free_debate" else "single"
@@ -896,10 +1350,16 @@ class MatchStore:
                     "turn_index": self._current_turn_index(),
                     "source": "human_asr" if speaker["speaker_type"] == "human" else "agent_text",
                     "started_at": iso_now(),
+                    "state": "speaking",
+                    "started_clock_remaining_ms": {
+                        clock["name"]: int(clock.get("remaining_ms", 0))
+                        for clock in self.snapshot.get("clocks", [])
+                    },
                 }
             )
             self.snapshot["current_speech"] = speech
             self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+            self._clear_flow_state()
             self._start_relevant_clocks(speaker["side"])
             self.snapshot["speech_service"]["asr"] = {
                 "status": "streaming",
@@ -909,6 +1369,50 @@ class MatchStore:
             }
             self._persist_snapshot()
         return await self.emit("speech.started", {"speaker_id": speaker_id}, "speaker", speaker_id)
+
+    async def pause_speaking(self, speaker_id: str, reason: str = "manual") -> Dict[str, Any]:
+        async with self._lock:
+            self._ensure_match_allows_control("pause_speaking")
+            speaker = self._find_speaker(speaker_id)
+            speech = self._active_speech_for_speaker(speaker_id, "pause_speaking")
+            if speech.get("state") == "paused":
+                payload = {"speaker_id": speaker_id, "speech_id": speech["id"], "already_paused": True, "reason": reason}
+            else:
+                speech["state"] = "paused"
+                speech["paused_at"] = iso_now()
+                self._pause_running_clocks()
+                if speech.get("source") == "human_asr":
+                    self.snapshot["speech_service"]["asr"] = {
+                        "status": "paused",
+                        "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                        "active_sessions": 0,
+                        "detail": "speech paused",
+                    }
+                payload = {"speaker_id": speaker_id, "speech_id": speech["id"], "side": speaker["side"], "reason": reason}
+            self._persist_snapshot()
+        return await self.emit("speech.paused", payload, "speaker", speaker_id)
+
+    async def resume_speaking(self, speaker_id: str, reason: str = "manual") -> Dict[str, Any]:
+        async with self._lock:
+            self._ensure_match_allows_control("resume_speaking")
+            speaker = self._find_speaker(speaker_id)
+            speech = self._active_speech_for_speaker(speaker_id, "resume_speaking")
+            if speech.get("state") != "paused":
+                raise MatchStateError("speech_not_paused", "当前发言未处于暂停状态。", {"speaker_id": speaker_id})
+            speech["state"] = "speaking"
+            speech["resumed_at"] = iso_now()
+            speech.pop("paused_at", None)
+            self._start_relevant_clocks(speaker["side"])
+            if speech.get("source") == "human_asr":
+                self.snapshot["speech_service"]["asr"] = {
+                    "status": "streaming",
+                    "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                    "active_sessions": 1,
+                    "detail": "recording",
+                }
+            payload = {"speaker_id": speaker_id, "speech_id": speech["id"], "side": speaker["side"], "reason": reason}
+            self._persist_snapshot()
+        return await self.emit("speech.resumed", payload, "speaker", speaker_id)
 
     async def stop_speaking(self, speaker_id: str) -> Dict[str, Any]:
         async with self._lock:
@@ -925,6 +1429,8 @@ class MatchStore:
                 )
             text = speech.get("content_partial") or "本次发言已结束，正式转写将在后续 ASR 链路中补齐。"
             speech["content_final"] = text
+            speech["state"] = "ended"
+            speech["ended_at"] = iso_now()
             self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
             self.snapshot["current_speech"] = None
             self._pause_running_clocks()
@@ -938,6 +1444,56 @@ class MatchStore:
                 }
             self._persist_snapshot()
         return await self.emit("speech.ended", {"speaker_id": speaker_id, "side": speaker["side"]}, "speaker", speaker_id)
+
+    async def reset_current_speech(self, reason: str = "manual_reset") -> Dict[str, Any]:
+        async with self._lock:
+            self._ensure_match_allows_control("reset_current_speech")
+            speech = self.snapshot.get("current_speech") or {}
+            if not speech:
+                raise MatchStateError("no_active_speech", "当前没有可重置的发言。")
+            speaker_id = speech["speaker_id"]
+            speaker = self._find_speaker(speaker_id)
+            speech_id = speech["id"]
+            removed_segments = [
+                segment.get("id")
+                for segment in self.snapshot.get("recent_transcript", [])
+                if segment.get("speech_id") == speech_id or segment.get("id") == speech_id
+            ]
+            self.snapshot["recent_transcript"] = [
+                segment
+                for segment in self.snapshot.get("recent_transcript", [])
+                if not (segment.get("speech_id") == speech_id or segment.get("id") == speech_id)
+            ]
+            removed_audio = [
+                asset.get("id")
+                for asset in self.snapshot.get("audio_assets", [])
+                if asset.get("speech_id") == speech_id
+            ]
+            self.snapshot["audio_assets"] = [
+                asset
+                for asset in self.snapshot.get("audio_assets", [])
+                if asset.get("speech_id") != speech_id
+            ]
+            self._reset_relevant_clocks_for_speech(speech)
+            self.snapshot["current_speech"] = None
+            self._clear_flow_state()
+            if speech.get("source") == "human_asr":
+                self.snapshot["speech_service"]["asr"] = {
+                    "status": "ok",
+                    "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                    "active_sessions": 0,
+                    "detail": "speech reset",
+                }
+            payload = {
+                "speech_id": speech_id,
+                "speaker_id": speaker_id,
+                "side": speaker["side"],
+                "reason": reason,
+                "removed_segments": removed_segments,
+                "removed_audio": removed_audio,
+            }
+            self._persist_snapshot()
+        return await self.emit("speech.reset", payload, "host")
 
     async def record_asr_partial(self, speaker_id: str, text: str, latency_ms: Optional[int] = None) -> Dict[str, Any]:
         async with self._lock:
@@ -1196,6 +1752,8 @@ class MatchStore:
             return
         session = self._asr_streams.get(speech_id)
         if not session:
+            request_id = f"asr_stream_{speech_id}"
+            stream_started_at = iso_now()
             gateway = XfyunASRGateway(url=os.getenv("XFYUN_ASR_URL", "").strip())
 
             async def on_partial(text: str, latency_ms: int, chunk_count: int) -> None:
@@ -1207,6 +1765,17 @@ class MatchStore:
             async def on_error(exc: XfyunGatewayError) -> None:
                 await self._record_live_asr_failed(speech_id, speaker_id, exc.message, exc.code)
 
+            async with self._lock:
+                self.repo.save_speech_service_request_started(
+                    match_id=self.snapshot["match"]["id"],
+                    request_id=request_id,
+                    service="asr",
+                    operation="realtime_stream",
+                    speech_id=speech_id,
+                    speaker_id=speaker_id,
+                    request={"speech_id": speech_id, "speaker_id": speaker_id, "mime_type": mime_type},
+                    started_at=stream_started_at,
+                )
             try:
                 session = await gateway.open_stream(on_partial=on_partial, on_final=on_final, on_error=on_error)
             except XfyunGatewayError as exc:
@@ -1242,6 +1811,14 @@ class MatchStore:
             await self._record_live_asr_failed(speech_id, speaker_id, exc.message, exc.code)
             return
         async with self._lock:
+            self.repo.finish_speech_service_request(
+                match_id=self.snapshot["match"]["id"],
+                request_id=f"asr_stream_{speech_id}",
+                status="completed",
+                response={"text": result.text, "text_length": len(result.text), "chunk_count": result.chunk_count},
+                latency_ms=result.latency_ms,
+                completed_at=iso_now(),
+            )
             asset = self._audio_asset_for_speech(speech_id)
             if asset:
                 asset["asr_realtime_status"] = "completed"
@@ -1292,6 +1869,15 @@ class MatchStore:
 
     async def _record_live_asr_failed(self, speech_id: str, speaker_id: str, reason: str, code: Optional[int] = None) -> None:
         async with self._lock:
+            self.repo.finish_speech_service_request(
+                match_id=self.snapshot["match"]["id"],
+                request_id=f"asr_stream_{speech_id}",
+                status="failed",
+                error_code=str(code) if code is not None else "asr_stream_error",
+                error_message=reason,
+                latency_ms=0,
+                completed_at=iso_now(),
+            )
             asset = self._audio_asset_for_speech(speech_id)
             if asset:
                 asset["asr_realtime_status"] = "failed"
@@ -1309,6 +1895,8 @@ class MatchStore:
         await self.emit("asr.failed", {"speech_id": speech_id, "speaker_id": speaker_id, "reason": reason, "code": code}, "speech", speaker_id)
 
     async def recognize_audio_archive(self, speech_id: str) -> Dict[str, Any]:
+        request_id = self._new_speech_service_request_id("asr", "archive_recognition")
+        request_started_time = time.perf_counter()
         async with self._lock:
             asset = self._audio_asset_for_speech(speech_id)
             if not asset:
@@ -1322,6 +1910,23 @@ class MatchStore:
                 )
             chunks = sorted(asset.get("chunks") or [], key=lambda item: int(item.get("chunk_index", 0)))
             paths = [Path(item.get("file_path", "")) for item in chunks]
+            match_id = self.snapshot["match"]["id"]
+            speaker_id = asset.get("speaker_id")
+            self.repo.save_speech_service_request_started(
+                match_id=match_id,
+                request_id=request_id,
+                service="asr",
+                operation="archive_recognition",
+                speech_id=speech_id,
+                speaker_id=speaker_id,
+                request={
+                    "speech_id": speech_id,
+                    "speaker_id": speaker_id,
+                    "mime_type": mime_type,
+                    "chunk_count": len(chunks),
+                },
+                started_at=iso_now(),
+            )
             self.snapshot["speech_service"]["asr"] = {
                 "status": "recognizing",
                 "latency_ms": 0,
@@ -1339,6 +1944,15 @@ class MatchStore:
                     "active_sessions": 0,
                     "detail": "归档音频为空，无法识别。",
                 }
+                self.repo.finish_speech_service_request(
+                    match_id=self.snapshot["match"]["id"],
+                    request_id=request_id,
+                    status="failed",
+                    error_code="invalid_audio_archive",
+                    error_message="归档音频为空，无法识别。",
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
                 self._persist_snapshot()
             raise MatchStateError("invalid_audio_archive", "归档音频为空，无法识别。", {"speech_id": speech_id})
         await self.emit("asr.archive_recognition_started", {"speech_id": speech_id, "audio_bytes": len(content)}, "host")
@@ -1354,6 +1968,15 @@ class MatchStore:
                     "active_sessions": 0,
                     "detail": exc.message,
                 }
+                self.repo.finish_speech_service_request(
+                    match_id=self.snapshot["match"]["id"],
+                    request_id=request_id,
+                    status="failed",
+                    error_code=str(exc.code) if exc.code is not None else "xfyun_asr_error",
+                    error_message=exc.message,
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
                 self._persist_snapshot()
             await self.emit("asr.failed", {"speech_id": speech_id, "reason": exc.message, "code": exc.code}, "host")
             raise MatchStateError("speech_service_error", f"ASR 归档识别失败：{exc.message}", {"code": exc.code})
@@ -1366,6 +1989,14 @@ class MatchStore:
                 "active_sessions": 0,
                 "detail": f"archive ASR ok · {len(result.text)} chars · {result.chunk_count} chunks",
             }
+            self.repo.finish_speech_service_request(
+                match_id=self.snapshot["match"]["id"],
+                request_id=request_id,
+                status="completed",
+                response={"text": result.text, "text_length": len(result.text), "chunk_count": result.chunk_count, "audio_bytes": len(content)},
+                latency_ms=result.latency_ms,
+                completed_at=iso_now(),
+            )
             self._persist_snapshot()
         payload = {
             "speech_id": speech_id,
@@ -1406,7 +2037,17 @@ class MatchStore:
 
     async def probe_asr(self, audio: bytes, audio_format: str = "audio/L16;rate=16000", encoding: str = "raw") -> Dict[str, Any]:
         content = audio or (b"\0" * 6400)
+        request_id = self._new_speech_service_request_id("asr", "probe")
+        request_started_time = time.perf_counter()
         async with self._lock:
+            self.repo.save_speech_service_request_started(
+                match_id=self.snapshot["match"]["id"],
+                request_id=request_id,
+                service="asr",
+                operation="probe",
+                request={"audio_bytes": len(content), "format": audio_format, "encoding": encoding},
+                started_at=iso_now(),
+            )
             self.snapshot["speech_service"]["asr"] = {
                 "status": "recognizing",
                 "latency_ms": 0,
@@ -1427,6 +2068,15 @@ class MatchStore:
                     "active_sessions": 0,
                     "detail": exc.message,
                 }
+                self.repo.finish_speech_service_request(
+                    match_id=self.snapshot["match"]["id"],
+                    request_id=request_id,
+                    status="failed",
+                    error_code=str(exc.code) if exc.code is not None else "xfyun_asr_error",
+                    error_message=exc.message,
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
                 self._persist_snapshot()
             await self.emit("asr.failed", {"probe": True, "reason": exc.message, "code": exc.code}, "host")
             raise MatchStateError("speech_service_error", f"ASR 试识别失败：{exc.message}", {"code": exc.code})
@@ -1446,13 +2096,31 @@ class MatchStore:
                 "active_sessions": 0,
                 "detail": f"ASR probe ok · {len(result.text)} chars · {result.chunk_count} chunks",
             }
+            self.repo.finish_speech_service_request(
+                match_id=self.snapshot["match"]["id"],
+                request_id=request_id,
+                status="completed",
+                response=payload,
+                latency_ms=result.latency_ms,
+                completed_at=iso_now(),
+            )
             self._persist_snapshot()
         await self.emit("asr.probe_completed", payload, "host")
         return {"result": payload, "snapshot": await self.get_snapshot()}
 
     async def probe_tts(self, text: str) -> Dict[str, Any]:
         content = str(text or "").strip() or "人机辩论赛语音合成自检。"
+        request_id = self._new_speech_service_request_id("tts", "probe")
+        request_started_time = time.perf_counter()
         async with self._lock:
+            self.repo.save_speech_service_request_started(
+                match_id=self.snapshot["match"]["id"],
+                request_id=request_id,
+                service="tts",
+                operation="probe",
+                request={"text": content, "text_length": len(content)},
+                started_at=iso_now(),
+            )
             self.snapshot["speech_service"]["tts"] = {
                 "status": "synthesizing",
                 "latency_ms": 0,
@@ -1476,6 +2144,15 @@ class MatchStore:
                     "detail": exc.message,
                     "degraded_to": "text_only",
                 }
+                self.repo.finish_speech_service_request(
+                    match_id=self.snapshot["match"]["id"],
+                    request_id=request_id,
+                    status="failed",
+                    error_code=str(exc.code) if exc.code is not None else "xfyun_tts_error",
+                    error_message=exc.message,
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
                 self._persist_snapshot()
             await self.emit("tts.failed", {"probe": True, "reason": exc.message, "code": exc.code}, "host")
             raise MatchStateError("speech_service_error", f"TTS 试合成失败：{exc.message}", {"code": exc.code})
@@ -1501,6 +2178,14 @@ class MatchStore:
                 "speaker_id": None,
                 "detail": f"TTS probe ok · {len(result.audio)} bytes · {file_path}",
             }
+            self.repo.finish_speech_service_request(
+                match_id=self.snapshot["match"]["id"],
+                request_id=request_id,
+                status="completed",
+                response=payload,
+                latency_ms=result.latency_ms,
+                completed_at=iso_now(),
+            )
             self._persist_snapshot()
         await self.emit("tts.probe_completed", payload, "host")
         await self.emit("tts.finished", {"probe": True, "latency_ms": result.latency_ms}, "system")
@@ -1531,6 +2216,7 @@ class MatchStore:
             now = utc_now()
             clock["state"] = "running"
             clock["deadline_at"] = to_iso(now + timedelta(milliseconds=clock["remaining_ms"]))
+            clock.pop("expired_notified_at", None)
             payload = self._clock_payload(clock, reason)
             self._persist_snapshot()
         return await self.emit("clock.resumed", payload, "host")
@@ -1548,15 +2234,119 @@ class MatchStore:
                 clock["deadline_at"] = None
             elif clock["state"] == "running":
                 clock["deadline_at"] = to_iso(utc_now() + timedelta(milliseconds=remaining_ms))
+                clock.pop("expired_notified_at", None)
             else:
                 clock["state"] = "paused"
                 clock["deadline_at"] = None
+                clock.pop("expired_notified_at", None)
             payload = self._clock_payload(clock, reason)
             self._persist_snapshot()
         return await self.emit("clock.adjusted", payload, "host")
 
-    async def submit_vote(self, body: Dict[str, Any], audience: bool = False) -> Dict[str, Any]:
+    async def tick_timers(self) -> List[Dict[str, Any]]:
+        events: List[tuple[str, Dict[str, Any]]] = []
+        flow_payload: Optional[Dict[str, Any]] = None
         async with self._lock:
+            if self.snapshot["match"]["status"] != "running":
+                return []
+            now = utc_now()
+            phase = self._current_phase()
+            expired_payloads: List[Dict[str, Any]] = []
+            for clock in self.snapshot.get("clocks", []):
+                if clock["state"] == "running":
+                    deadline = parse_iso(clock.get("deadline_at"))
+                    if deadline and deadline <= now:
+                        clock["remaining_ms"] = 0
+                        clock["state"] = "expired"
+                        clock["deadline_at"] = None
+                if clock["state"] == "expired" and not clock.get("expired_notified_at"):
+                    clock["expired_notified_at"] = to_iso(now)
+                    expired_payloads.append(self._clock_payload(clock, "timer_loop"))
+
+            timeout_payload: Optional[Dict[str, Any]] = None
+            if expired_payloads and self.snapshot.get("current_speech"):
+                speech = self.snapshot["current_speech"]
+                speaker_id = speech["speaker_id"]
+                speaker = self._find_speaker(speaker_id)
+                text = speech.get("content_partial") or "时间到，本次发言结束。"
+                speech["content_final"] = text
+                speech["state"] = "ended"
+                speech["ended_at"] = to_iso(now)
+                speech["ended_reason"] = "timeout"
+                self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
+                self.snapshot["current_speech"] = None
+                self._pause_running_clocks()
+                self._advance_free_debate_turn_if_needed(speaker["side"])
+                if speech.get("source") == "human_asr":
+                    self.snapshot["speech_service"]["asr"] = {
+                        "status": "ok",
+                        "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                        "active_sessions": 0,
+                        "detail": "timeout",
+                    }
+                timeout_payload = {
+                    "speech_id": speech["id"],
+                    "speaker_id": speaker_id,
+                    "side": speaker["side"],
+                    "expired_clocks": [item["clock_name"] for item in expired_payloads],
+                }
+
+            if not expired_payloads and timeout_payload is None:
+                return []
+            expired_clock_names = [item["clock_name"] for item in expired_payloads]
+            flow_payload = self._set_flow_waiting_for_timeout(
+                phase=phase,
+                expired_clock_names=expired_clock_names,
+                speech_id=(timeout_payload or {}).get("speech_id"),
+                speaker_id=(timeout_payload or {}).get("speaker_id"),
+                now=now,
+            )
+            self._persist_snapshot()
+            for payload in expired_payloads:
+                events.append(("clock.expired", payload))
+            if timeout_payload:
+                events.append(("speech.timeout", timeout_payload))
+                events.append(("speech.ended", {"speaker_id": timeout_payload["speaker_id"], "side": timeout_payload["side"], "reason": "timeout"}))
+            if flow_payload:
+                events.append(("flow.awaiting_host_confirm", flow_payload))
+
+        emitted = []
+        for event_type, payload in events:
+            emitted.append(await self.emit(event_type, payload, "system"))
+        return emitted
+
+    async def confirm_flow(self, reason: str = "host_confirm") -> Dict[str, Any]:
+        async with self._lock:
+            self._ensure_match_allows_control("confirm_flow")
+            flow = self.snapshot.get("flow") or self._fresh_flow_state()
+            if not flow.get("awaiting_host_confirm"):
+                payload = {"reason": reason, "already_confirmed": True}
+                self._persist_snapshot()
+                return payload
+            previous = deepcopy(flow)
+            if previous.get("next_action") == "free_turn_next":
+                turn_clock = self._clock("turn")
+                if turn_clock and turn_clock.get("remaining_ms", 0) <= 0:
+                    turn_clock["remaining_ms"] = turn_clock["total_seconds"] * 1000
+                    turn_clock["state"] = "paused"
+                    turn_clock["deadline_at"] = None
+                    turn_clock.pop("expired_notified_at", None)
+            self._clear_flow_state()
+            payload = {
+                "reason": reason,
+                "next_action": previous.get("next_action"),
+                "phase_id": previous.get("phase_id"),
+                "speech_id": previous.get("speech_id"),
+            }
+            self._persist_snapshot()
+        await self.emit("flow.confirmed", payload, "host")
+        return payload
+
+    async def submit_vote(self, body: Dict[str, Any], audience: bool = False) -> Dict[str, Any]:
+        duplicate_error: Optional[MatchStateError] = None
+        duplicate_payload: Optional[Dict[str, Any]] = None
+        async with self._lock:
+            self._ensure_vote_controls_available("submit_audience_vote" if audience else "submit_judge_vote")
             self._validate_vote_body(body, audience=audience)
             if audience:
                 if self.snapshot["vote_state"]["window_status"] != "open":
@@ -1565,25 +2355,44 @@ class MatchStore:
                         "学生投票窗口未开启，暂不能提交投票。",
                         {"window_status": self.snapshot["vote_state"]["window_status"]},
                     )
-                vote_key = self._audience_vote_key(body)
-                if vote_key in set(self.snapshot["vote_state"].get("used_audience_tokens", [])):
-                    raise MatchStateError("duplicate_vote", "请勿重复提交投票。", {"vote_key": vote_key})
-                self.snapshot["vote_state"].setdefault("used_audience_tokens", []).append(vote_key)
-                self.snapshot["vote_state"].setdefault("audience_votes", []).append(
-                    {
-                        "vote_key": vote_key,
+                vote_keys = self._audience_vote_keys(body)
+                existing_keys = set(self.snapshot["vote_state"].get("audience_vote_keys", []))
+                legacy_keys = self._legacy_audience_vote_keys(body)
+                existing_keys.update(self.snapshot["vote_state"].get("used_audience_tokens", []))
+                matched_keys = sorted(existing_keys.intersection(vote_keys) | existing_keys.intersection(legacy_keys))
+                if matched_keys:
+                    duplicate_payload = {
+                        "reason": "duplicate_vote",
+                        "vote_key_types": self._vote_key_types_for_log(vote_keys),
+                        "matched_key_types": self._vote_key_types_for_log(matched_keys),
                         "winner_side": body["winner_side"],
                         "best_speaker_id": body["best_speaker_id"],
-                        "created_at": iso_now(),
                     }
-                )
-                self._append_audience_summary(body)
+                    duplicate_error = MatchStateError("duplicate_vote", "你已经投过票，请勿重复提交。", {"vote_key": vote_keys[0]})
+                else:
+                    self.snapshot["vote_state"].setdefault("audience_vote_keys", []).extend(
+                        [key for key in vote_keys if key not in self.snapshot["vote_state"].get("audience_vote_keys", [])]
+                    )
+                    self.snapshot["vote_state"].setdefault("audience_votes", []).append(
+                        {
+                            "vote_key": vote_keys[0],
+                            "vote_keys": vote_keys,
+                            "winner_side": body["winner_side"],
+                            "best_speaker_id": body["best_speaker_id"],
+                            "created_at": iso_now(),
+                        }
+                    )
+                    self._append_audience_summary(body)
             else:
                 judge_summary = self._build_judge_summary(body)
                 self.snapshot["vote_state"]["judge_summary"] = judge_summary
                 self.snapshot["vote_state"]["winner_side"] = judge_summary["winner_side"]
                 self.snapshot["vote_state"]["best_speaker_id"] = judge_summary["best_speaker_id"]
-            self._persist_snapshot()
+            if duplicate_error is None:
+                self._persist_snapshot()
+        if duplicate_error is not None:
+            await self.emit("vote.duplicate_rejected", duplicate_payload or {"reason": "duplicate_vote"}, "audience")
+            raise duplicate_error
         return await self.emit(
             "vote.submitted",
             {"audience": audience, "vote_state": self._public_vote_state()},
@@ -1592,24 +2401,29 @@ class MatchStore:
 
     async def open_audience_votes(self) -> Dict[str, Any]:
         async with self._lock:
+            self._ensure_vote_controls_available("open_audience_votes")
             self.snapshot["vote_state"]["window_status"] = "open"
             self._persist_snapshot()
         return await self.emit("vote.window_opened", {"match_id": self.snapshot["match"]["id"]}, "host")
 
     async def close_audience_votes(self) -> Dict[str, Any]:
         async with self._lock:
+            self._ensure_vote_controls_available("close_audience_votes")
             self.snapshot["vote_state"]["window_status"] = "closed"
             self._persist_snapshot()
         return await self.emit("vote.window_closed", {"match_id": self.snapshot["match"]["id"]}, "host")
 
     async def publish_votes(self, scope: str) -> Dict[str, Any]:
         async with self._lock:
+            self._ensure_vote_controls_available("publish_votes")
             if scope not in {"judge", "audience"}:
                 raise MatchStateError("invalid_vote_scope", "未知的投票公布范围。", {"scope": scope})
             if scope == "judge":
                 if not self.snapshot["vote_state"].get("winner_side") or not self.snapshot["vote_state"].get("best_speaker_id"):
                     raise MatchStateError("missing_votes", "请先录入评委结果。")
                 self.snapshot["vote_state"]["judge_published"] = True
+                self.snapshot["vote_state"]["window_status"] = "closed"
+                self.snapshot["match"]["screen_scene"] = "judge_result"
             if scope == "audience":
                 if not self.snapshot["vote_state"]["judge_published"]:
                     raise MatchStateError(
@@ -1618,6 +2432,7 @@ class MatchStore:
                         {"judge_published": False},
                     )
                 self.snapshot["vote_state"]["audience_published"] = True
+                self.snapshot["match"]["screen_scene"] = "audience_result"
             self._persist_snapshot()
         return await self.emit("vote.published", {"scope": scope, "vote_state": self._public_vote_state()}, "host")
 
@@ -1684,12 +2499,44 @@ class MatchStore:
         speaker = self._find_speaker(speaker_id)
         if speaker["speaker_type"] != "agent":
             raise MatchStateError("invalid_speaker", "该辩手不是 AI 辩手，不能触发 Agent 发言。")
+        speech = self.snapshot.get("current_speech") or {}
+        if speech and speech.get("speaker_id") != speaker_id:
+            raise MatchStateError(
+                "speaker_locked",
+                "当前已有其他辩手正在发言，请先结束当前发言。",
+                {"active_speaker_id": speech.get("speaker_id"), "speaker_id": speaker_id},
+            )
+        config = self._agent_config_for_speaker(speaker)
+        if config and not config.get("enabled", True):
+            raise MatchStateError(
+                "agent_config_disabled",
+                "该 Agent 配置已停用，不能触发发言。",
+                {"speaker_id": speaker_id, "agent_config_id": config.get("id")},
+            )
         self._ensure_speaker_allowed_for_current_phase(speaker)
 
     async def check_agent_health(self, speaker_id: str) -> Dict[str, Any]:
         speaker = self._find_speaker(speaker_id)
         if speaker["speaker_type"] != "agent":
             raise MatchStateError("invalid_speaker", "该辩手不是 AI 辩手，不能执行 Agent 健康检查。")
+
+        config = self._agent_config_for_speaker(speaker)
+        if config and not config.get("enabled", True):
+            payload = {
+                "speaker_id": speaker_id,
+                "agent_config_id": config.get("id"),
+                "endpoint": self._agent_runtime_endpoint(config, speaker) or "disabled",
+                "ok": False,
+                "status": "disabled",
+                "model": config.get("model_name") or speaker.get("model_name") or "unknown",
+                "latency_ms": 0,
+                "checked_at": iso_now(),
+            }
+            async with self._lock:
+                self._update_agent_health_status(speaker_id, "failed", "Agent 配置已停用", payload)
+                self._persist_snapshot()
+            await self.emit("agent.failed", payload, "admin", speaker_id)
+            return payload
 
         endpoint = self.agent_gateway.endpoint_for(speaker)
         checked_at = iso_now()
@@ -1703,6 +2550,7 @@ class MatchStore:
             event_type = "agent.health_checked" if ok else "agent.failed"
             payload = {
                 "speaker_id": speaker_id,
+                "agent_config_id": speaker.get("agent_config_id"),
                 "endpoint": endpoint or "embedded://mock",
                 "ok": ok,
                 "status": status,
@@ -1720,6 +2568,7 @@ class MatchStore:
             event_type = "agent.failed"
             payload = {
                 "speaker_id": speaker_id,
+                "agent_config_id": speaker.get("agent_config_id"),
                 "endpoint": endpoint or "embedded://mock",
                 "ok": False,
                 "status": status,
@@ -1752,15 +2601,18 @@ class MatchStore:
         try:
             snapshot = await self.get_snapshot()
             missed = [event for event in self.events if event["seq"] > last_seq]
-            await websocket.send_json(
-                {
-                    "type": "snapshot",
-                    "match_id": snapshot["match"]["id"],
-                    "seq": self.seq,
-                    "server_time_ms": int(utc_now().timestamp() * 1000),
-                    "payload": {"state": snapshot, "missed_events": missed},
-                }
-            )
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "snapshot",
+                        "match_id": snapshot["match"]["id"],
+                        "seq": self.seq,
+                        "server_time_ms": int(utc_now().timestamp() * 1000),
+                        "payload": {"state": snapshot, "missed_events": missed},
+                    }
+                )
+            except (WebSocketDisconnect, RuntimeError):
+                return
             while True:
                 try:
                     text = await websocket.receive_text()
@@ -1788,7 +2640,7 @@ class MatchStore:
 
     async def _broadcast(self, message: Dict[str, Any]) -> None:
         disconnected: List[WebSocket] = []
-        for websocket in self._connections:
+        for websocket in list(self._connections):
             try:
                 await websocket.send_json(message)
             except Exception:
@@ -1815,8 +2667,291 @@ class MatchStore:
         self.snapshot["last_seq"] = self.seq
         self.repo.save_snapshot(self.snapshot, iso_now())
 
+    def _new_match_snapshot_from_archive(self, archived: Dict[str, Any], new_match_id: str, now: datetime) -> Dict[str, Any]:
+        phases = deepcopy(archived.get("phases", []))
+        phases.sort(key=lambda item: item.get("display_order", 0))
+        first_phase_id = phases[0]["id"] if phases else archived["match"].get("current_phase_id")
+        for phase in phases:
+            phase["status"] = "active" if phase["id"] == first_phase_id else "pending"
+
+        speakers = deepcopy(archived.get("speakers", []))
+        for speaker in speakers:
+            speaker["status"] = "online" if speaker.get("speaker_type") == "human" else "ready"
+            speaker["mic_permission"] = "unknown" if speaker.get("speaker_type") == "human" else None
+            speaker["device_label"] = None
+            speaker["last_seen_at"] = None
+            speaker.pop("mic_error_message", None)
+
+        agent_status = []
+        for speaker in speakers:
+            if speaker.get("speaker_type") != "agent":
+                continue
+            agent_status.append(
+                {
+                    "speaker_id": speaker["id"],
+                    "agent_config_id": speaker.get("agent_config_id"),
+                    "name": speaker["name"],
+                    "model": speaker.get("model_name") or "未配置模型",
+                    "status": "ready",
+                    "last_heartbeat_seconds": None,
+                    "detail": "等待联调",
+                    "endpoint": speaker.get("agent_endpoint"),
+                }
+            )
+
+        match = deepcopy(archived["match"])
+        match.update(
+            {
+                "id": new_match_id,
+                "status": "ready",
+                "screen_scene": "idle",
+                "live_mode": "single",
+                "current_phase_id": first_phase_id,
+                "created_at": to_iso(now),
+                "updated_at": to_iso(now),
+            }
+        )
+
+        snapshot = {
+            "match": match,
+            "teams": deepcopy(archived.get("teams", [])),
+            "speakers": speakers,
+            "agent_configs": deepcopy(archived.get("agent_configs", [])),
+            "phases": phases,
+            "clocks": [],
+            "current_speech": None,
+            "free_debate": {
+                "current_turn_side": "affirmative",
+                "turn_index": 1,
+                "assignment_mode": archived.get("free_debate", {}).get("assignment_mode", "teammate_control"),
+            },
+            "flow": self._fresh_flow_state(),
+            "audio_output": deepcopy(archived.get("audio_output") or self._fresh_audio_output_state()),
+            "recent_transcript": [],
+            "speech_revisions": [],
+            "audio_assets": [],
+            "agent_status": agent_status,
+            "vote_state": self._fresh_vote_state(speakers),
+            "speech_service": self._fresh_speech_service(speakers),
+            "system": self._system_info(),
+            "last_seq": self.seq,
+        }
+
+        previous_snapshot = self.snapshot
+        self.snapshot = snapshot
+        try:
+            if phases:
+                self._reset_clocks_for_phase(phases[0])
+        finally:
+            snapshot = self.snapshot
+            self.snapshot = previous_snapshot
+        return snapshot
+
+    def _fresh_vote_state(self, speakers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        first_speaker = next((speaker["id"] for speaker in speakers if speaker.get("side") in {"affirmative", "negative"}), "")
+        judge_summary = self._empty_judge_summary()
+        judge_summary["best_speaker_id"] = first_speaker
+        return {
+            "window_status": "closed",
+            "audience_count": 0,
+            "judge_published": False,
+            "audience_published": False,
+            "winner_side": "affirmative",
+            "best_speaker_id": first_speaker,
+            "judge_summary": judge_summary,
+            "audience_summary": self._empty_audience_summary(),
+            "audience_votes": [],
+            "audience_vote_keys": [],
+            "used_audience_tokens": [],
+        }
+
+    def _fresh_speech_service(self, speakers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        human_count = len([speaker for speaker in speakers if speaker.get("speaker_type") == "human"])
+        return {
+            "asr": {"status": "ok", "latency_ms": 0, "active_sessions": 0, "detail": "idle"},
+            "tts": {"status": "idle", "latency_ms": 0, "queue_size": 0, "speaker_id": None, "detail": ""},
+            "screen": {"status": "connected"},
+            "consoles": {"online": 0, "total": human_count, "mic_errors": []},
+        }
+
+    def _fresh_flow_state(self) -> Dict[str, Any]:
+        return {
+            "awaiting_host_confirm": False,
+            "reason": None,
+            "message": "",
+            "next_action": None,
+            "phase_id": None,
+            "speech_id": None,
+            "speaker_id": None,
+            "expired_clocks": [],
+            "created_at": None,
+        }
+
+    def _fresh_audio_output_state(self) -> Dict[str, Any]:
+        return {
+            "mode": "host",
+            "label": self._audio_output_label("host"),
+            "updated_by": "system",
+            "updated_at": iso_now(),
+        }
+
+    def _normalize_audio_output_mode(self, mode: str) -> str:
+        value = str(mode or "").strip()
+        if value not in {"host", "admin", "off"}:
+            raise MatchStateError(
+                "invalid_audio_output",
+                "现场声音输出端必须为 host、admin 或 off。",
+                {"mode": mode},
+            )
+        return value
+
+    def _audio_output_label(self, mode: str) -> str:
+        if mode == "admin":
+            return "技术后台电脑"
+        if mode == "off":
+            return "关闭浏览器提示音"
+        return "主持导播台电脑"
+
+    def _default_agent_config_id(self, speaker_id: str) -> str:
+        return f"agent_{speaker_id}"
+
+    def _agent_config_from_speaker(self, speaker: Dict[str, Any], now: str) -> Dict[str, Any]:
+        return {
+            "id": speaker.get("agent_config_id") or self._default_agent_config_id(str(speaker.get("id") or "")),
+            "name": f"{speaker.get('name') or '未命名'} Agent",
+            "provider_type": "openai_sdk",
+            "model_name": speaker.get("model_name") or "qwen3.6-plus",
+            "model_kind": speaker.get("model_kind") or "closed_source",
+            "endpoint": speaker.get("agent_endpoint") or self._agent_endpoint_for_speaker(str(speaker.get("id") or "")),
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key_env": "DASHSCOPE_API_KEY",
+            "timeout_ms": getattr(self.agent_gateway, "read_timeout_ms", 30000),
+            "enabled": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def _normalize_agent_config_fields(
+        self,
+        fields: Dict[str, Any],
+        *,
+        existing: Optional[Dict[str, Any]] = None,
+        now: str,
+        create: bool,
+    ) -> Dict[str, Any]:
+        source = existing or {}
+        provider_type = str(fields.get("provider_type", source.get("provider_type", "rest_api")) or "rest_api").strip()
+        if provider_type not in {"rest_api", "openai_sdk"}:
+            raise MatchStateError("invalid_agent_config", "Agent 类型必须为 rest_api 或 openai_sdk。", {"provider_type": provider_type})
+
+        name = str(fields.get("name", source.get("name", "")) or "").strip()
+        if not name:
+            raise MatchStateError("invalid_agent_config", "Agent 名称不能为空。")
+
+        model_name = str(fields.get("model_name", fields.get("model", source.get("model_name", ""))) or "").strip()
+        if not model_name:
+            model_name = "未配置模型"
+
+        model_kind = fields.get("model_kind", source.get("model_kind", "closed_source"))
+        if model_kind not in {"open_source", "closed_source"}:
+            raise MatchStateError("invalid_agent_config", "模型类型必须为 open_source 或 closed_source。", {"model_kind": model_kind})
+
+        timeout_raw = fields.get("timeout_ms", source.get("timeout_ms", getattr(self.agent_gateway, "read_timeout_ms", 30000)))
+        try:
+            timeout_ms = int(timeout_raw)
+        except (TypeError, ValueError) as exc:
+            raise MatchStateError("invalid_agent_config", "Agent 超时时间必须为数字。", {"timeout_ms": timeout_raw}) from exc
+        if timeout_ms < 1000 or timeout_ms > 120000:
+            raise MatchStateError("invalid_agent_config", "Agent 超时时间必须在 1000 到 120000 毫秒之间。", {"timeout_ms": timeout_ms})
+
+        enabled = fields.get("enabled", source.get("enabled", True))
+        if isinstance(enabled, str):
+            enabled = enabled.lower() not in {"false", "0", "no", "off", "停用"}
+        else:
+            enabled = bool(enabled)
+
+        config = {
+            "id": source.get("id", ""),
+            "name": name,
+            "provider_type": provider_type,
+            "model_name": model_name,
+            "model_kind": model_kind,
+            "endpoint": str(fields.get("endpoint", source.get("endpoint", "")) or "").strip(),
+            "base_url": str(fields.get("base_url", source.get("base_url", "")) or "").strip(),
+            "api_key_env": str(fields.get("api_key_env", source.get("api_key_env", "")) or "").strip(),
+            "timeout_ms": timeout_ms,
+            "enabled": enabled,
+            "created_at": source.get("created_at") or now,
+            "updated_at": now,
+        }
+        if "api_key" in fields:
+            raise MatchStateError("invalid_agent_config", "不能保存明文 API Key，请填写环境变量名。")
+        if create:
+            config["created_at"] = now
+        return config
+
+    def _unique_agent_config_id(self, name: str) -> str:
+        existing_ids = {config.get("id") for config in self.snapshot.get("agent_configs", [])}
+        digest = hashlib.sha1(f"{name}:{iso_now()}:{len(existing_ids)}".encode("utf-8")).hexdigest()[:8]
+        candidate = f"agent_cfg_{digest}"
+        suffix = 1
+        while candidate in existing_ids:
+            suffix += 1
+            candidate = f"agent_cfg_{digest}_{suffix}"
+        return candidate
+
+    def _find_agent_config(self, agent_config_id: str) -> Dict[str, Any]:
+        for config in self.snapshot.get("agent_configs", []):
+            if config.get("id") == agent_config_id:
+                return config
+        raise MatchStateError("agent_config_not_found", "未找到指定 Agent 配置。", {"agent_config_id": agent_config_id})
+
+    def _agent_config_for_speaker(self, speaker: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        config_id = speaker.get("agent_config_id")
+        if not config_id:
+            return None
+        try:
+            return self._find_agent_config(str(config_id))
+        except MatchStateError:
+            return None
+
+    def _agent_runtime_endpoint(self, config: Optional[Dict[str, Any]], speaker: Dict[str, Any]) -> str:
+        if config and config.get("provider_type") == "rest_api":
+            return str(config.get("endpoint") or "").strip()
+        return str(speaker.get("agent_endpoint") or "").strip()
+
+    def _apply_agent_config_to_speaker(self, speaker: Dict[str, Any]) -> None:
+        if speaker.get("speaker_type") != "agent":
+            return
+        config = self._agent_config_for_speaker(speaker)
+        if not config:
+            return
+        speaker["model_name"] = config.get("model_name") or speaker.get("model_name") or "未配置模型"
+        speaker["model_kind"] = config.get("model_kind") or speaker.get("model_kind") or "closed_source"
+        speaker["agent_endpoint"] = self._agent_runtime_endpoint(config, speaker)
+
+    def _sync_default_agent_config_from_speaker(self, speaker: Dict[str, Any]) -> None:
+        if speaker.get("speaker_type") != "agent":
+            return
+        if speaker.get("agent_config_id") != self._default_agent_config_id(str(speaker.get("id") or "")):
+            return
+        try:
+            config = self._find_agent_config(str(speaker.get("agent_config_id")))
+        except MatchStateError:
+            return
+        config["name"] = f"{speaker.get('name') or '未命名'} Agent"
+        config["model_name"] = speaker.get("model_name") or "未配置模型"
+        config["model_kind"] = speaker.get("model_kind") or "closed_source"
+        config["endpoint"] = speaker.get("agent_endpoint") or ""
+        config["provider_type"] = config.get("provider_type") or "rest_api"
+        config["updated_at"] = iso_now()
+
     def _ensure_runtime_fields(self) -> None:
         self.snapshot["system"] = self._system_info()
+        flow = self.snapshot.setdefault("flow", self._fresh_flow_state())
+        fresh_flow = self._fresh_flow_state()
+        for key, value in fresh_flow.items():
+            flow.setdefault(key, value)
         self.snapshot.setdefault(
             "free_debate",
             {
@@ -1825,6 +2960,14 @@ class MatchStore:
                 "assignment_mode": "teammate_control",
             },
         )
+        audio_output = self.snapshot.setdefault("audio_output", self._fresh_audio_output_state())
+        try:
+            mode = self._normalize_audio_output_mode(str(audio_output.get("mode", "host")))
+        except MatchStateError:
+            mode = "host"
+        audio_output["mode"] = mode
+        audio_output["label"] = self._audio_output_label(mode)
+        audio_output.setdefault("updated_at", iso_now())
         self.snapshot.setdefault(
             "vote_state",
             {
@@ -1837,12 +2980,14 @@ class MatchStore:
                 "judge_summary": self._empty_judge_summary(),
                 "audience_summary": self._empty_audience_summary(),
                 "audience_votes": [],
+                "audience_vote_keys": [],
                 "used_audience_tokens": [],
             },
         )
         self.snapshot["vote_state"].setdefault("judge_summary", self._empty_judge_summary())
         self.snapshot["vote_state"].setdefault("audience_summary", self._empty_audience_summary())
         self.snapshot["vote_state"].setdefault("audience_votes", [])
+        self.snapshot["vote_state"].setdefault("audience_vote_keys", [])
         self.snapshot["vote_state"].setdefault("used_audience_tokens", [])
         audience_summary = self.snapshot["vote_state"]["audience_summary"]
         if not self.snapshot["vote_state"]["audience_votes"] and audience_summary.get("total", 0) == 0 and self.snapshot["vote_state"].get("audience_count", 0) > 0:
@@ -1851,15 +2996,31 @@ class MatchStore:
             audience_summary["total"] = count
             audience_summary.setdefault("winner", {"affirmative": 0, "negative": 0})
             audience_summary["winner"][winner_side] = count
+        now = iso_now()
+        self.snapshot.setdefault("agent_configs", [])
+        config_ids = {config.get("id") for config in self.snapshot["agent_configs"]}
         for speaker in self.snapshot.get("speakers", []):
             if speaker.get("speaker_type") == "human":
                 speaker.setdefault("mic_permission", "unknown")
                 speaker.setdefault("device_label", None)
                 speaker.setdefault("last_seen_at", None)
+                speaker.pop("agent_config_id", None)
             else:
                 speaker.setdefault("mic_permission", None)
                 speaker.setdefault("device_label", None)
                 speaker.setdefault("last_seen_at", None)
+                speaker.setdefault("agent_config_id", self._default_agent_config_id(str(speaker.get("id") or "")))
+                if speaker["agent_config_id"] not in config_ids:
+                    config = self._agent_config_from_speaker(speaker, now)
+                    self.snapshot["agent_configs"].append(config)
+                    config_ids.add(config["id"])
+                self._apply_agent_config_to_speaker(speaker)
+        normalized_configs = []
+        for config in self.snapshot.get("agent_configs", []):
+            normalized = self._normalize_agent_config_fields(config, existing=config, now=now, create=False)
+            normalized["id"] = str(config.get("id") or self._unique_agent_config_id(normalized["name"]))
+            normalized_configs.append(normalized)
+        self.snapshot["agent_configs"] = normalized_configs
         current_phase_id = self.snapshot.get("match", {}).get("current_phase_id")
         for segment in self.snapshot.get("recent_transcript", []):
             segment.setdefault("phase_id", current_phase_id)
@@ -1899,8 +3060,11 @@ class MatchStore:
 
     def _sanitize_snapshot(self, snapshot: Dict[str, Any]) -> None:
         vote_state = snapshot.get("vote_state", {})
+        vote_state.pop("audience_vote_keys", None)
         vote_state.pop("used_audience_tokens", None)
         vote_state.pop("audience_votes", None)
+        for config in snapshot.get("agent_configs", []):
+            config.pop("api_key", None)
 
     def _empty_judge_summary(self) -> Dict[str, Any]:
         return {
@@ -1921,6 +3085,7 @@ class MatchStore:
 
     def _public_vote_state(self) -> Dict[str, Any]:
         vote_state = deepcopy(self.snapshot["vote_state"])
+        vote_state.pop("audience_vote_keys", None)
         vote_state.pop("used_audience_tokens", None)
         vote_state.pop("audience_votes", None)
         return vote_state
@@ -1940,6 +3105,100 @@ class MatchStore:
 
     def _jsonl(self, rows: List[Dict[str, Any]]) -> str:
         return "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + ("\n" if rows else "")
+
+    def _latest_export_from_events(self, events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        for event in reversed(events):
+            if event.get("type") == "export.created":
+                payload = event.get("payload", {})
+                return payload if isinstance(payload, dict) else {}
+        return {}
+
+    def _compact_export_bundle(self, bundle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not bundle:
+            return None
+        entries = bundle.get("entries") or []
+        safe_entries = []
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                safe_entries.append(
+                    {
+                        "path": str(entry.get("path") or ""),
+                        "size_bytes": int(entry.get("size_bytes") or 0),
+                    }
+                )
+        return {
+            "export_id": bundle.get("export_id", ""),
+            "match_id": bundle.get("match_id", ""),
+            "download_url": bundle.get("download_url", ""),
+            "size_bytes": int(bundle.get("size_bytes") or 0),
+            "entry_count": len(safe_entries) if isinstance(entries, list) else int(bundle.get("entry_count") or 0),
+            "entries": safe_entries,
+            "created_at": bundle.get("created_at", ""),
+        }
+
+    def _status_counts(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for row in rows:
+            status = str(row.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    def _event_type_counts(self, events: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("type") or "unknown")
+            counts[event_type] = counts.get(event_type, 0) + 1
+        return counts
+
+    def _compact_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": event.get("id", ""),
+            "match_id": event.get("match_id", ""),
+            "seq": event.get("seq", 0),
+            "type": event.get("type", ""),
+            "actor_type": event.get("actor_type", ""),
+            "actor_id": event.get("actor_id"),
+            "created_at": event.get("created_at", ""),
+        }
+
+    def _compact_agent_request(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": row.get("id", ""),
+            "task_id": row.get("task_id", ""),
+            "speech_id": row.get("speech_id"),
+            "speaker_id": row.get("speaker_id", ""),
+            "endpoint": row.get("endpoint", ""),
+            "status": row.get("status", ""),
+            "error_code": row.get("error_code"),
+            "error_message": row.get("error_message"),
+            "latency_ms": row.get("latency_ms"),
+            "started_at": row.get("started_at", ""),
+            "completed_at": row.get("completed_at"),
+        }
+
+    def _compact_speech_service_request(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": row.get("id", ""),
+            "request_id": row.get("request_id", ""),
+            "service": row.get("service", ""),
+            "operation": row.get("operation", ""),
+            "speech_id": row.get("speech_id"),
+            "speaker_id": row.get("speaker_id"),
+            "status": row.get("status", ""),
+            "error_code": row.get("error_code"),
+            "error_message": row.get("error_message"),
+            "latency_ms": row.get("latency_ms"),
+            "started_at": row.get("started_at", ""),
+            "completed_at": row.get("completed_at"),
+        }
+
+    def _new_speech_service_request_id(self, service: str, operation: str) -> str:
+        service_part = "".join(ch if ch.isalnum() else "_" for ch in service.lower()).strip("_") or "speech"
+        operation_part = "".join(ch if ch.isalnum() else "_" for ch in operation.lower()).strip("_") or "request"
+        timestamp = utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{service_part}_{operation_part}_{timestamp}_{self.seq + 1}"
 
     def _transcript_csv(self, transcript: List[Dict[str, Any]]) -> str:
         output = io.StringIO()
@@ -1972,6 +3231,28 @@ class MatchStore:
             )
         return output.getvalue()
 
+    def _rows_csv(self, rows: List[Dict[str, Any]], fieldnames: List[str]) -> str:
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: self._csv_value(row.get(field)) for field in fieldnames})
+        return output.getvalue()
+
+    def _csv_value(self, value: Any) -> Any:
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        if value is None:
+            return ""
+        return value
+
+    def _agent_events_for_export(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            event
+            for event in events
+            if str(event.get("type") or "").startswith("agent.")
+        ]
+
     def _zip_audio_assets(self, bundle: zipfile.ZipFile, audio_assets: List[Dict[str, Any]], entries: List[Dict[str, Any]]) -> None:
         for asset in audio_assets:
             for chunk in asset.get("chunks", []):
@@ -1982,14 +3263,43 @@ class MatchStore:
                 bundle.write(file_path, arcname)
                 entries.append({"path": arcname, "size_bytes": file_path.stat().st_size})
 
-    def _audience_vote_key(self, body: Dict[str, Any]) -> str:
+    def _audience_vote_keys(self, body: Dict[str, Any]) -> List[str]:
+        token = str(body.get("token") or "").strip()
+        fingerprint = str(body.get("client_fingerprint") or "").strip()
+        request_ip = str(body.get("request_ip") or "").strip()
+        request_user_agent = str(body.get("request_user_agent") or "").strip()
+        keys: List[str] = []
+        if token:
+            keys.append(self._audience_hash_key("token", token))
+        browser_material = "|".join([request_ip, request_user_agent, fingerprint]).strip("|")
+        if browser_material:
+            keys.append(self._audience_hash_key("browser", browser_material))
+        if not keys:
+            raise MatchStateError("invalid_vote", "学生投票必须包含 token 或浏览器指纹。")
+        return keys
+
+    def _legacy_audience_vote_keys(self, body: Dict[str, Any]) -> List[str]:
+        keys: List[str] = []
         token = str(body.get("token") or "").strip()
         fingerprint = str(body.get("client_fingerprint") or "").strip()
         if token:
-            return f"token:{token}"
+            keys.append(f"token:{token}")
         if fingerprint:
-            return f"fingerprint:{fingerprint}"
-        raise MatchStateError("invalid_vote", "学生投票必须包含 token 或浏览器指纹。")
+            keys.append(f"fingerprint:{fingerprint}")
+        return keys
+
+    def _audience_hash_key(self, namespace: str, value: str) -> str:
+        match_id = self.snapshot.get("match", {}).get("id", "current")
+        digest = hashlib.sha256(f"{match_id}:{namespace}:{value}".encode("utf-8")).hexdigest()
+        return f"{namespace}_hash:{digest}"
+
+    def _vote_key_types_for_log(self, keys: List[str]) -> List[str]:
+        labels: List[str] = []
+        for key in keys:
+            label = f"{str(key).split(':', 1)[0]}:*"
+            if label not in labels:
+                labels.append(label)
+        return labels
 
     def _build_judge_summary(self, body: Dict[str, Any]) -> Dict[str, Any]:
         if "judge_summary" in body:
@@ -2102,44 +3412,57 @@ class MatchStore:
         consoles["total"] = len(humans)
         consoles["mic_errors"] = mic_errors
 
+    def _build_debate_history(self) -> list:
+        """Group final+valid transcript segments by phase, return ordered list."""
+        phase_by_id = {p["id"]: p["name"] for p in self.snapshot["phases"]}
+        ordered_phase_ids = [p["id"] for p in sorted(self.snapshot["phases"], key=lambda x: x["display_order"])]
+        groups: Dict[str, list] = {}
+        for segment in self.snapshot.get("recent_transcript", []):
+            if not segment.get("valid", True) or not segment.get("is_final"):
+                continue
+            pid = segment.get("phase_id", "")
+            if pid not in groups:
+                groups[pid] = []
+            groups[pid].append({
+                "speaker": segment["speaker_label"],
+                "content": segment["text"],
+            })
+        return [
+            {"stage": phase_by_id.get(pid, pid), "message": groups[pid]}
+            for pid in ordered_phase_ids
+            if pid in groups
+        ]
+
     def _build_agent_payload(self, task_id: str, speech_id: str, speaker: Dict[str, Any]) -> Dict[str, Any]:
         phase = self._current_phase()
         match = self.snapshot["match"]
+        config = self._agent_config_for_speaker(speaker) or {}
         time_limit = 15 if phase["phase_type"] == "free_debate" else phase["duration_seconds"]
         clock = self._clock("turn" if phase["phase_type"] == "free_debate" else "main")
         remaining_seconds = int((clock["remaining_ms"] if clock else time_limit * 1000) / 1000)
-        transcript_tail = [
-            {
-                "speaker_label": segment["speaker_label"],
-                "source": segment["source"],
-                "text": segment["text"],
-                "created_at": segment["created_at"],
-            }
-            for segment in self.snapshot.get("recent_transcript", [])
-            if segment.get("valid", True)
-        ][:8]
+        next_phase = self._next_phase(phase)
+        holder = "正方" if speaker["side"] == "affirmative" else "反方"
         return {
+            # 结构化辩论格式（Agent 接口核心字段）
+            "model_name": config.get("model_name", ""),
+            "debater_name": speaker["name"],
+            "debate_position": self._seat_label(speaker["seat"]),
+            "debate_topic": match["topic"],
+            "current_stage": phase["name"],
+            "next_stage": next_phase["name"] if next_phase else "比赛结束",
+            "holder": holder,
+            "debate_history": self._build_debate_history(),
+            # 内部路由字段
             "match_id": match["id"],
             "task_id": task_id,
             "speech_id": speech_id,
-            "topic": match["topic"],
-            "side": speaker["side"],
             "speaker_id": speaker["id"],
-            "speaker_name": speaker["name"],
-            "speaker_role": self._seat_label(speaker["seat"]),
-            "phase": phase["phase_key"],
-            "phase_type": phase["phase_type"],
-            "turn_index": self._current_turn_index(),
+            "agent_config_id": speaker.get("agent_config_id"),
+            "agent_provider_type": config.get("provider_type"),
+            # 时控字段
             "time_limit_seconds": time_limit,
             "remaining_seconds": remaining_seconds,
             "target_chars": max(40, int(time_limit * 4.5)),
-            "context": {
-                "summary": "MVP 自动上下文：请围绕当前辩题与最近发言直接回应。",
-                "transcript_tail": transcript_tail,
-                "opponent_claims": [],
-                "own_claims": [],
-                "host_notes": [],
-            },
             "output": {"stream": True, "language": "zh-CN"},
         }
 
@@ -2172,11 +3495,29 @@ class MatchStore:
         if not content or not self._tts_formal_enabled():
             return None
 
+        request_id = f"tts_{task_id}"
+        request_started_time = time.perf_counter()
         async with self._lock:
             current_speech = self.snapshot.get("current_speech") or {}
             phase_id = current_speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
             phase_key = self._phase_key_or_default(phase_id)
             match_id = self.snapshot["match"]["id"]
+            self.repo.save_speech_service_request_started(
+                match_id=match_id,
+                request_id=request_id,
+                service="tts",
+                operation="agent_synthesis",
+                speech_id=speech_id,
+                speaker_id=speaker["id"],
+                request={
+                    "task_id": task_id,
+                    "speech_id": speech_id,
+                    "speaker_id": speaker["id"],
+                    "text": content,
+                    "text_length": len(content),
+                },
+                started_at=iso_now(),
+            )
             self.snapshot["speech_service"]["tts"] = {
                 "status": "synthesizing",
                 "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
@@ -2216,6 +3557,16 @@ class MatchStore:
                     "detail": exc.message,
                     "degraded_to": "text_only",
                 }
+                self.repo.finish_speech_service_request(
+                    match_id=self.snapshot["match"]["id"],
+                    request_id=request_id,
+                    status="failed",
+                    response={"degraded_to": "text_only"},
+                    error_code=str(exc.code) if exc.code is not None else "xfyun_tts_error",
+                    error_message=exc.message,
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
                 self._persist_snapshot()
             await self.emit("tts.failed", payload, "system", speaker["id"])
             return payload
@@ -2260,6 +3611,14 @@ class MatchStore:
                 "latency_ms": result.latency_ms,
                 "file_path": str(file_path),
             }
+            self.repo.finish_speech_service_request(
+                match_id=match_id,
+                request_id=request_id,
+                status="completed",
+                response=payload,
+                latency_ms=result.latency_ms,
+                completed_at=iso_now(),
+            )
             self._persist_snapshot()
 
         await self.emit("tts.audio_archived", payload, "system", speaker["id"])
@@ -2313,6 +3672,7 @@ class MatchStore:
                 item.update(
                     {
                         "name": speaker["name"],
+                        "agent_config_id": speaker.get("agent_config_id"),
                         "model": payload.get("model") or speaker.get("model_name") or item.get("model", "unknown"),
                         "status": status,
                         "detail": detail,
@@ -2327,6 +3687,7 @@ class MatchStore:
         self.snapshot.setdefault("agent_status", []).append(
             {
                 "speaker_id": speaker_id,
+                "agent_config_id": speaker.get("agent_config_id"),
                 "name": speaker["name"],
                 "model": payload.get("model") or speaker.get("model_name") or "unknown",
                 "status": status,
@@ -2343,7 +3704,7 @@ class MatchStore:
         if event["actor_type"] not in {"admin", "host"}:
             return
         self.repo.save_audit_log(
-            audit_id=f"audit_{event['seq']}",
+            audit_id=f"audit_{event['id']}",
             match_id=event["match_id"],
             actor_type=event["actor_type"],
             actor_id=event.get("actor_id"),
@@ -2376,6 +3737,20 @@ class MatchStore:
             raise MatchStateError(
                 "invalid_state",
                 "比赛不在进行中，不能执行该操作。",
+                {"command": command, "status": status},
+            )
+
+    def _ensure_vote_controls_available(self, command: str) -> None:
+        status = self.snapshot["match"]["status"]
+        if status in {"paused", "intervention", "finished", "archived"}:
+            message = (
+                "比赛已结束，投票功能已关闭。"
+                if status in {"finished", "archived"}
+                else "比赛暂停或应急处理中，投票功能暂不可用，请继续比赛后再操作。"
+            )
+            raise MatchStateError(
+                "vote_unavailable",
+                message,
                 {"command": command, "status": status},
             )
 
@@ -2707,14 +4082,59 @@ class MatchStore:
         phase = self._current_phase()
         if phase["phase_type"] != "free_debate":
             return
+        old_turn_index = int(self.snapshot["free_debate"]["turn_index"])
+        old_turn_key = f"{side}_{old_turn_index}"
         next_side = "negative" if side == "affirmative" else "affirmative"
         self.snapshot["free_debate"]["current_turn_side"] = next_side
-        self.snapshot["free_debate"]["turn_index"] = int(self.snapshot["free_debate"]["turn_index"]) + 1
+        self.snapshot["free_debate"]["turn_index"] = old_turn_index + 1
+        # Clear skip votes for the completed turn
+        skip_votes = self.snapshot["free_debate"].get("skip_votes", {})
+        skip_votes.pop(old_turn_key, None)
         turn_clock = self._clock("turn")
         if turn_clock:
             turn_clock["remaining_ms"] = turn_clock["total_seconds"] * 1000
             turn_clock["state"] = "paused"
             turn_clock["deadline_at"] = None
+            turn_clock.pop("expired_notified_at", None)
+
+    def _clear_flow_state(self) -> None:
+        self.snapshot["flow"] = self._fresh_flow_state()
+
+    def _set_flow_waiting_for_timeout(
+        self,
+        phase: Dict[str, Any],
+        expired_clock_names: List[str],
+        speech_id: Optional[str],
+        speaker_id: Optional[str],
+        now: datetime,
+    ) -> Dict[str, Any]:
+        total_expired = any(name in {"affirmative_total", "negative_total", "main"} for name in expired_clock_names)
+        if phase.get("phase_type") == "free_debate" and not total_expired:
+            next_action = "free_turn_next"
+            message = "单次发言时间到，等待主持确认下一轮。"
+        elif self._next_phase(phase):
+            next_action = "phase_next"
+            message = "本环节时间到，等待主持确认进入下一环节。"
+        else:
+            next_action = "judge_commentary"
+            message = "全部发言时间到，等待主持进入评委点评。"
+
+        flow = self._fresh_flow_state()
+        flow.update(
+            {
+                "awaiting_host_confirm": True,
+                "reason": "clock_expired",
+                "message": message,
+                "next_action": next_action,
+                "phase_id": phase.get("id"),
+                "speech_id": speech_id,
+                "speaker_id": speaker_id,
+                "expired_clocks": expired_clock_names,
+                "created_at": to_iso(now),
+            }
+        )
+        self.snapshot["flow"] = flow
+        return deepcopy(flow)
 
     def _invalidate_transcripts_from_order(self, target_order: int, reason: str) -> List[str]:
         invalidated: List[str] = []
@@ -2763,6 +4183,19 @@ class MatchStore:
         if side not in {"affirmative", "negative"}:
             raise MatchStateError("invalid_vote", "投票中的优胜方无效。", {"side": side})
 
+    def _normalize_screen_scene(self, scene: str) -> str:
+        aliases = {
+            "opening": "live",
+            "teams": "idle",
+            "intermission": "judge_commentary",
+            "result": "judge_result",
+        }
+        normalized = aliases.get(scene, scene)
+        allowed = {"idle", "live", "paused", "judge_commentary", "judge_result", "audience_result"}
+        if normalized not in allowed:
+            raise MatchStateError("invalid_screen_scene", "未知的大屏场景。", {"scene": scene})
+        return normalized
+
     def _start_relevant_clocks(self, side: str) -> None:
         now = utc_now()
         phase_id = self.snapshot["match"]["current_phase_id"]
@@ -2773,9 +4206,29 @@ class MatchStore:
             if should_run and clock["remaining_ms"] > 0:
                 clock["state"] = "running"
                 clock["deadline_at"] = to_iso(now + timedelta(milliseconds=clock["remaining_ms"]))
+                clock.pop("expired_notified_at", None)
             elif clock["state"] == "running":
                 clock["state"] = "paused"
                 clock["deadline_at"] = None
+
+    def _reset_relevant_clocks_for_speech(self, speech: Dict[str, Any]) -> None:
+        self._refresh_clocks()
+        side = speech.get("side")
+        phase_id = speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
+        started_remaining = speech.get("started_clock_remaining_ms") or {}
+        for clock in self.snapshot["clocks"]:
+            if clock.get("phase_id") != phase_id:
+                continue
+            relevant = clock["name"] == "main"
+            if phase_id == "phase_free_debate":
+                relevant = clock["name"] in {"turn", f"{side}_total"}
+            if not relevant:
+                continue
+            fallback = clock["total_seconds"] * 1000 if clock["name"] in {"main", "turn"} else int(clock.get("remaining_ms", 0))
+            clock["remaining_ms"] = int(started_remaining.get(clock["name"], fallback))
+            clock["state"] = "paused"
+            clock["deadline_at"] = None
+            clock.pop("expired_notified_at", None)
 
     def _clock(self, name: str) -> Optional[Dict[str, Any]]:
         for clock in self.snapshot["clocks"]:
@@ -2885,13 +4338,29 @@ class MatchStore:
 
     def _sync_agent_status_for_speaker(self, speaker: Dict[str, Any]) -> None:
         if speaker.get("speaker_type") != "agent":
+            self.snapshot["agent_status"] = [
+                item for item in self.snapshot.get("agent_status", []) if item.get("speaker_id") != speaker["id"]
+            ]
             return
         for item in self.snapshot.get("agent_status", []):
             if item.get("speaker_id") == speaker["id"]:
                 item["name"] = speaker["name"]
-                if speaker.get("model_name"):
-                    item["model"] = speaker["model_name"]
+                item["agent_config_id"] = speaker.get("agent_config_id")
+                item["model"] = speaker.get("model_name") or "未配置模型"
+                item["endpoint"] = speaker.get("agent_endpoint")
                 return
+        self.snapshot.setdefault("agent_status", []).append(
+            {
+                "speaker_id": speaker["id"],
+                "agent_config_id": speaker.get("agent_config_id"),
+                "name": speaker["name"],
+                "model": speaker.get("model_name") or "未配置模型",
+                "status": "ready",
+                "last_heartbeat_seconds": None,
+                "detail": "等待联调",
+                "endpoint": speaker.get("agent_endpoint"),
+            }
+        )
 
     def _agent_endpoint_for_speaker(self, speaker_id: str) -> str:
         speaker_key = speaker_id.upper().replace("-", "_")
@@ -2924,6 +4393,58 @@ class MatchStore:
             "却忽略了 AI 时代最稀缺的能力，",
             "是提出正确问题并不断校准目标。"
         ]
+
+
+STRUCTURED_CSV_FIELDS = {
+    "phases": [
+        "match_id",
+        "id",
+        "phase_key",
+        "name",
+        "phase_type",
+        "display_order",
+        "side",
+        "speaker_seat",
+        "duration_seconds",
+        "side_total_seconds",
+        "turn_seconds",
+        "speaker_selector",
+        "status",
+        "updated_at",
+    ],
+    "speeches": [
+        "match_id",
+        "speech_id",
+        "phase_id",
+        "speaker_id",
+        "side",
+        "turn_index",
+        "source",
+        "state",
+        "content_final",
+        "content_partial",
+        "started_at",
+        "paused_at",
+        "ended_at",
+        "updated_at",
+    ],
+    "transcript_segments": [
+        "match_id",
+        "id",
+        "speech_id",
+        "phase_id",
+        "speaker_id",
+        "speaker_label",
+        "source",
+        "is_final",
+        "turn_index",
+        "valid",
+        "invalid_reason",
+        "text",
+        "created_at",
+        "updated_at",
+    ],
+}
 
 
 store = MatchStore()
