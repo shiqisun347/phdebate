@@ -258,6 +258,27 @@ export async function uploadAudioChunk(
   return body.data;
 }
 
+export async function uploadSpeakerImage(matchId: string, speakerId: string, file: File): Promise<MatchSnapshot> {
+  const token = authTokenForCurrentPage();
+  const form = new FormData();
+  form.set("file", file, file.name);
+  const response = await fetch(`${apiBase}/api/matches/${matchId}/speakers/${speakerId}/image`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: form
+  });
+  const body = (await response.json()) as ApiResponse<MatchSnapshot>;
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.error?.message ?? `上传失败：${response.status}`);
+  }
+  return body.data;
+}
+
+/** Edit/correct a past speech (transcript) segment; edited text flows into future agent debate_history. */
+export function patchSpeech(matchId: string, speechId: string, body: { text?: string; content_final?: string; valid?: boolean; reason?: string }): Promise<MatchSnapshot> {
+  return patch<MatchSnapshot>(`/api/matches/${matchId}/speeches/${speechId}`, body);
+}
+
 function defaultAudioFilename(chunkIndex: number, mimeType: string): string {
   const value = mimeType.toLowerCase();
   const extension = value.includes("l16") || value.includes("pcm") || value.includes("raw") ? "pcm" : "webm";

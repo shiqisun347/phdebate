@@ -1,4 +1,4 @@
-import { ExternalLink, Mic2, Monitor, RadioTower, Settings2, ShieldCheck } from "lucide-react";
+import { ExternalLink, Mic2, Monitor, Settings2, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getCurrentMatchSummary } from "../api/client";
 import { StatusPill } from "../components/StatusPill";
@@ -19,15 +19,9 @@ export function NavigationPage() {
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const primaryLinks = [
     {
-      href: linkWithToken("/host", token),
-      title: "主持导播台",
-      detail: "流程推进 / 发言权限 / 大屏切换",
-      icon: RadioTower
-    },
-    {
       href: linkWithToken("/admin", token),
       title: "技术后台",
-      detail: "系统设置 / 应急干预 / 权限与审计",
+      detail: "系统设置 / 现场控场 / 权限与审计",
       icon: Settings2
     },
     {

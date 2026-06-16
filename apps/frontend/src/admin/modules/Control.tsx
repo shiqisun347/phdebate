@@ -1,32 +1,129 @@
 import * as React from "react";
 import {
-  Play, Pause, SkipForward, RotateCcw, Square, AlertOctagon, Bot, Sparkles, MessageSquare,
-  Award, UserCircle2, HelpCircle, RefreshCw, Hand, Send, Trophy, Megaphone, ChevronDown, Clock, Undo2,
+  Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles, MessageSquare,
+  Award, UserCircle2, HelpCircle, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
+  ArrowRight, Monitor, Vote, ChevronRight,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Badge, Select, Textarea, Input, Separator, Spinner } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
+import { useConfirm } from "../ui/ConfirmDialog";
+import { Tabs } from "../ui/Tabs";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
 import { useAction } from "../lib/actions";
-import { post, put, sendXiaoqiCommand } from "../../api/client";
+import { post, sendXiaoqiCommand } from "../../api/client";
 import { SCENE_LABELS, STATUS_LABELS, sideLabel } from "../lib/labels";
-import type { Speaker, XiaoqiCommand } from "../../types/contracts";
+import { resolveAvatar } from "../../state/avatar";
+import type { MatchSnapshot, Speaker, XiaoqiCommand } from "../../types/contracts";
 
-const SCENE_STEPS: Array<{ scene: string; label: string }> = [
-  { scene: "opening", label: "辩题介绍" },
-  { scene: "teams", label: "阵容介绍" },
-  { scene: "live", label: "比赛实况" },
-  { scene: "xiaoqi_commentary", label: "小七观点" },
-  { scene: "xiaoqi_result", label: "小七结果" },
-  { scene: "judge_commentary", label: "评委点评" },
-  { scene: "judge_result", label: "评委结果" },
-  { scene: "audience_result", label: "学生结果" },
+const SEAT_LABELS = ["", "一辩", "二辩", "三辩", "四辩"];
+const seatLabel = (seat: number) => SEAT_LABELS[seat] ?? `${seat}号位`;
+
+/* 阶段导航条：4 个页内选项 */
+type StageTab = "pre" | "live" | "xiaoqi" | "review";
+const STAGE_TABS: Array<{ value: StageTab; label: string }> = [
+  { value: "pre", label: "赛前阶段" },
+  { value: "live", label: "比赛过程" },
+  { value: "xiaoqi", label: "小七点评" },
+  { value: "review", label: "评委与学生点评" },
 ];
+
+/** 根据当前比赛阶段/场景推导应聚焦的页内选项。 */
+function tabForState(s: MatchSnapshot): StageTab {
+  const scene = s.match.screen_scene;
+  const status = s.match.status;
+  if (scene === "xiaoqi_commentary" || scene === "xiaoqi_result") return "xiaoqi";
+  if (["judge_commentary", "judge_result", "audience_result", "acknowledgment"].includes(scene)) return "review";
+  if (status === "running" || scene === "live") return "live";
+  return "pre";
+}
+
+interface NextStep {
+  label: string;
+  enabled: boolean;
+  urgent: boolean;
+  run?: (base: string) => Promise<unknown>;
+}
+
+/** 计算「下一步骤」：动态文案 + 是否需要控场人员操作（urgent → 闪烁）。 */
+function computeNextStep(s: MatchSnapshot): NextStep {
+  const status = s.match.status;
+  if (status === "draft" || status === "ready") {
+    return { label: "比赛未开始（点右侧开始比赛）", enabled: false, urgent: false };
+  }
+  if (status === "finished" || status === "archived") {
+    return { label: "比赛已结束", enabled: false, urgent: false };
+  }
+  if (status === "paused") {
+    return { label: "比赛已暂停（点继续恢复）", enabled: false, urgent: false };
+  }
+  const flow = s.flow;
+  const ordered = [...s.phases].sort((a, b) => a.display_order - b.display_order);
+  const idx = ordered.findIndex((p) => p.id === s.match.current_phase_id);
+  const nextPhase = idx >= 0 ? ordered[idx + 1] : undefined;
+
+  if (flow.awaiting_host_confirm) {
+    if (flow.next_action === "free_turn_next") {
+      return {
+        label: `下一轮：${sideLabel(s.free_debate.current_turn_side)}发言`,
+        enabled: true,
+        urgent: true,
+        run: (base) => post(`${base}/flow/confirm`, { reason: "host_confirm" }),
+      };
+    }
+    if (flow.next_action === "judge_commentary") {
+      return {
+        label: "进入评委点评",
+        enabled: true,
+        urgent: true,
+        run: async (base) => {
+          await post(`${base}/flow/confirm`, { reason: "host_confirm" });
+          await post(`${base}/screen/scene`, { scene: "judge_commentary" });
+        },
+      };
+    }
+    return {
+      label: nextPhase ? `进入下一环节：${nextPhase.name}` : "进入下一环节",
+      enabled: true,
+      urgent: true,
+      run: (base) => post(`${base}/phases/next`),
+    };
+  }
+
+  const speech = s.current_speech;
+  if (speech && speech.state !== "ended") {
+    return { label: "发言进行中…", enabled: false, urgent: false };
+  }
+  if (nextPhase) {
+    return {
+      label: `进入下一环节：${nextPhase.name}`,
+      enabled: true,
+      urgent: false,
+      run: (base) => post(`${base}/phases/next`),
+    };
+  }
+  return {
+    label: "全部环节完成 · 进入小七点评",
+    enabled: true,
+    urgent: true,
+    run: (base) => post(`${base}/screen/scene`, { scene: "xiaoqi_commentary" }),
+  };
+}
 
 export function Control() {
   const { snapshot, matchId } = useAdminData();
   const { run, pending } = useAction();
-  const toast = useToast();
+  const { confirm, dialog } = useConfirm();
+
+  const autoTab = snapshot ? tabForState(snapshot) : "pre";
+  const [tab, setTab] = React.useState<StageTab>(autoTab);
+  const lastAuto = React.useRef(autoTab);
+  React.useEffect(() => {
+    if (autoTab !== lastAuto.current) {
+      lastAuto.current = autoTab;
+      setTab(autoTab);
+    }
+  }, [autoTab]);
 
   if (!snapshot) {
     return (
@@ -38,118 +135,158 @@ export function Control() {
 
   const m = snapshot.match;
   const base = `/api/matches/${matchId}`;
-  const setScene = (scene: string) => run(() => post(`${base}/screen/scene`, { scene }), { success: `已切换：${SCENE_LABELS[scene] ?? scene}` });
+  const canStart = m.status === "draft" || m.status === "ready";
+  const isPaused = m.status === "paused";
+  const isRunning = m.status === "running";
+  const next = computeNextStep(snapshot);
 
   return (
-    <div className="space-y-5">
-      {/* 顶部状态 + 生命周期控制 */}
+    <div className="space-y-4">
+      {/* 1 顶部信息条（压缩，不换行） */}
+      <div className="flex items-center gap-2 px-1">
+        <Monitor className="size-4 shrink-0 text-primary" />
+        <span className="shrink-0 text-sm font-medium text-muted-foreground">当前比赛：</span>
+        <span className="truncate text-sm font-semibold text-foreground">{m.title}</span>
+      </div>
+
+      {/* 2 比赛实况状态栏 */}
+      <LiveStatusBar />
+
+      {/* 3 流程控制 */}
       <Card>
-        <CardContent className="space-y-4 p-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={m.status === "running" ? "success" : m.status === "paused" ? "warning" : "muted"}>
-              {STATUS_LABELS[m.status] ?? m.status}
-            </Badge>
-            <Badge variant="secondary">大屏：{SCENE_LABELS[m.screen_scene] ?? m.screen_scene}</Badge>
-            <span className="ml-auto truncate text-sm text-muted-foreground">{m.title}</span>
+        <CardContent className="space-y-3 p-4">
+          {/* 下一步骤：最高亮度、最显眼；需要操作时闪烁，否则灰色不可点 */}
+          <div className="flex flex-wrap items-stretch gap-2">
+            <button
+              disabled={!next.enabled}
+              onClick={() => {
+                if (next.run) void run(() => next.run!(base), { success: "已执行下一步" });
+              }}
+              className={[
+                "flex flex-1 items-center justify-center gap-2 rounded-lg px-5 py-3 text-base font-semibold transition-all",
+                next.enabled
+                  ? "bg-primary text-primary-foreground shadow-lg hover:bg-primary/90"
+                  : "cursor-not-allowed bg-muted text-muted-foreground",
+                next.urgent ? "next-step-blink" : "",
+              ].join(" ")}
+            >
+              <ArrowRight className="size-5" />
+              <span className="flex flex-col items-start leading-tight">
+                <span className="text-[11px] font-normal opacity-80">下一步骤</span>
+                <span>{next.label}</span>
+              </span>
+            </button>
+
+            {/* 开始 / 重置 归到最右侧一组 */}
+            <div className="flex items-center gap-2">
+              <Button
+                variant="success"
+                loading={pending}
+                disabled={!canStart}
+                onClick={() =>
+                  run(async () => {
+                    await post(`${base}/start`);
+                    await post(`${base}/screen/scene`, { scene: "live" });
+                  }, { success: "比赛已开始" })
+                }
+              >
+                <Play /> 开始比赛
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={async () => {
+                  if (await confirm({ title: "重置比赛？", description: "将清空比赛进度，回到初始状态。", confirmText: "确认重置", tone: "destructive" }))
+                    void run(() => post(`${base}/reset`, { confirm_text: "重置比赛" }), { success: "比赛已重置" });
+                }}
+              >
+                <Square /> 重置比赛
+              </Button>
+            </div>
           </div>
+
+          {/* 次级控制 */}
           <div className="flex flex-wrap gap-2">
-            <Button variant="success" loading={pending} onClick={() => run(async () => { await post(`${base}/start`); await post(`${base}/screen/scene`, { scene: "live" }); }, { success: "比赛已开始" })}>
-              <Play /> 开始比赛
-            </Button>
-            <Button variant="outline" onClick={() => run(() => post(`${base}/pause`), { success: "已暂停" })}>
-              <Pause /> 暂停
-            </Button>
-            <Button variant="outline" onClick={() => run(() => post(`${base}/resume`), { success: "已继续" })}>
-              <Play /> 继续
-            </Button>
-            <Button variant="outline" onClick={() => run(() => post(`${base}/phases/next`), { success: "已进入下一阶段" })}>
+            {isPaused ? (
+              <Button variant="outline" onClick={() => run(() => post(`${base}/resume`), { success: "已继续" })}>
+                <Play /> 继续
+              </Button>
+            ) : (
+              <Button variant="outline" disabled={!isRunning} onClick={() => run(() => post(`${base}/pause`), { success: "已暂停" })}>
+                <Pause /> 暂停
+              </Button>
+            )}
+            <Button variant="outline" disabled={!isRunning} onClick={() => run(() => post(`${base}/phases/next`), { success: "已进入下一阶段" })}>
               <SkipForward /> 下一阶段
             </Button>
             <Button
               variant="outline"
-              onClick={() => {
-                if (confirm("回退到上一阶段？用于撤销误操作。"))
-                  run(() => post(`${base}/phases/${m.current_phase_id}/rollback`), { success: "已回退上一步" });
+              onClick={async () => {
+                if (await confirm({ title: "回退到上一阶段？", description: "用于撤销误操作。" }))
+                  void run(() => post(`${base}/phases/${m.current_phase_id}/rollback`), { success: "已回退上一步" });
               }}
             >
               <Undo2 /> 回退上一步
             </Button>
-            <Button variant="outline" onClick={() => { if (confirm("重置当前发言？")) run(() => post(`${base}/speeches/current/reset`), { success: "已重置当前发言" }); }}>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                if (await confirm({ title: "重置当前发言？" }))
+                  void run(() => post(`${base}/speeches/current/reset`), { success: "已重置当前发言" });
+              }}
+            >
               <RotateCcw /> 重置当前发言
             </Button>
-            <Button variant="outline" onClick={() => { if (confirm("重置整个比赛？将清空进度。")) run(() => post(`${base}/reset`), { success: "比赛已重置" }); }}>
-              <Square /> 重置比赛
-            </Button>
-            <Button variant="destructive" className="ml-auto" onClick={() => { if (confirm("紧急停止？")) run(() => post(`${base}/emergency-stop`), { success: "已紧急停止" }); }}>
-              <AlertOctagon /> 紧急停止
-            </Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* 大屏场景导航（10 步流程） */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">大屏场景切换</CardTitle>
-          <CardDescription>按现场流程推进主屏幕画面。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {SCENE_STEPS.map((s, i) => (
-              <button
-                key={s.scene}
-                onClick={() => setScene(s.scene)}
-                className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors ${
-                  m.screen_scene === s.scene
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border bg-card text-foreground hover:bg-accent"
-                }`}
-              >
-                <span className="text-xs opacity-70">{i + 1}</span> {s.label}
-              </button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+      {/* 4 阶段导航条 */}
+      <Tabs value={tab} onValueChange={(v) => setTab(v as StageTab)} items={STAGE_TABS} className="flex w-full" />
 
-      <CurrentPhaseCard />
+      {/* 5 阶段内容区 */}
+      {(tab === "pre" || tab === "live") && (
+        <div className="space-y-4">
+          {tab === "pre" && <PreScreenControl />}
+          <AgentControlPanel />
+        </div>
+      )}
+      {tab === "xiaoqi" && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <XiaoqiControlPanel />
+          <XiaoqiResultEntry />
+        </div>
+      )}
+      {tab === "review" && <ReviewPanels />}
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        <AgentControlPanel />
-        <XiaoqiControlPanel onSceneCommentary={() => setScene("xiaoqi_commentary")} onSceneResult={() => setScene("xiaoqi_result")} />
-      </div>
-
-      <ResultPanel />
-
-      <DebateProcess />
+      {dialog}
     </div>
   );
 }
 
-function CurrentPhaseCard() {
+/* ----------------------------- 2 · 比赛实况状态栏 ----------------------------- */
+function LiveStatusBar() {
   const { snapshot } = useAdminData();
   if (!snapshot) return null;
-  const phase = snapshot.phases.find((p) => p.id === snapshot.match.current_phase_id);
+  const m = snapshot.match;
+  const phase = snapshot.phases.find((p) => p.id === m.current_phase_id);
   const clock = snapshot.clocks[0];
-  const next = snapshot.next_speaker;
+  const speaker = snapshot.speakers.find((s) => s.id === snapshot.current_speech?.speaker_id);
+  const speechState = snapshot.current_speech?.state;
   return (
     <Card>
-      <CardContent className="flex flex-wrap items-center gap-4 p-4">
-        <div>
-          <p className="text-xs text-muted-foreground">当前环节</p>
-          <p className="font-semibold text-foreground">{phase?.name ?? "—"}</p>
-        </div>
+      <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 p-3">
+        <StatusItem label="状态" value={<Badge variant={m.status === "running" ? "success" : m.status === "paused" ? "warning" : "muted"}>{STATUS_LABELS[m.status] ?? m.status}</Badge>} />
+        <StatusItem label="大屏" value={<Badge variant="secondary">{SCENE_LABELS[m.screen_scene] ?? m.screen_scene}</Badge>} />
+        <StatusItem label="当前环节" value={<span className="text-sm font-semibold text-foreground">{phase?.name ?? "—"}</span>} />
+        <StatusItem label="当前发言人" value={<span className="text-sm font-medium text-foreground">{speaker ? `${sideLabel(speaker.side)}${seatLabel(speaker.seat)} · ${speaker.name}` : "—"}</span>} />
+        <StatusItem
+          label="发言状态"
+          value={<span className="text-sm text-muted-foreground">{speechState === "speaking" ? "发言中" : speechState === "paused" ? "已暂停" : "—"}</span>}
+        />
         {clock && (
-          <div className="flex items-center gap-1.5 rounded-md bg-muted px-3 py-1.5">
+          <div className="ml-auto flex items-center gap-1.5 rounded-md bg-muted px-3 py-1.5">
             <Clock className="size-4 text-primary" />
             <span className="font-mono text-sm font-semibold">{Math.max(0, Math.round((clock.remaining_ms ?? 0) / 1000))}s</span>
-            <Badge variant="muted">{clock.state}</Badge>
-          </div>
-        )}
-        {next && (
-          <div className="ml-auto text-right">
-            <p className="text-xs text-muted-foreground">下一位发言</p>
-            <p className="text-sm font-medium text-foreground">{next.label}</p>
           </div>
         )}
       </CardContent>
@@ -157,7 +294,65 @@ function CurrentPhaseCard() {
   );
 }
 
-/* ----------------------------- AI 辩手控制 ----------------------------- */
+function StatusItem({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      {value}
+    </div>
+  );
+}
+
+/* ----------------------------- 赛前大屏画面 ----------------------------- */
+function PreScreenControl() {
+  const { matchId } = useAdminData();
+  const { run } = useAction();
+  const base = `/api/matches/${matchId}`;
+  const scenes: Array<{ scene: string; label: string }> = [
+    { scene: "idle", label: "候场" },
+    { scene: "opening", label: "辩题介绍" },
+    { scene: "teams", label: "阵容介绍" },
+  ];
+  return <ScreenSceneRow title="赛前大屏画面" scenes={scenes} base={base} run={run} />;
+}
+
+function ScreenSceneRow({
+  title,
+  scenes,
+  base,
+  run,
+}: {
+  title: string;
+  scenes: Array<{ scene: string; label: string }>;
+  base: string;
+  run: ReturnType<typeof useAction>["run"];
+}) {
+  const { snapshot } = useAdminData();
+  const current = snapshot?.match.screen_scene;
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Monitor className="size-4" /> {title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap gap-2">
+          {scenes.map((s) => (
+            <Button
+              key={s.scene}
+              size="sm"
+              variant={current === s.scene ? "default" : "outline"}
+              onClick={() => run(() => post(`${base}/screen/scene`, { scene: s.scene }), { success: `已切换：${s.label}` })}
+            >
+              {s.label}
+            </Button>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ----------------------------- AI 辩手控制（重新设计，紧凑） ----------------------------- */
 function AgentControlPanel() {
   const { snapshot, matchId } = useAdminData();
   const { run } = useAction();
@@ -165,60 +360,49 @@ function AgentControlPanel() {
   const [fallback, setFallback] = React.useState<Speaker | null>(null);
   const agents = (snapshot?.speakers ?? []).filter((s) => s.speaker_type === "agent");
   const base = `/api/matches/${matchId}`;
-
   const activeSpeakerId = snapshot?.current_speech?.speaker_id ?? snapshot?.next_speaker?.speaker_id;
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Bot className="size-4" /> AI 辩手控制
-        </CardTitle>
-        <CardDescription>点击 AI 辩手进行自我介绍、重试、替代方案或中断。</CardDescription>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Bot className="size-4" /> AI 辩手控制</CardTitle>
+        <CardDescription>当前轮到的 AI 辩手高亮显示，可发言 / 重试 / 替代 / 中断。</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {agents.length === 0 && <p className="text-sm text-muted-foreground">本场没有 AI 辩手。</p>}
-        {agents.map((a) => {
-          const isTurn = activeSpeakerId === a.id;
-          const st = snapshot?.agent_status.find((s) => s.speaker_id === a.id);
-          return (
-            <div key={a.id} className="rounded-lg border border-border p-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-                    <Bot className="size-4" />
+      <CardContent>
+        {agents.length === 0 && <p className="py-2 text-sm text-muted-foreground">本场没有 AI 辩手。</p>}
+        <div className="grid gap-2 sm:grid-cols-2">
+          {agents.map((a) => {
+            const isTurn = activeSpeakerId === a.id;
+            const st = snapshot?.agent_status.find((s) => s.speaker_id === a.id);
+            return (
+              <div key={a.id} className={`flex items-center gap-3 rounded-lg border p-2.5 ${isTurn ? "border-primary bg-primary/5" : "border-border"}`}>
+                <img src={resolveAvatar(a)} alt={a.name} className="size-10 shrink-0 rounded-md object-cover" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-sm font-medium text-foreground">{a.name}</span>
+                    <span className="text-xs text-muted-foreground">{sideLabel(a.side)}{seatLabel(a.seat)}</span>
+                    {isTurn && <Badge variant="success" className="ml-auto">当前</Badge>}
                   </div>
-                  <div>
-                    <p className="text-sm font-medium text-foreground">{a.name} <span className="text-xs text-muted-foreground">{sideLabel(a.side)}{a.seat}</span></p>
-                    <p className="text-xs text-muted-foreground">{a.model_name || "未绑定"} {st ? `· ${st.status}` : ""}</p>
+                  <p className="truncate text-xs text-muted-foreground">{a.model_name || "未绑定"}{st ? ` · ${st.status}` : ""}</p>
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => run(() => post(`${base}/speakers/${a.id}/start-agent-speaking`), { success: `${a.name} 开始发言` })}>
+                      <UserCircle2 className="size-3" /> 发言
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => { if (isTurn) run(() => post(`${base}/agent/${a.id}/retry`), { success: "已重新请求" }); else toast("并非该 agent 回答环节", "info"); }}>
+                      <RefreshCw className="size-3" /> 重试
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => setFallback(a)}>
+                      <Hand className="size-3" /> 替代
+                    </Button>
+                    <Button size="sm" variant="ghost" className="h-7 px-2 text-xs text-destructive" onClick={() => run(() => post(`${base}/agent/${a.id}/interrupt`), { success: "已中断" })}>
+                      中断
+                    </Button>
                   </div>
                 </div>
-                {isTurn && <Badge variant="success">当前发言</Badge>}
               </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <Button size="sm" variant="outline" onClick={() => run(() => post(`${base}/speakers/${a.id}/start-agent-speaking`), { success: `${a.name} 开始发言` })}>
-                  <UserCircle2 /> 自我介绍/发言
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    if (isTurn) run(() => post(`${base}/agent/${a.id}/retry`), { success: "已重新请求发言" });
-                    else toast("并非该 agent 回答环节", "info");
-                  }}
-                >
-                  <RefreshCw /> 重试
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => setFallback(a)}>
-                  <Hand /> 替代方案
-                </Button>
-                <Button size="sm" variant="ghost" className="text-destructive" onClick={() => run(() => post(`${base}/agent/${a.id}/interrupt`), { success: "已中断" })}>
-                  中断
-                </Button>
-              </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </CardContent>
       {fallback && <FallbackDialog speaker={fallback} onClose={() => setFallback(null)} />}
     </Card>
@@ -257,14 +441,17 @@ function FallbackDialog({ speaker, onClose }: { speaker: Speaker; onClose: () =>
   );
 }
 
-/* ----------------------------- 小七控制 ----------------------------- */
-function XiaoqiControlPanel({ onSceneCommentary, onSceneResult }: { onSceneCommentary: () => void; onSceneResult: () => void }) {
-  const { snapshot } = useAdminData();
+/* ----------------------------- 小七控制（重新设计） ----------------------------- */
+function XiaoqiControlPanel() {
+  const { snapshot, matchId } = useAdminData();
+  const { run } = useAction();
   const toast = useToast();
   const [busy, setBusy] = React.useState<XiaoqiCommand | null>(null);
   const [customQ, setCustomQ] = React.useState("");
+  const base = `/api/matches/${matchId}`;
 
-  async function send(command: XiaoqiCommand) {
+  async function send(command: XiaoqiCommand, scene?: string) {
+    if (scene) await run(() => post(`${base}/screen/scene`, { scene }), { success: `大屏：${scene === "xiaoqi_result" ? "小七评判" : "小七点评"}`, refresh: true });
     setBusy(command);
     try {
       const ctx = snapshot ? { debate_topic: snapshot.match.topic } : undefined;
@@ -279,27 +466,25 @@ function XiaoqiControlPanel({ onSceneCommentary, onSceneResult }: { onSceneComme
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Sparkles className="size-4" /> 小七控制
-        </CardTitle>
-        <CardDescription>系统只负责发送命令，小七发音依赖其自身。</CardDescription>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Sparkles className="size-4" /> 小七控制</CardTitle>
+        <CardDescription>大屏切到小七形象，并向小七下发命令（发音由小七自身完成）。</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-2">
-        <div className="grid grid-cols-2 gap-2">
-          <Button variant="outline" loading={busy === "intro"} onClick={() => { onSceneCommentary(); send("intro"); }}>
-            <UserCircle2 /> 自我介绍
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-1 gap-2">
+          <Button variant="outline" className="justify-start" loading={busy === "intro"} onClick={() => send("intro", "xiaoqi_commentary")}>
+            <UserCircle2 /> 小七自我介绍<ChevronRight className="ml-auto size-4 opacity-50" />
           </Button>
-          <Button variant="outline" loading={busy === "commentary"} onClick={() => { onSceneCommentary(); send("commentary"); }}>
-            <MessageSquare /> 辩论点评
+          <Button variant="outline" className="justify-start" loading={busy === "commentary"} onClick={() => send("commentary", "xiaoqi_commentary")}>
+            <MessageSquare /> 小七辩论点评<ChevronRight className="ml-auto size-4 opacity-50" />
           </Button>
-          <Button variant="outline" loading={busy === "result"} onClick={() => { onSceneResult(); send("result"); }}>
-            <Award /> 辩论结果
+          <Button variant="outline" className="justify-start" loading={busy === "result"} onClick={() => send("result", "xiaoqi_result")}>
+            <Award /> 小七公布评判<ChevronRight className="ml-auto size-4 opacity-50" />
           </Button>
         </div>
         <Separator />
         <div className="flex gap-2">
-          <Input value={customQ} onChange={(e) => setCustomQ(e.target.value)} placeholder="自定义问题…" />
+          <Input value={customQ} onChange={(e) => setCustomQ(e.target.value)} placeholder="向小七提自定义问题…" />
           <Button variant="outline" loading={busy === "custom"} disabled={!customQ.trim()} onClick={() => send("custom")}>
             <HelpCircle /> 发送
           </Button>
@@ -309,25 +494,26 @@ function XiaoqiControlPanel({ onSceneCommentary, onSceneResult }: { onSceneComme
   );
 }
 
-/* ----------------------------- 结果录入与公布 ----------------------------- */
-function ResultPanel() {
+/* ----------------------------- 小七结果录入（获胜方 + 最佳辩手，无理由） ----------------------------- */
+function XiaoqiResultEntry() {
   const { snapshot, matchId, refresh } = useAdminData();
   const toast = useToast();
-  const [winner, setWinner] = React.useState<"affirmative" | "negative">("affirmative");
-  const [best, setBest] = React.useState("");
+  const vs = snapshot?.vote_state;
+  const [winner, setWinner] = React.useState<"affirmative" | "negative">((vs?.winner_side as "affirmative" | "negative") || "affirmative");
+  const [best, setBest] = React.useState(vs?.best_speaker_id || "");
   const [saving, setSaving] = React.useState(false);
   if (!snapshot) return null;
   const base = `/api/matches/${matchId}`;
-  const vs = snapshot.vote_state;
 
-  async function act(fn: () => Promise<unknown>, msg: string) {
+  async function save() {
+    if (!best) return toast("请选择最佳辩手", "error");
     setSaving(true);
     try {
-      await fn();
+      await post(`${base}/votes`, { winner_side: winner, best_speaker_id: best });
       await refresh();
-      toast(msg, "success");
+      toast("已录入小七评判（获胜方 + 最佳辩手）", "success");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "操作失败", "error");
+      toast(err instanceof Error ? err.message : "保存失败", "error");
     } finally {
       setSaving(false);
     }
@@ -335,94 +521,181 @@ function ResultPanel() {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Trophy className="size-4" /> 结果录入与公布
-        </CardTitle>
-        <CardDescription>人工选择获胜方与最佳辩手并保存，再按流程公布。</CardDescription>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Trophy className="size-4" /> 小七结果录入</CardTitle>
+        <CardDescription>手工录入获胜方与最佳辩手（不含理由），大屏「小七评判」据此展示。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground">获胜方</p>
-            <Select value={winner} onChange={(e) => setWinner(e.target.value as "affirmative" | "negative")}>
-              <option value="affirmative">正方</option>
-              <option value="negative">反方</option>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <p className="text-xs text-muted-foreground">最佳辩手</p>
-            <Select value={best} onChange={(e) => setBest(e.target.value)}>
-              <option value="">请选择…</option>
-              {snapshot.speakers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {sideLabel(s.side)}{s.seat} · {s.name}
-                </option>
-              ))}
-            </Select>
-          </div>
-        </div>
-        <Button
-          onClick={() => {
-            if (!best) return toast("请选择最佳辩手", "error");
-            act(() => post(`${base}/votes`, { winner_side: winner, best_speaker_id: best }), "已保存获胜方与最佳辩手");
-          }}
-          loading={saving}
-        >
-          保存结果
-        </Button>
-        <Separator />
+        <WinnerBestFields winner={winner} setWinner={setWinner} best={best} setBest={setBest} speakers={snapshot.speakers} />
+        <Button onClick={save} loading={saving}>保存评判结果</Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function WinnerBestFields({
+  winner, setWinner, best, setBest, speakers,
+}: {
+  winner: "affirmative" | "negative";
+  setWinner: (v: "affirmative" | "negative") => void;
+  best: string;
+  setBest: (v: string) => void;
+  speakers: Speaker[];
+}) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <div className="space-y-1.5">
+        <p className="text-xs text-muted-foreground">获胜方</p>
+        <Select value={winner} onChange={(e) => setWinner(e.target.value as "affirmative" | "negative")}>
+          <option value="affirmative">正方</option>
+          <option value="negative">反方</option>
+        </Select>
+      </div>
+      <div className="space-y-1.5">
+        <p className="text-xs text-muted-foreground">最佳辩手</p>
+        <Select value={best} onChange={(e) => setBest(e.target.value)}>
+          <option value="">请选择…</option>
+          {speakers.map((s) => (
+            <option key={s.id} value={s.id}>{sideLabel(s.side)}{seatLabel(s.seat)} · {s.name}</option>
+          ))}
+        </Select>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- 评委与学生点评 ----------------------------- */
+function ReviewPanels() {
+  const { matchId } = useAdminData();
+  const { run } = useAction();
+  const base = `/api/matches/${matchId}`;
+  const scenes: Array<{ scene: string; label: string }> = [
+    { scene: "judge_commentary", label: "评委点评" },
+    { scene: "judge_result", label: "评委结果" },
+    { scene: "audience_result", label: "学生结果" },
+    { scene: "acknowledgment", label: "致谢环节" },
+  ];
+  return (
+    <div className="space-y-4">
+      <ScreenSceneRow title="赛后大屏画面" scenes={scenes} base={base} run={run} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <JudgeResultEntry />
+        <AudienceStats />
+      </div>
+      <AudienceVoteControl />
+    </div>
+  );
+}
+
+function JudgeResultEntry() {
+  const { snapshot, matchId, refresh } = useAdminData();
+  const toast = useToast();
+  const vs = snapshot?.vote_state;
+  const [winner, setWinner] = React.useState<"affirmative" | "negative">((vs?.winner_side as "affirmative" | "negative") || "affirmative");
+  const [best, setBest] = React.useState(vs?.best_speaker_id || "");
+  const [saving, setSaving] = React.useState(false);
+  if (!snapshot) return null;
+  const base = `/api/matches/${matchId}`;
+
+  async function act(fn: () => Promise<unknown>, msg: string) {
+    setSaving(true);
+    try { await fn(); await refresh(); toast(msg, "success"); }
+    catch (err) { toast(err instanceof Error ? err.message : "操作失败", "error"); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Trophy className="size-4" /> 评委结果录入</CardTitle>
+        <CardDescription>录入获胜方与最佳辩手，再按流程公布。</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <WinnerBestFields winner={winner} setWinner={setWinner} best={best} setBest={setBest} speakers={snapshot.speakers} />
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/audience-votes/open`), "已开启学生投票")}>
-            开启学生投票
+          <Button onClick={() => { if (!best) return toast("请选择最佳辩手", "error"); act(() => post(`${base}/votes`, { winner_side: winner, best_speaker_id: best }), "已保存评委结果"); }} loading={saving}>
+            保存结果
           </Button>
-          <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/audience-votes/close`), "已关闭学生投票")}>
-            关闭学生投票
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "judge" }), "已公布评委结果")}>
+          <Button variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "judge" }), "已公布评委结果")}>
             <Megaphone /> 公布评委结果
           </Button>
-          <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "audience" }), "已公布学生结果")}>
-            <Megaphone /> 公布学生结果
-          </Button>
         </div>
-        <div className="flex gap-2 text-xs text-muted-foreground">
-          <span>当前获胜：{vs.winner_side ? sideLabel(vs.winner_side) : "—"}</span>
-          <span>· 评委已公布：{vs.judge_published ? "是" : "否"}</span>
-          <span>· 学生已公布：{vs.audience_published ? "是" : "否"}</span>
+        <div className="text-xs text-muted-foreground">
+          当前获胜：{vs?.winner_side ? sideLabel(vs.winner_side) : "—"} · 评委已公布：{vs?.judge_published ? "是" : "否"}
         </div>
       </CardContent>
     </Card>
   );
 }
 
-/* ----------------------------- 实时辩论过程（折叠在下方） ----------------------------- */
-function DebateProcess() {
+function AudienceStats() {
   const { snapshot } = useAdminData();
-  const [open, setOpen] = React.useState(false);
-  const segs = snapshot?.recent_transcript ?? [];
+  const vs = snapshot?.vote_state;
+  const audience = vs?.audience_summary;
+  if (!vs || !audience) return null;
   return (
     <Card>
-      <button className="flex w-full items-center justify-between p-4" onClick={() => setOpen((v) => !v)}>
-        <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <MessageSquare className="size-4" /> 实时辩论过程（{segs.length}）
-        </span>
-        <ChevronDown className={`size-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <CardContent className="max-h-96 space-y-2 overflow-y-auto pt-0">
-          {segs.length === 0 && <p className="py-4 text-center text-sm text-muted-foreground">暂无发言记录</p>}
-          {segs.map((s) => (
-            <div key={s.id} className="rounded-md border border-border p-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-primary">{s.speaker_label}</span>
-                <span className="text-xs text-muted-foreground">{s.is_final ? "终稿" : "实时"}</span>
-              </div>
-              <p className="mt-1 text-sm text-foreground">{s.text}</p>
-            </div>
-          ))}
-        </CardContent>
-      )}
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 学生结果实时统计</CardTitle>
+        <CardDescription>学生扫码投票实时汇总。</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">投票窗口</span>
+          <Badge variant={vs.window_status === "open" ? "success" : "muted"}>{vs.window_status === "open" ? "进行中" : "已关闭"}</Badge>
+        </div>
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">总票数</span>
+          <span className="font-semibold text-foreground">{audience.total}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <div className="rounded-md border border-border p-2 text-center">
+            <p className="text-xs text-muted-foreground">正方</p>
+            <p className="text-lg font-semibold text-foreground">{audience.winner.affirmative}</p>
+          </div>
+          <div className="rounded-md border border-border p-2 text-center">
+            <p className="text-xs text-muted-foreground">反方</p>
+            <p className="text-lg font-semibold text-foreground">{audience.winner.negative}</p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AudienceVoteControl() {
+  const { snapshot, matchId, refresh } = useAdminData();
+  const toast = useToast();
+  const vs = snapshot?.vote_state;
+  const base = `/api/matches/${matchId}`;
+  const [busy, setBusy] = React.useState(false);
+
+  async function act(fn: () => Promise<unknown>, msg: string) {
+    setBusy(true);
+    try { await fn(); await refresh(); toast(msg, "success"); }
+    catch (err) { toast(err instanceof Error ? err.message : "操作失败", "error"); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 学生投票管理</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" loading={busy} disabled={vs?.window_status === "open"} onClick={() => act(() => post(`${base}/audience-votes/open`), "已开启学生投票")}>
+          开启学生投票
+        </Button>
+        <Button size="sm" variant="outline" loading={busy} disabled={vs?.window_status !== "open"} onClick={() => act(() => post(`${base}/audience-votes/close`), "已关闭学生投票")}>
+          关闭学生投票
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "audience" }), "已公布学生结果")}>
+          <Megaphone /> 公布学生结果
+        </Button>
+        <Badge variant={vs?.window_status === "open" ? "success" : "muted"} className="ml-auto">
+          {vs?.window_status === "open" ? "投票进行中" : "投票已关闭"} · {vs?.audience_count ?? 0} 票
+        </Badge>
+      </CardContent>
     </Card>
   );
 }

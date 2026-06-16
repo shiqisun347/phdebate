@@ -13,6 +13,7 @@ import {
   Stethoscope,
   MonitorPlay,
   ScrollText,
+  MessagesSquare,
 } from "lucide-react";
 
 export type ModuleId =
@@ -28,7 +29,8 @@ export type ModuleId =
   | "debaters"
   | "flow"
   | "diagnostics"
-  | "control";
+  | "control"
+  | "debate-process";
 
 export interface NavItem {
   id: ModuleId;
@@ -57,7 +59,7 @@ export const NAV: NavZone[] = [
       { id: "speech", label: "语音引擎", icon: AudioLines, desc: "TTS / ASR 设置与自检" },
       { id: "xiaoqi", label: "小七管理", icon: Sparkles, desc: "自研智能体 prompt 与形象" },
       { id: "data", label: "数据管理", icon: Database, desc: "历史比赛数据与导出" },
-      { id: "logs", label: "请求日志", icon: ScrollText, desc: "API 请求与操作日志" },
+      { id: "logs", label: "日志查看", icon: ScrollText, desc: "完整输入输出 · 多级分类" },
       { id: "security", label: "安全管理", icon: ShieldCheck, desc: "登录密码与访问控制" },
     ],
   },
@@ -76,7 +78,8 @@ export const NAV: NavZone[] = [
     hint: "赛前调试 + 现场控场",
     items: [
       { id: "diagnostics", label: "调试与总览", icon: Stethoscope, desc: "设备与功能赛前自检" },
-      { id: "control", label: "控场台", icon: MonitorPlay, desc: "现场流程编排与控制" },
+      { id: "control", label: "控场台", icon: MonitorPlay, desc: "现场控制" },
+      { id: "debate-process", label: "实时辩论过程", icon: MessagesSquare, desc: "查看与修正历史辩论" },
     ],
   },
 ];

@@ -14,6 +14,7 @@ import { Debaters } from "./Debaters";
 import { Flow } from "./Flow";
 import { Diagnostics } from "./Diagnostics";
 import { Control } from "./Control";
+import { DebateProcess } from "./DebateProcess";
 import { Placeholder } from "./Placeholder";
 
 function ph(id: ModuleId) {
@@ -36,4 +37,5 @@ export const MODULES: Record<ModuleId, React.ComponentType> = {
   flow: Flow,
   diagnostics: Diagnostics,
   control: Control,
+  "debate-process": DebateProcess,
 };

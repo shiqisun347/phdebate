@@ -346,11 +346,10 @@ async def send_xiaoqi_command(body: Dict[str, Any], _principal: Principal = Depe
     command = str((body or {}).get("command") or "")
     if command not in XIAOQI_COMMANDS:
         raise HTTPException(status_code=400, detail=f"command must be one of {XIAOQI_COMMANDS}")
-    result = await xiaoqi_store.send(
-        command,
-        question=str((body or {}).get("question") or ""),
-        context=(body or {}).get("context") if isinstance((body or {}).get("context"), dict) else None,
-    )
+    question = str((body or {}).get("question") or "")
+    context = (body or {}).get("context") if isinstance((body or {}).get("context"), dict) else None
+    result = await xiaoqi_store.send(command, question=question, context=context)
+    store.log_xiaoqi_command(command, {"command": command, "question": question, "context": context or {}}, result)
     await store.emit("xiaoqi.command_sent", {"command": command, "sent": result.get("sent", False)}, _principal.actor_type, _principal.actor_id)
     return {"ok": True, "data": result}
 
@@ -398,6 +397,30 @@ async def update_speaker_profile(match_id: str, speaker_id: str, body: Dict[str,
         principal.actor_id,
     )
     return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/image")
+async def upload_speaker_image(
+    match_id: str,
+    speaker_id: str,
+    file: UploadFile = File(...),
+    _principal: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty image upload")
+    await store.save_speaker_image(speaker_id, content, file.content_type or "image/png")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.get("/api/files/speaker-images/{filename}")
+async def serve_speaker_image(filename: str) -> FileResponse:
+    safe = Path(filename).name
+    path = store.image_root_path() / "speakers" / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="speaker image not found")
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.patch("/api/matches/{match_id}/phases/{phase_id}")
@@ -955,8 +978,8 @@ async def asr_test_ws(websocket: WebSocket, match_id: str) -> None:
     gateway = select_asr_gateway(url)
     try:
         session = await gateway.open_stream(
-            on_partial=lambda text: emit("partial", text=text),
-            on_final=lambda text: emit("final", text=text),
+            on_partial=lambda text, latency=None, count=None: emit("partial", text=text, latency_ms=latency, chunk_count=count),
+            on_final=lambda text, latency=None, count=None: emit("final", text=text, latency_ms=latency, chunk_count=count),
             on_error=lambda err: emit("error", message=str(err)),
         )
     except Exception as exc:  # noqa: BLE001

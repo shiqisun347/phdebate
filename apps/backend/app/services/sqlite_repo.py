@@ -341,6 +341,26 @@ class SQLiteRepository:
                 );
                 """
             )
+            self._migrate_log_classification(conn)
+
+    def _migrate_log_classification(self, conn: sqlite3.Connection) -> None:
+        """Additively add the multi-level log classification columns (性质/时机).
+
+        Safe on existing prod databases: ALTER TABLE ADD COLUMN only runs for
+        columns that are missing. `origin` distinguishes 正式/测试; phase/scene
+        capture 请求时机.
+        """
+        columns = {
+            "origin": "TEXT NOT NULL DEFAULT 'live'",
+            "phase_id": "TEXT",
+            "phase_name": "TEXT",
+            "screen_scene": "TEXT",
+        }
+        for table in ("audit_logs", "agent_requests", "speech_service_requests"):
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, decl in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def load_snapshot(self, key: str = "demo_snapshot") -> Optional[Dict[str, Any]]:
         with self.connect() as conn:
@@ -453,14 +473,18 @@ class SQLiteRepository:
         result: str,
         error_message: Optional[str],
         created_at: str,
+        origin: str = "live",
+        phase_id: Optional[str] = None,
+        phase_name: Optional[str] = None,
+        screen_scene: Optional[str] = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO audit_logs
                   (id, match_id, actor_type, actor_id, action, target_type, target_id,
-                   request_json, result, error_message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   request_json, result, error_message, created_at, origin, phase_id, phase_name, screen_scene)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     audit_id,
@@ -474,6 +498,10 @@ class SQLiteRepository:
                     result,
                     error_message,
                     created_at,
+                    origin,
+                    phase_id,
+                    phase_name,
+                    screen_scene,
                 ),
             )
 
@@ -483,7 +511,7 @@ class SQLiteRepository:
             rows = conn.execute(
                 """
                 SELECT id, match_id, actor_type, actor_id, action, target_type, target_id,
-                       request_json, result, error_message, created_at
+                       request_json, result, error_message, created_at, origin, phase_id, phase_name, screen_scene
                 FROM audit_logs
                 WHERE match_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -556,6 +584,10 @@ class SQLiteRepository:
         endpoint: str,
         request: Dict[str, Any],
         started_at: str,
+        origin: str = "live",
+        phase_id: Optional[str] = None,
+        phase_name: Optional[str] = None,
+        screen_scene: Optional[str] = None,
     ) -> None:
         request_id = agent_request_id(match_id, task_id)
         with self.connect() as conn:
@@ -564,8 +596,8 @@ class SQLiteRepository:
                 INSERT INTO agent_requests
                   (id, match_id, task_id, speech_id, speaker_id, endpoint, status,
                    request_json, response_text, error_code, error_message, latency_ms,
-                   started_at, completed_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, ?)
+                   started_at, completed_at, updated_at, origin, phase_id, phase_name, screen_scene)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   speech_id = excluded.speech_id,
                   speaker_id = excluded.speaker_id,
@@ -578,7 +610,11 @@ class SQLiteRepository:
                   latency_ms = NULL,
                   started_at = excluded.started_at,
                   completed_at = NULL,
-                  updated_at = excluded.updated_at
+                  updated_at = excluded.updated_at,
+                  origin = excluded.origin,
+                  phase_id = excluded.phase_id,
+                  phase_name = excluded.phase_name,
+                  screen_scene = excluded.screen_scene
                 """,
                 (
                     request_id,
@@ -591,6 +627,10 @@ class SQLiteRepository:
                     json.dumps(request, ensure_ascii=False),
                     started_at,
                     started_at,
+                    origin,
+                    phase_id,
+                    phase_name,
+                    screen_scene,
                 ),
             )
 
@@ -645,7 +685,7 @@ class SQLiteRepository:
                 """
                 SELECT id, match_id, task_id, speech_id, speaker_id, endpoint, status,
                        request_json, response_text, error_code, error_message, latency_ms,
-                       started_at, completed_at, updated_at
+                       started_at, completed_at, updated_at, origin, phase_id, phase_name, screen_scene
                 FROM agent_requests
                 WHERE match_id = ?
                 ORDER BY started_at DESC, id DESC
@@ -671,6 +711,10 @@ class SQLiteRepository:
         started_at: str,
         speech_id: Optional[str] = None,
         speaker_id: Optional[str] = None,
+        origin: str = "live",
+        phase_id: Optional[str] = None,
+        phase_name: Optional[str] = None,
+        screen_scene: Optional[str] = None,
     ) -> None:
         row_id = speech_service_request_id(match_id, request_id)
         with self.connect() as conn:
@@ -679,8 +723,8 @@ class SQLiteRepository:
                 INSERT INTO speech_service_requests
                   (id, match_id, request_id, service, operation, speech_id, speaker_id,
                    status, request_json, response_json, error_code, error_message,
-                   latency_ms, started_at, completed_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', NULL, NULL, NULL, ?, NULL, ?)
+                   latency_ms, started_at, completed_at, updated_at, origin, phase_id, phase_name, screen_scene)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', NULL, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   service = excluded.service,
                   operation = excluded.operation,
@@ -694,7 +738,11 @@ class SQLiteRepository:
                   latency_ms = NULL,
                   started_at = excluded.started_at,
                   completed_at = NULL,
-                  updated_at = excluded.updated_at
+                  updated_at = excluded.updated_at,
+                  origin = excluded.origin,
+                  phase_id = excluded.phase_id,
+                  phase_name = excluded.phase_name,
+                  screen_scene = excluded.screen_scene
                 """,
                 (
                     row_id,
@@ -708,6 +756,10 @@ class SQLiteRepository:
                     json.dumps(request, ensure_ascii=False),
                     started_at,
                     started_at,
+                    origin,
+                    phase_id,
+                    phase_name,
+                    screen_scene,
                 ),
             )
 
@@ -756,7 +808,7 @@ class SQLiteRepository:
                 """
                 SELECT id, match_id, request_id, service, operation, speech_id, speaker_id,
                        status, request_json, response_json, error_code, error_message,
-                       latency_ms, started_at, completed_at, updated_at
+                       latency_ms, started_at, completed_at, updated_at, origin, phase_id, phase_name, screen_scene
                 FROM speech_service_requests
                 WHERE match_id = ?
                 ORDER BY started_at DESC, id DESC

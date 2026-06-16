@@ -108,6 +108,18 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
     setDraftName(speaker.name);
   }, [draftName, snapshot, speaker]);
 
+  // AI 辩手不可选：若当前草稿身份是 agent（或不存在），自动落到第一位人类选手。
+  useEffect(() => {
+    if (!snapshot || entryStep !== "identity") return;
+    const current = snapshot.speakers.find((item) => item.id === draftSpeakerId);
+    if (current && current.speaker_type === "human") return;
+    const firstHuman = snapshot.speakers.find((item) => item.speaker_type === "human");
+    if (firstHuman && firstHuman.id !== draftSpeakerId) {
+      setDraftSpeakerId(firstHuman.id);
+      setDraftName(firstHuman.name);
+    }
+  }, [snapshot, entryStep, draftSpeakerId]);
+
   useEffect(() => {
     if (!activeSpeechId || !activeSpeakerId || speakerType !== "human" || entryStep !== "ready") {
       setAudioStatus("待命");
@@ -450,23 +462,29 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
             >
               <UserRound size={34} />
               <h1>身份选择</h1>
-              <p>请选择后台提前预设好的身份。人类选手可在下方确认或修改姓名，修改后会同步到后台。</p>
+              <p>请选择后台提前预设好的人类选手身份。AI 辩手由后台统一控制，仅作展示、不可选择。</p>
               <div className="identity-card-grid">
-                {snapshot.speakers.map((item) => (
-                  <button
-                    type="button"
-                    key={item.id}
-                    className={`identity-choice ${sideClass(item.side)} ${draftSpeakerId === item.id ? "active" : ""}`}
-                    onClick={() => {
-                      setDraftSpeakerId(item.id);
-                      setDraftName(item.name);
-                    }}
-                  >
-                    <span>{sideLabel(item.side)}{seatLabel(item.seat)}</span>
-                    <strong>{item.name}</strong>
-                    <em>{item.speaker_type === "agent" ? `Agent · ${item.model_name ?? "未填写模型"}` : "人类选手"}</em>
-                  </button>
-                ))}
+                {snapshot.speakers.map((item) => {
+                  const isAgent = item.speaker_type === "agent";
+                  return (
+                    <button
+                      type="button"
+                      key={item.id}
+                      disabled={isAgent}
+                      aria-disabled={isAgent}
+                      className={`identity-choice ${sideClass(item.side)} ${draftSpeakerId === item.id ? "active" : ""} ${isAgent ? "is-agent-locked" : ""}`}
+                      onClick={() => {
+                        if (isAgent) return;
+                        setDraftSpeakerId(item.id);
+                        setDraftName(item.name);
+                      }}
+                    >
+                      <span>{sideLabel(item.side)}{seatLabel(item.seat)}</span>
+                      <strong>{item.name}</strong>
+                      <em>{isAgent ? `AI 辩手 · 由后台控制` : "人类选手"}</em>
+                    </button>
+                  );
+                })}
               </div>
               {snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" ? (
                 <label>

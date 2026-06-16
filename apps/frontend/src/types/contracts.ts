@@ -2,7 +2,7 @@ export type MatchStatus = "draft" | "ready" | "running" | "paused" | "interventi
 export type Side = "affirmative" | "negative" | "neutral";
 export type SpeakerType = "human" | "agent";
 export type ClockState = "idle" | "running" | "paused" | "expired" | "stopped";
-export type ScreenScene = "idle" | "live" | "paused" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result";
+export type ScreenScene = "idle" | "live" | "paused" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result" | "xiaoqi_commentary" | "xiaoqi_result" | "acknowledgment";
 export type LiveMode = "single" | "free" | "prep";
 export type AudioOutputMode = "host" | "admin" | "screen" | "off";
 
@@ -49,6 +49,7 @@ export interface Speaker {
   model_name: string | null;
   model_kind: "open_source" | "closed_source" | null;
   status: string;
+  image_url?: string;
   agent_config_id?: string | null;
   agent_endpoint?: string;
   mic_permission?: "granted" | "denied" | "prompt" | "unknown" | null;
@@ -365,7 +366,16 @@ export interface AgentConfigTestResult {
   request?: Record<string, unknown>;
 }
 
-export interface AgentRequestLog {
+/** Multi-level log classification (性质 / 时机) attached to every log record. */
+export type LogOrigin = "live" | "test" | string;
+export interface LogClassification {
+  origin?: LogOrigin;
+  phase_id?: string | null;
+  phase_name?: string | null;
+  screen_scene?: string | null;
+}
+
+export interface AgentRequestLog extends LogClassification {
   id: string;
   task_id: string;
   speech_id: string | null;
@@ -381,7 +391,7 @@ export interface AgentRequestLog {
   completed_at: string | null;
 }
 
-export interface SpeechServiceRequestLog {
+export interface SpeechServiceRequestLog extends LogClassification {
   id: string;
   request_id: string;
   service: string;
@@ -506,6 +516,7 @@ export interface MatchSnapshot {
   agent_status: AgentStatus[];
   vote_state: VoteState;
   speech_service: SpeechServiceState;
+  xiaoqi?: { name: string; image_url: string; enabled: boolean };
   system?: {
     persistence?: {
       driver: string;
@@ -586,7 +597,7 @@ export interface RealtimeMessage {
   payload: Record<string, unknown>;
 }
 
-export interface AuditLog {
+export interface AuditLog extends LogClassification {
   id: string;
   match_id: string;
   actor_type: string;

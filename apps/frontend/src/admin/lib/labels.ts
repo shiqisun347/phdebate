@@ -19,7 +19,8 @@ export const SCENE_LABELS: Record<string, string> = {
   judge_result: "评委结果",
   audience_result: "学生投票结果",
   xiaoqi_commentary: "小七点评",
-  xiaoqi_result: "小七结果",
+  xiaoqi_result: "小七评判",
+  acknowledgment: "致谢环节",
   result: "结果揭晓",
 };
 

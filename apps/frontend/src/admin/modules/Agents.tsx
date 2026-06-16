@@ -1,11 +1,15 @@
 import * as React from "react";
-import { Bot, Plus, Pencil, Trash2, Code2, Wrench, KeyRound, Send, CheckCircle2, XCircle, Plug } from "lucide-react";
+import { Bot, Plus, Pencil, Trash2, Code2, Wrench, KeyRound, Send, CheckCircle2, XCircle, Plug, ChevronDown } from "lucide-react";
 import { Button, Card, CardContent, Badge, Input, Label, Select, Textarea, Switch, EmptyState, Separator, Spinner } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
 import { useAdminData } from "../lib/data";
 import { useAction } from "../lib/actions";
 import { post, patch, remove, testAgentConfig, testAgentConfigInline } from "../../api/client";
-import type { AgentConfig, AgentConfigTestResult } from "../../types/contracts";
+import { sideLabel } from "../lib/labels";
+import type { AgentConfig, AgentConfigTestResult, MatchSnapshot, Phase, Speaker } from "../../types/contracts";
+
+const SEAT_LABELS = ["", "一辩", "二辩", "三辩", "四辩"];
+const seatLabel = (seat: number) => SEAT_LABELS[seat] ?? `${seat}号位`;
 
 const REQUEST_TEMPLATE = {
   model_name: "qwen3.6-plus",
@@ -20,6 +24,30 @@ const REQUEST_TEMPLATE = {
     { stage: "正方一辩立论", content: [{ speaker: "正方一辩", content: "……" }] },
   ],
 };
+
+/** 用真实比赛参数动态拼装发送给辩手的请求体。 */
+function buildDynamicPayload(
+  config: AgentConfig | undefined,
+  speaker: Speaker | undefined,
+  currentPhase: Phase | undefined,
+  phases: Phase[],
+  topic: string
+): Record<string, unknown> {
+  const ordered = [...phases].sort((a, b) => a.display_order - b.display_order);
+  const idx = currentPhase ? ordered.findIndex((p) => p.id === currentPhase.id) : -1;
+  const nextPhase = idx >= 0 ? ordered[idx + 1] : undefined;
+  return {
+    model_name: speaker?.model_name || config?.model_name || "",
+    debater_name: speaker?.name || "测试辩手",
+    debate_position: speaker ? seatLabel(speaker.seat) : "一辩",
+    debate_topic: topic || "AI时代，我们应该培养编程思维/提问思维",
+    current_stage: currentPhase?.name || "正方一辩立论",
+    next_stage: nextPhase?.name || "比赛结束",
+    holder: speaker ? sideLabel(speaker.side) : "正方",
+    other_info: {},
+    debate_history: [],
+  };
+}
 
 type Draft = {
   name: string;
@@ -169,13 +197,14 @@ export function Agents() {
         </DialogFooter>
       </Dialog>
 
-      {debugging && <AgentDebugDialog configs={configs} matchId={matchId} onClose={() => setDebugging(false)} />}
+      {debugging && <AgentDebugDialog configs={configs} snapshot={snapshot} matchId={matchId} onClose={() => setDebugging(false)} />}
     </div>
   );
 }
 
 /* ------------------------- Agent 调试对话框 ------------------------- */
 function TestResultView({ result }: { result: AgentConfigTestResult }) {
+  const [showJson, setShowJson] = React.useState(false);
   return (
     <div className={`space-y-1.5 rounded-md border p-3 text-xs ${result.ok ? "border-success/40 bg-success/5" : "border-destructive/40 bg-destructive/5"}`}>
       <p className={`flex items-center gap-1.5 font-medium ${result.ok ? "text-success" : "text-destructive"}`}>
@@ -187,16 +216,59 @@ function TestResultView({ result }: { result: AgentConfigTestResult }) {
           {result.content || "(无返回文本)"}
         </div>
       )}
+      <button
+        type="button"
+        onClick={() => setShowJson((v) => !v)}
+        className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
+      >
+        <ChevronDown className={`size-3.5 transition-transform ${showJson ? "rotate-180" : ""}`} /> 完整 JSON（请求与输出）
+      </button>
+      {showJson && (
+        <pre className="max-h-72 overflow-auto rounded bg-muted/50 p-2 text-foreground">{JSON.stringify(result, null, 2)}</pre>
+      )}
     </div>
   );
 }
 
-function AgentDebugDialog({ configs, matchId, onClose }: { configs: AgentConfig[]; matchId: string; onClose: () => void }) {
+function AgentDebugDialog({
+  configs,
+  snapshot,
+  matchId,
+  onClose,
+}: {
+  configs: AgentConfig[];
+  snapshot: MatchSnapshot | null;
+  matchId: string;
+  onClose: () => void;
+}) {
+  const speakers = React.useMemo(() => (snapshot?.speakers ?? []).filter((s) => s.speaker_type === "agent"), [snapshot]);
+  const phases = snapshot?.phases ?? [];
+  const topic = snapshot?.match.topic ?? "";
+
   const [configId, setConfigId] = React.useState(configs[0]?.id ?? "");
-  const [payloadText, setPayloadText] = React.useState(JSON.stringify(REQUEST_TEMPLATE, null, 2));
+  const [speakerId, setSpeakerId] = React.useState(speakers[0]?.id ?? "");
+  const [phaseId, setPhaseId] = React.useState(snapshot?.match.current_phase_id ?? phases[0]?.id ?? "");
+  const [payloadText, setPayloadText] = React.useState("");
+  const [edited, setEdited] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [result, setResult] = React.useState<AgentConfigTestResult | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
+
+  const config = configs.find((c) => c.id === configId);
+  const speaker = speakers.find((s) => s.id === speakerId);
+  const currentPhase = phases.find((p) => p.id === phaseId);
+
+  // 选择项变化时，自动用真实参数重建请求体（除非用户手动改过）。
+  React.useEffect(() => {
+    if (edited) return;
+    setPayloadText(JSON.stringify(buildDynamicPayload(config, speaker, currentPhase, phases, topic), null, 2));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configId, speakerId, phaseId, edited]);
+
+  function resetPayload() {
+    setEdited(false);
+    setPayloadText(JSON.stringify(buildDynamicPayload(config, speaker, currentPhase, phases, topic), null, 2));
+  }
 
   async function send() {
     let payload: Record<string, unknown> | undefined;
@@ -222,21 +294,60 @@ function AgentDebugDialog({ configs, matchId, onClose }: { configs: AgentConfig[
 
   return (
     <Dialog open onClose={onClose} size="lg">
-      <DialogHeader title="Agent 调试" description="选择一个 Agent，用自定义请求体发起测试并查看返回结果。" onClose={onClose} />
+      <DialogHeader title="Agent 调试" description="选择 Agent 与真实比赛参数，自动拼装请求体后发起测试。请求体可手动编辑。" onClose={onClose} />
       <DialogBody>
-        <div className="space-y-1.5">
-          <Label>选择 Agent</Label>
-          <Select value={configId} onChange={(e) => setConfigId(e.target.value)}>
-            {configs.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}（{c.provider_type === "rest_api" ? "REST" : "SDK"} · {c.model_name}）
-              </option>
-            ))}
-          </Select>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="space-y-1.5">
+            <Label>Agent</Label>
+            <Select value={configId} onChange={(e) => setConfigId(e.target.value)}>
+              {configs.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}（{c.provider_type === "rest_api" ? "REST" : "SDK"}）
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>辩手（来自当前比赛）</Label>
+            <Select value={speakerId} onChange={(e) => setSpeakerId(e.target.value)} disabled={speakers.length === 0}>
+              {speakers.length === 0 ? (
+                <option value="">无 AI 辩手</option>
+              ) : (
+                speakers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {sideLabel(s.side)}{seatLabel(s.seat)} · {s.name}
+                  </option>
+                ))
+              )}
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>当前环节</Label>
+            <Select value={phaseId} onChange={(e) => setPhaseId(e.target.value)}>
+              {[...phases]
+                .sort((a, b) => a.display_order - b.display_order)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+            </Select>
+          </div>
         </div>
         <div className="space-y-1.5">
-          <Label>测试请求体（JSON）</Label>
-          <Textarea rows={12} value={payloadText} onChange={(e) => setPayloadText(e.target.value)} className="text-xs" />
+          <div className="flex items-center justify-between">
+            <Label>测试请求体（JSON · 动态填充）</Label>
+            <Button variant="ghost" size="sm" onClick={resetPayload}>按所选重置</Button>
+          </div>
+          <Textarea
+            rows={12}
+            value={payloadText}
+            onChange={(e) => {
+              setPayloadText(e.target.value);
+              setEdited(true);
+            }}
+            className="text-xs"
+          />
           {err && <p className="text-xs text-destructive">{err}</p>}
         </div>
         {result && <TestResultView result={result} />}

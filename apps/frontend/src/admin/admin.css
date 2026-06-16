@@ -110,3 +110,17 @@
 .admin-shell ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* 「下一步骤」需要控场人员操作时的闪烁提示 */
+.admin-shell .next-step-blink {
+  animation: next-step-blink 1.15s ease-in-out infinite;
+}
+@keyframes next-step-blink {
+  0%, 100% {
+    box-shadow: 0 0 0 0 hsl(var(--primary) / 0.55), 0 10px 24px hsl(var(--primary) / 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 6px hsl(var(--primary) / 0), 0 10px 30px hsl(var(--primary) / 0.45);
+    filter: brightness(1.12);
+  }
+}

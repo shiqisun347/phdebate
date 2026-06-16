@@ -4,6 +4,7 @@ import { ClockTile } from "../components/ClockTile";
 import { AuthPrompt } from "../components/AuthPrompt";
 import { StatusPill } from "../components/StatusPill";
 import { clockByName, seatLabel, sideClass, sideLabel, speakerLabel } from "../state/format";
+import { resolveAvatar, defaultAvatarDataUri } from "../state/avatar";
 import type { MatchSnapshot, ScreenScene, Side, Speaker } from "../types/contracts";
 import { useMatch } from "../realtime/useMatch";
 import { playBellCue } from "../utils/audioCue";
@@ -12,7 +13,18 @@ interface ScreenPageProps {
   matchId: string;
 }
 
-type RuntimeScreenScene = "idle" | "live" | "paused" | "judge_commentary" | "judge_result" | "audience_result";
+type RuntimeScreenScene =
+  | "idle"
+  | "opening"
+  | "teams"
+  | "live"
+  | "paused"
+  | "xiaoqi_commentary"
+  | "xiaoqi_result"
+  | "judge_commentary"
+  | "judge_result"
+  | "audience_result"
+  | "acknowledgment";
 
 export function ScreenPage({ matchId }: ScreenPageProps) {
   const { snapshot, loadError, lastEvent } = useMatch(matchId, "screen");
@@ -35,10 +47,15 @@ function ScreenView({ snapshot }: { snapshot: MatchSnapshot }) {
     <main className="screen-stage">
       <div className="screen-bg" />
       {scene === "idle" && <IdleScene snapshot={snapshot} />}
+      {scene === "opening" && <OpeningScene snapshot={snapshot} />}
+      {scene === "teams" && <TeamsScene snapshot={snapshot} />}
       {scene === "paused" && <PausedScene snapshot={snapshot} />}
+      {scene === "xiaoqi_commentary" && <XiaoqiSpeakingScene snapshot={snapshot} kicker="小七点评" title="小七正在点评" />}
+      {scene === "xiaoqi_result" && <XiaoqiResultScene snapshot={snapshot} />}
       {scene === "judge_commentary" && <JudgeCommentaryScene snapshot={snapshot} />}
       {scene === "judge_result" && <JudgeResultScene snapshot={snapshot} />}
       {scene === "audience_result" && <AudienceResultScene snapshot={snapshot} />}
+      {scene === "acknowledgment" && <AcknowledgmentScene snapshot={snapshot} />}
       {scene === "live" && <LiveScene snapshot={snapshot} />}
     </main>
   );
@@ -53,6 +70,49 @@ function ScreenChrome() {
   );
 }
 
+/* ----------------------------- 形象 + 声波动效 ----------------------------- */
+function SpeakingAvatar({
+  src,
+  name,
+  side,
+  lively,
+  active,
+  size = "md",
+  caption,
+}: {
+  src: string;
+  name: string;
+  side?: Side;
+  lively?: boolean;
+  active?: boolean;
+  size?: "sm" | "md" | "lg";
+  caption?: React.ReactNode;
+}) {
+  const bars = lively ? 9 : 6;
+  return (
+    <div className={`speaking-avatar ${size} ${sideClass(side ?? "neutral")} ${lively ? "lively" : ""} ${active ? "is-active" : "is-idle"}`}>
+      <div className="sa-portrait">
+        <span className="sa-ring" />
+        <span className="sa-ring two" />
+        <img src={src} alt={name} />
+      </div>
+      <div className="sa-wave" aria-hidden="true">
+        {Array.from({ length: bars }).map((_, i) => (
+          <i key={i} style={{ animationDelay: `${(i % bars) * 0.08}s` }} />
+        ))}
+      </div>
+      {caption && <div className="sa-caption">{caption}</div>}
+    </div>
+  );
+}
+
+function xiaoqiAvatar(snapshot: MatchSnapshot): string {
+  const xq = snapshot.xiaoqi;
+  if (xq?.image_url?.trim()) return xq.image_url;
+  return defaultAvatarDataUri("agent", "neutral", xq?.name || "小七");
+}
+
+/* ----------------------------- 候场 ----------------------------- */
 function IdleScene({ snapshot }: { snapshot: MatchSnapshot }) {
   return (
     <section className="screen-scene">
@@ -64,7 +124,6 @@ function IdleScene({ snapshot }: { snapshot: MatchSnapshot }) {
           <div className="mode-panel idle-wait-mode">
             <div className="phase-name">候场</div>
             <h3>比赛即将开始</h3>
-            <p>请等待主持人宣布开始</p>
           </div>
         </div>
         <RosterPanel snapshot={snapshot} side="negative" />
@@ -73,6 +132,71 @@ function IdleScene({ snapshot }: { snapshot: MatchSnapshot }) {
   );
 }
 
+/* ----------------------------- 辩题介绍 ----------------------------- */
+function OpeningScene({ snapshot }: { snapshot: MatchSnapshot }) {
+  return (
+    <section className="screen-scene opening-scene">
+      <ScreenChrome />
+      <div className="opening-center">
+        <span className="opening-kicker">本场辩题</span>
+        <h1 className="opening-topic">{snapshot.match.topic}</h1>
+        <div className="opening-sides">
+          <div className="opening-side aff">
+            <span>正方</span>
+            <strong>{snapshot.teams.find((t) => t.side === "affirmative")?.position}</strong>
+          </div>
+          <div className="opening-vs">VS</div>
+          <div className="opening-side neg">
+            <span>反方</span>
+            <strong>{snapshot.teams.find((t) => t.side === "negative")?.position}</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ----------------------------- 阵容介绍（重新设计） ----------------------------- */
+function TeamsScene({ snapshot }: { snapshot: MatchSnapshot }) {
+  const currentSpeaker = snapshot.speakers.find((item) => item.id === snapshot.current_speech?.speaker_id);
+  const speaking = Boolean(snapshot.current_speech && snapshot.current_speech.state !== "ended");
+  return (
+    <section className="screen-scene teams-scene">
+      <ScreenChrome />
+      <Topic snapshot={snapshot} />
+      <div className="live-grid">
+        <RosterPanel snapshot={snapshot} side="affirmative" activeSpeaker={currentSpeaker} />
+        <div className="live-center">
+          {currentSpeaker ? (
+            <div className="teams-spotlight">
+              <SpeakingAvatar
+                src={resolveAvatar(currentSpeaker)}
+                name={currentSpeaker.name}
+                side={currentSpeaker.side}
+                lively={currentSpeaker.speaker_type === "agent"}
+                active={speaking}
+                size="lg"
+              />
+              <div className="teams-spotlight-meta">
+                <span>{sideLabel(currentSpeaker.side)}{seatLabel(currentSpeaker.seat)} 自我介绍</span>
+                <strong>{currentSpeaker.name}</strong>
+                <em>{currentSpeaker.speaker_type === "agent" ? currentSpeaker.model_name || "AI 辩手" : "人类辩手"}</em>
+              </div>
+            </div>
+          ) : (
+            <div className="mode-panel teams-intro">
+              <div className="phase-name">阵容介绍</div>
+              <h3>本场辩手依次登场</h3>
+            </div>
+          )}
+        </div>
+        <RosterPanel snapshot={snapshot} side="negative" activeSpeaker={currentSpeaker} />
+      </div>
+    </section>
+  );
+}
+
+/* ----------------------------- 比赛实况（改进） ----------------------------- */
 function LiveScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const phase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
   const currentSpeaker = snapshot.speakers.find((item) => item.id === snapshot.current_speech?.speaker_id);
@@ -112,6 +236,76 @@ function PausedScene({ snapshot }: { snapshot: MatchSnapshot }) {
         <span>现场暂停</span>
         <h1>比赛暂停</h1>
         <p>{phase ? `当前停留在「${phase.name}」` : "请等待主持人继续比赛"}</p>
+      </div>
+    </section>
+  );
+}
+
+/* ----------------------------- 小七点评（重新设计，无字幕窗口） ----------------------------- */
+function XiaoqiSpeakingScene({ snapshot, kicker, title }: { snapshot: MatchSnapshot; kicker: string; title: string }) {
+  return (
+    <section className="screen-scene xiaoqi-scene">
+      <ScreenChrome />
+      <Topic snapshot={snapshot} />
+      <div className="xiaoqi-center">
+        <SpeakingAvatar
+          src={xiaoqiAvatar(snapshot)}
+          name={snapshot.xiaoqi?.name || "小七"}
+          side="neutral"
+          lively
+          active
+          size="lg"
+        />
+        <span className="xiaoqi-kicker">{kicker}</span>
+        <h1 className="xiaoqi-title">{title}</h1>
+        <p className="xiaoqi-name">{snapshot.xiaoqi?.name || "小七"} · 智能裁判</p>
+      </div>
+    </section>
+  );
+}
+
+/* ----------------------------- 小七评判（获胜方 + 最佳辩手，无理由） ----------------------------- */
+function XiaoqiResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
+  const vs = snapshot.vote_state;
+  const published = vs.judge_published;
+  const winner = snapshot.teams.find((team) => team.side === vs.winner_side);
+  const best = snapshot.speakers.find((speaker) => speaker.id === vs.best_speaker_id);
+  return (
+    <section className="screen-scene official-result-scene">
+      <ScreenChrome />
+      <div className="result-center official-result">
+        <div className="xiaoqi-result-head">
+          <img className="xiaoqi-result-avatar" src={xiaoqiAvatar(snapshot)} alt={snapshot.xiaoqi?.name || "小七"} />
+          <span>{snapshot.xiaoqi?.name || "小七"} 评判结果</span>
+        </div>
+        {published && vs.winner_side ? (
+          <>
+            <h1>{sideLabel(vs.winner_side)} · {winner?.name}</h1>
+            <div className="best-speaker-award">
+              <div className="best-speaker-label">最佳辩手</div>
+              <div className="best-speaker-name">{speakerLabel(best)}</div>
+            </div>
+          </>
+        ) : (
+          <>
+            <h1>结果待公布</h1>
+            <p>请等待小七给出评判</p>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* ----------------------------- 致谢环节（一句致谢语） ----------------------------- */
+function AcknowledgmentScene({ snapshot }: { snapshot: MatchSnapshot }) {
+  return (
+    <section className="screen-scene thanks-scene">
+      <ScreenChrome />
+      <div className="thanks-center">
+        <span className="thanks-kicker">致谢</span>
+        <h1 className="thanks-line">感谢各位的参与，我们下次再见</h1>
+        <p className="thanks-topic">{snapshot.match.topic}</p>
       </div>
     </section>
   );
@@ -245,7 +439,7 @@ function RosterPanel({
       <div className="roster-list">
         {speakers.map((speaker) => (
           <div className={`roster-row ${activeSpeaker?.id === speaker.id ? "speaking" : ""}`} key={speaker.id}>
-            <div className="roster-seat">{seatLabel(speaker.seat)}</div>
+            <img className="roster-avatar" src={resolveAvatar(speaker)} alt={speaker.name} />
             <div className="roster-person">
               <strong>{speaker.name}</strong>
               <span className={`roster-meta ${speaker.speaker_type}`}>
@@ -276,7 +470,17 @@ function FlowWaitMode({ snapshot }: { snapshot: MatchSnapshot }) {
 
 function SingleMode({ snapshot, currentSpeaker, phaseName }: { snapshot: MatchSnapshot; currentSpeaker?: Speaker; phaseName: string }) {
   return (
-    <div className="mode-panel">
+    <div className="mode-panel single-mode">
+      {currentSpeaker && (
+        <SpeakingAvatar
+          src={resolveAvatar(currentSpeaker)}
+          name={currentSpeaker.name}
+          side={currentSpeaker.side}
+          lively={currentSpeaker.speaker_type === "agent"}
+          active={Boolean(snapshot.current_speech && snapshot.current_speech.state !== "ended")}
+          size="md"
+        />
+      )}
       <div className="phase-name">{phaseName}</div>
       <p>当前发言 · {speakerLabel(currentSpeaker)}</p>
       <ClockTile label="本环节剩余" clock={clockByName(snapshot.clocks, "main")} tone={currentSpeaker?.side === "negative" ? "neg" : "aff"} />
@@ -287,6 +491,16 @@ function SingleMode({ snapshot, currentSpeaker, phaseName }: { snapshot: MatchSn
 function FreeMode({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; currentSpeaker?: Speaker }) {
   return (
     <div className="mode-panel free-mode">
+      {currentSpeaker && (
+        <SpeakingAvatar
+          src={resolveAvatar(currentSpeaker)}
+          name={currentSpeaker.name}
+          side={currentSpeaker.side}
+          lively={currentSpeaker.speaker_type === "agent"}
+          active={Boolean(snapshot.current_speech && snapshot.current_speech.state !== "ended")}
+          size="sm"
+        />
+      )}
       <div className="phase-name">自由辩论</div>
       <p>当前发言 · {speakerLabel(currentSpeaker)}</p>
       <div className="free-clocks">
@@ -303,7 +517,18 @@ function PrepMode({ speaker, phaseName }: { speaker?: Speaker; phaseName: string
   return (
     <div className="mode-panel prep-mode">
       <div className="phase-name">{phaseName}</div>
-      <div className="prep-orb"><i /><i /></div>
+      {speaker ? (
+        <SpeakingAvatar
+          src={resolveAvatar(speaker)}
+          name={speaker.name}
+          side={speaker.side}
+          lively={speaker.speaker_type === "agent"}
+          active={false}
+          size="md"
+        />
+      ) : (
+        <div className="prep-orb"><i /><i /></div>
+      )}
       <h3>AI 思考中</h3>
       <p>{speakerLabel(speaker)} · 生成完成后开始播报并计时</p>
     </div>
@@ -319,17 +544,16 @@ function Subtitle({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; curre
   const asrFailed = snapshot.speech_service.asr.status === "failed" && source === "human_asr";
   const textRef = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
-    // 流式发言时自动滚到底部，保持最新内容可见（窗口固定大小）
-    if (textRef.current) textRef.current.scrollTop = textRef.current.scrollHeight;
+    // 单行字幕：流式时把最新文字滚到可见末端。
+    if (textRef.current) textRef.current.scrollLeft = textRef.current.scrollWidth;
   }, [text]);
   return (
-    <footer className="subtitle-panel">
-      <div>
+    <footer className="subtitle-panel one-line">
+      <div className="subtitle-head">
         <strong>{currentSpeaker ? speakerLabel(currentSpeaker) : segment?.speaker_label ?? "等待指定"}</strong>
         <StatusPill tone={isAgent ? "blue" : "green"}>{isAgent ? "AI 发言" : "实时转写"}</StatusPill>
         {degraded && <StatusPill tone="red">TTS 降级</StatusPill>}
         {asrFailed && <StatusPill tone="red">ASR 异常</StatusPill>}
-        <span>{snapshot.current_speech ? "进行中" : "最近发言"}</span>
       </div>
       <p ref={textRef}>{text}</p>
     </footer>
@@ -396,13 +620,31 @@ function VoteQr({ url }: { url: string }) {
 }
 
 function normalizeScreenScene(scene: ScreenScene): RuntimeScreenScene {
-  if (scene === "opening") return "live";
-  if (scene === "teams") return "idle";
-  if (scene === "intermission") return "judge_commentary";
-  if (scene === "result") return "judge_result";
-  if (scene === "paused") return "paused";
-  if (scene === "judge_commentary") return "judge_commentary";
-  if (scene === "judge_result") return "judge_result";
-  if (scene === "audience_result") return "audience_result";
-  return scene === "idle" ? "idle" : "live";
+  switch (scene) {
+    case "opening":
+      return "opening";
+    case "teams":
+      return "teams";
+    case "idle":
+      return "idle";
+    case "paused":
+      return "paused";
+    case "xiaoqi_commentary":
+      return "xiaoqi_commentary";
+    case "xiaoqi_result":
+      return "xiaoqi_result";
+    case "intermission":
+    case "judge_commentary":
+      return "judge_commentary";
+    case "result":
+    case "judge_result":
+      return "judge_result";
+    case "audience_result":
+      return "audience_result";
+    case "acknowledgment":
+      return "acknowledgment";
+    case "live":
+    default:
+      return "live";
+  }
 }

@@ -324,6 +324,7 @@ class MatchStore:
             "model_name": model_name,
             "model_kind": model_kind,
             "status": "online" if speaker_type == "human" else "ready",
+            "image_url": "",
             "mic_permission": "unknown" if speaker_type == "human" else None,
             "device_label": None,
             "last_seen_at": None,
@@ -411,7 +412,23 @@ class MatchStore:
             snap = deepcopy(self.snapshot)
             snap["last_seq"] = self.seq
             self._sanitize_snapshot(snap)
+            snap["xiaoqi"] = self._xiaoqi_public()
             return snap
+
+    @staticmethod
+    def _xiaoqi_public() -> Dict[str, Any]:
+        """Minimal 小七 public info (name + image) for the big screen scenes."""
+        try:
+            from app.services.xiaoqi_store import xiaoqi_store
+
+            cfg = xiaoqi_store.public()
+            return {
+                "name": cfg.get("name") or "小七",
+                "image_url": cfg.get("image_url") or "",
+                "enabled": bool(cfg.get("enabled", True)),
+            }
+        except Exception:
+            return {"name": "小七", "image_url": "", "enabled": True}
 
     async def get_audit_logs(self, limit: int = 30) -> List[Dict[str, Any]]:
         async with self._lock:
@@ -880,7 +897,7 @@ class MatchStore:
     async def update_speaker(self, speaker_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             speaker = self._find_speaker(speaker_id)
-            allowed = {"name", "speaker_type", "agent_config_id"}
+            allowed = {"name", "speaker_type", "agent_config_id", "image_url"}
             managed_agent_fields = {"model_name", "model_kind", "agent_endpoint"}
             if managed_agent_fields.intersection(fields):
                 raise MatchStateError(
@@ -1302,6 +1319,8 @@ class MatchStore:
             endpoint=endpoint_label,
             request=payload,
             started_at=agent_started_at,
+            origin="live",
+            **self._log_context(),
         )
         await self.emit(
             "agent.task.created",
@@ -2061,6 +2080,8 @@ class MatchStore:
                     speaker_id=speaker_id,
                     request={"speech_id": speech_id, "speaker_id": speaker_id, "mime_type": mime_type},
                     started_at=stream_started_at,
+                    origin="live",
+                    **self._log_context(),
                 )
             try:
                 session = await gateway.open_stream(on_partial=on_partial, on_final=on_final, on_error=on_error)
@@ -2211,6 +2232,8 @@ class MatchStore:
                     "mime_type": mime_type,
                     "chunk_count": len(chunks),
                 },
+                origin="live",
+                **self._log_context(),
                 started_at=iso_now(),
             )
             self.snapshot["speech_service"]["asr"] = {
@@ -2333,6 +2356,8 @@ class MatchStore:
                 operation="probe",
                 request={"audio_bytes": len(content), "format": audio_format, "encoding": encoding},
                 started_at=iso_now(),
+                origin="test",
+                **self._log_context(),
             )
             self.snapshot["speech_service"]["asr"] = {
                 "status": "recognizing",
@@ -2406,6 +2431,8 @@ class MatchStore:
                 operation="probe",
                 request={"text": content, "text_length": len(content)},
                 started_at=iso_now(),
+                origin="test",
+                **self._log_context(),
             )
             self.snapshot["speech_service"]["tts"] = {
                 "status": "synthesizing",
@@ -2916,9 +2943,26 @@ class MatchStore:
             "other_info": {},
             "debate_history": [],
         }
-        payload.setdefault("task_id", "agent_test")
+        # Use a unique task id per test run so each invocation logs a distinct row.
+        test_task_id = f"agent_test_{self.seq + 1}"
+        payload.setdefault("task_id", test_task_id)
         payload.setdefault("speech_id", "agent_test")
         payload.setdefault("match_id", self.snapshot["match"]["id"])
+        log_task_id = payload.get("task_id", test_task_id)
+
+        match_id = self.snapshot["match"]["id"]
+        started_at = iso_now()
+        self.repo.save_agent_request_started(
+            match_id=match_id,
+            task_id=log_task_id,
+            speech_id=str(payload.get("speech_id") or "agent_test"),
+            speaker_id=f"agent_config:{config.get('id', '')}",
+            endpoint=endpoint or "openai_sdk",
+            request=payload,
+            started_at=started_at,
+            origin="test",
+            **self._log_context(),
+        )
 
         started = time.perf_counter()
         content = ""
@@ -2932,24 +2976,70 @@ class MatchStore:
                     chunks += 1
                 elif event.get("type") == "final" and event.get("content"):
                     content = event["content"]
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self.repo.finish_agent_request(
+                match_id=match_id,
+                task_id=log_task_id,
+                status="completed",
+                response_text=content,
+                latency_ms=latency_ms,
+                completed_at=iso_now(),
+            )
             return {
                 "ok": True,
                 "content": content,
                 "chunks": chunks,
-                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "latency_ms": latency_ms,
                 "endpoint": endpoint or "openai_sdk",
                 "model": config.get("model_id") or config.get("model_name"),
                 "request": payload,
             }
         except AgentGatewayError as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self.repo.finish_agent_request(
+                match_id=match_id,
+                task_id=log_task_id,
+                status="failed",
+                response_text=content or None,
+                error_code=exc.code,
+                error_message=exc.message,
+                latency_ms=latency_ms,
+                completed_at=iso_now(),
+            )
             return {
                 "ok": False,
                 "error_code": exc.code,
                 "error_message": exc.message,
                 "details": exc.details,
-                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "latency_ms": latency_ms,
                 "request": payload,
             }
+
+    def log_xiaoqi_command(self, command: str, request_payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+        """记录小七命令的完整输入/输出，归类为「小七」类型日志。"""
+        match_id = self.snapshot["match"]["id"]
+        request_id = self._new_speech_service_request_id("xiaoqi", command or "command")
+        now = iso_now()
+        sent = bool(result.get("sent"))
+        self.repo.save_speech_service_request_started(
+            match_id=match_id,
+            request_id=request_id,
+            service="xiaoqi",
+            operation=command or "command",
+            request=request_payload,
+            started_at=now,
+            origin="live",
+            **self._log_context(),
+        )
+        self.repo.finish_speech_service_request(
+            match_id=match_id,
+            request_id=request_id,
+            status="completed" if sent else "failed",
+            response=result,
+            error_message=None if sent else str(result.get("reason") or "未发送"),
+            latency_ms=None,
+            completed_at=iso_now(),
+        )
 
     def clear_request_logs(self) -> None:
         """清空当前比赛的 Agent / 语音 / 审计请求日志。"""
@@ -3946,6 +4036,8 @@ class MatchStore:
                 operation="agent_synthesis",
                 speech_id=speech_id,
                 speaker_id=speaker["id"],
+                origin="live",
+                **self._log_context(),
                 request={
                     "task_id": task_id,
                     "speech_id": speech_id,
@@ -4137,6 +4229,21 @@ class MatchStore:
             }
         )
 
+    def _log_context(self) -> Dict[str, Any]:
+        """Current 请求时机 (phase + scene) for log classification."""
+        match = self.snapshot.get("match", {})
+        phase_id = match.get("current_phase_id")
+        phase_name = None
+        if phase_id:
+            phase = next((p for p in self.snapshot.get("phases", []) if p.get("id") == phase_id), None)
+            if phase:
+                phase_name = phase.get("name")
+        return {
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "screen_scene": match.get("screen_scene"),
+        }
+
     def _save_audit_for_event(self, event: Dict[str, Any]) -> None:
         if event["actor_type"] not in {"admin", "host"}:
             return
@@ -4152,6 +4259,8 @@ class MatchStore:
             result="success",
             error_message=None,
             created_at=event["created_at"],
+            origin="live",
+            **self._log_context(),
         )
 
     def _pause_running_clocks(self) -> None:
@@ -4301,6 +4410,45 @@ class MatchStore:
             path = Path(raw)
             return path if path.is_absolute() else project_root() / path
         return self.repo.db_path.parent / "audio"
+
+    def image_root_path(self) -> Path:
+        raw = os.getenv("PHDEBATE_IMAGE_DIR", "").strip()
+        if raw:
+            path = Path(raw)
+            return path if path.is_absolute() else project_root() / path
+        return self.repo.db_path.parent / "images"
+
+    def _image_extension(self, mime_type: str) -> str:
+        value = (mime_type or "").lower()
+        if "png" in value:
+            return "png"
+        if "jpeg" in value or "jpg" in value:
+            return "jpg"
+        if "webp" in value:
+            return "webp"
+        if "gif" in value:
+            return "gif"
+        if "svg" in value:
+            return "svg"
+        return "png"
+
+    async def save_speaker_image(self, speaker_id: str, content: bytes, mime_type: str) -> Dict[str, Any]:
+        # Validate the speaker exists before touching disk.
+        self._find_speaker(speaker_id)
+        ext = self._image_extension(mime_type)
+        root = self.image_root_path() / "speakers"
+        root.mkdir(parents=True, exist_ok=True)
+        filename = f"{speaker_id}.{ext}"
+        for old in root.glob(f"{speaker_id}.*"):
+            if old.name != filename:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        (root / filename).write_bytes(content)
+        # Cache-busting version so re-uploads refresh on the big screen immediately.
+        url = f"/api/files/speaker-images/{filename}?v={self.seq + 1}"
+        return await self.update_speaker(speaker_id, {"image_url": url})
 
     def _audio_extension(self, mime_type: str) -> str:
         value = (mime_type or "").lower()
@@ -4674,14 +4822,20 @@ class MatchStore:
             raise MatchStateError("invalid_vote", "投票中的优胜方无效。", {"side": side})
 
     def _normalize_screen_scene(self, scene: str) -> str:
+        # Legacy aliases kept for backward compatibility; `opening` and `teams`
+        # are now first-class scenes (辩题介绍 / 阵容介绍).
         aliases = {
-            "opening": "live",
-            "teams": "idle",
             "intermission": "judge_commentary",
             "result": "judge_result",
+            "thanks": "acknowledgment",
         }
         normalized = aliases.get(scene, scene)
-        allowed = {"idle", "live", "paused", "judge_commentary", "judge_result", "audience_result", "xiaoqi_commentary", "xiaoqi_result"}
+        allowed = {
+            "idle", "opening", "teams", "live", "paused",
+            "xiaoqi_commentary", "xiaoqi_result",
+            "judge_commentary", "judge_result", "audience_result",
+            "acknowledgment",
+        }
         if normalized not in allowed:
             raise MatchStateError("invalid_screen_scene", "未知的大屏场景。", {"scene": scene})
         return normalized

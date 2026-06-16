@@ -4,8 +4,9 @@ import { Button, Card, CardContent, CardHeader, CardTitle, Badge, Input, Label, 
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
-import { patch } from "../../api/client";
+import { patch, uploadSpeakerImage } from "../../api/client";
 import type { Speaker } from "../../types/contracts";
+import { resolveAvatar } from "../../state/avatar";
 
 export function Debaters() {
   const { snapshot } = useAdminData();
@@ -83,7 +84,24 @@ function EditSpeaker({ speaker, onClose }: { speaker: Speaker; onClose: () => vo
   const [type, setType] = React.useState<"human" | "agent">(speaker.speaker_type);
   const [agentConfigId, setAgentConfigId] = React.useState(speaker.agent_config_id ?? "");
   const [saving, setSaving] = React.useState(false);
+  const [uploading, setUploading] = React.useState(false);
+  const fileRef = React.useRef<HTMLInputElement>(null);
+  // Live speaker (so the preview updates after an upload refresh).
+  const live = snapshot?.speakers.find((s) => s.id === speaker.id) ?? speaker;
   const configs = snapshot?.agent_configs ?? [];
+
+  async function pickImage(file: File) {
+    setUploading(true);
+    try {
+      await uploadSpeakerImage(matchId, speaker.id, file);
+      await refresh();
+      toast("形象图已更新", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "上传失败", "error");
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function save() {
     if (type === "agent" && !agentConfigId) {
@@ -109,6 +127,35 @@ function EditSpeaker({ speaker, onClose }: { speaker: Speaker; onClose: () => vo
     <Dialog open onClose={onClose} size="md">
       <DialogHeader title={`编辑辩手 · 第 ${speaker.seat} 席`} onClose={onClose} />
       <DialogBody>
+        <div className="space-y-1.5">
+          <Label>形象图（大屏阵容介绍 / 发言动效使用）</Label>
+          <div className="flex items-center gap-3">
+            <img
+              src={resolveAvatar(live)}
+              alt="辩手形象"
+              className="size-16 shrink-0 rounded-lg border border-border object-cover"
+            />
+            <div className="space-y-1.5">
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void pickImage(file);
+                  e.target.value = "";
+                }}
+              />
+              <Button size="sm" variant="outline" loading={uploading} onClick={() => fileRef.current?.click()}>
+                {live.image_url ? "更换形象图" : "上传形象图"}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                {live.image_url ? "已上传自定义形象。" : "未上传时大屏使用自动生成的默认形象。"}
+              </p>
+            </div>
+          </div>
+        </div>
         <div className="space-y-1.5">
           <Label>辩手姓名</Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
