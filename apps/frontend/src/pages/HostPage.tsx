@@ -42,6 +42,7 @@ export function HostPage({ matchId }: HostPageProps) {
 
   if (!snapshot && loadError) return <AuthPrompt role="host" message={loadError} />;
   if (!snapshot) return <div className="loading">正在加载主持导播台...</div>;
+  if (!snapshot.match.id) return <div className="loading">还没有比赛，请在控制台「比赛管理」新建比赛。</div>;
 
   const match = snapshot.match;
   const flow = snapshot.flow;

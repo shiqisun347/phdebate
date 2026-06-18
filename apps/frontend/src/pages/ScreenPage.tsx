@@ -59,6 +59,26 @@ export function ScreenPage({ matchId }: ScreenPageProps) {
 }
 
 function ScreenView({ snapshot, audioEnabled, onToggleAudio }: { snapshot: MatchSnapshot; audioEnabled: boolean; onToggleAudio: () => void }) {
+  // 空白起步（无比赛）：大屏显示候场提示，不渲染空赛场。
+  if (!snapshot.match.id) {
+    return (
+      <main className="screen-stage">
+        <div className="screen-bg" />
+        <section className="screen-scene">
+          <ScreenChrome match={snapshot.match} />
+          <div className="live-grid">
+            <div className="live-center">
+              <div className="mode-panel idle-wait-mode">
+                <div className="phase-name">候场</div>
+                <h3>等待创建比赛</h3>
+                <p>请在控制台「比赛管理」新建比赛后开始。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
   const scene = snapshot.match.status === "paused" ? "paused" : normalizeScreenScene(snapshot.match.screen_scene);
 
   return (

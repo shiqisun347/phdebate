@@ -27,10 +27,11 @@ export function Matches() {
     }
   }
   async function doDelete(m: MatchListEntry) {
-    if (!confirm(`确认删除比赛「${m.title || m.id}」？该操作不可恢复。`)) return;
+    const extra = m.active ? "（这是当前比赛，删除后将切换到其它比赛；若没有其它比赛则回到空白起步）" : "";
+    if (!confirm(`确认删除比赛「${m.title || m.id}」？该操作不可恢复。${extra}`)) return;
     try {
       await deleteMatch(m.id);
-      await refreshList();
+      await Promise.all([refresh(), refreshList()]);
       toast("已删除", "success");
     } catch (err) {
       toast(err instanceof Error ? err.message : "删除失败", "error");
@@ -83,8 +84,7 @@ export function Matches() {
                     size="sm"
                     variant="ghost"
                     className="text-destructive hover:bg-destructive/10"
-                    disabled={m.active}
-                    title={m.active ? "不能删除当前比赛" : ""}
+                    title={m.active ? "删除当前比赛（删除后切到其它比赛或回到空白起步）" : "删除该比赛"}
                     onClick={() => doDelete(m)}
                   >
                     <Trash2 />

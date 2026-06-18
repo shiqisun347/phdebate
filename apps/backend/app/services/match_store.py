@@ -107,7 +107,13 @@ class MatchStore:
             self._persist_snapshot()  # persist any migrations applied during normalization
             self.events = self.repo.load_events(loaded["match"]["id"])
         else:
-            self.reset_demo()
+            # 需求：不自动预置 demo 比赛。全新启动=空白起步，操作员须手动「新建比赛」。
+            # （reset_demo 仍保留给 /api/demo/reset 与测试使用。）
+            self.seq = 0
+            self.events = []
+            self.snapshot = self._empty_snapshot()
+            self._ensure_runtime_fields()
+            self._persist_snapshot()
 
     def reset_demo(self) -> None:
         now = utc_now()
@@ -142,22 +148,7 @@ class MatchStore:
                 "created_at": to_iso(now),
                 "updated_at": to_iso(now),
             },
-            "teams": [
-                {
-                    "id": "team_aff",
-                    "side": "affirmative",
-                    "name": "智码战队",
-                    "position": "编程思维",
-                    "description": "主张 AI 时代更应该培养编程思维",
-                },
-                {
-                    "id": "team_neg",
-                    "side": "negative",
-                    "name": "问道战队",
-                    "position": "提问思维",
-                    "description": "主张 AI 时代更应该培养提问思维",
-                },
-            ],
+            "teams": self._demo_teams(),
             "speakers": self._demo_speakers(),
             "agent_configs": self._demo_agent_configs(now),
             "phases": self._demo_phases(),
@@ -321,6 +312,89 @@ class MatchStore:
             "last_seq": self.seq,
         }
         self._persist_snapshot()
+
+    def _demo_teams(self) -> List[Dict[str, Any]]:
+        return [
+            {"id": "team_aff", "side": "affirmative", "name": "智码战队", "position": "编程思维", "description": "主张 AI 时代更应该培养编程思维"},
+            {"id": "team_neg", "side": "negative", "name": "问道战队", "position": "提问思维", "description": "主张 AI 时代更应该培养提问思维"},
+        ]
+
+    def _empty_snapshot(self) -> Dict[str, Any]:
+        """无比赛的"空白起步"状态：合法但没有任何比赛（id=""、status=draft、名单/环节全空）。
+        需求：系统不自动预置 demo，操作员必须在「比赛管理」手动「新建比赛」。"""
+        now = utc_now()
+        return {
+            "match": {
+                "id": "",
+                "title": "",
+                "title_display": "text",
+                "title_image_url": "",
+                "topic": "",
+                "affirmative_position": "正方",
+                "negative_position": "反方",
+                "organizer": "",
+                "organizer_display": "text",
+                "organizer_image_url": "",
+                "venue": "",
+                "status": "draft",
+                "screen_scene": "idle",
+                "live_mode": "single",
+                "current_phase_id": "",
+                "created_at": to_iso(now),
+                "updated_at": to_iso(now),
+            },
+            "teams": [],
+            "speakers": [],
+            "agent_configs": [],
+            "phases": [],
+            "clocks": [],
+            "current_speech": None,
+            "free_debate": {"current_turn_side": "affirmative", "turn_index": 1, "assignment_mode": "teammate_control"},
+            "flow": self._fresh_flow_state(),
+            "audio_output": self._fresh_audio_output_state(),
+            "recent_transcript": [],
+            "speech_revisions": [],
+            "audio_assets": [],
+            "agent_status": [],
+            "vote_state": {
+                "window_status": "closed",
+                "audience_count": 0,
+                "judge_published": False,
+                "audience_published": False,
+                "winner_side": "affirmative",
+                "best_speaker_id": "",
+                "judge_summary": self._empty_judge_summary(),
+                "audience_summary": self._empty_audience_summary(),
+                "audience_votes": [],
+                "audience_vote_keys": [],
+                "used_audience_tokens": [],
+            },
+            "speech_service": {
+                "asr": {"status": "idle", "latency_ms": 0, "active_sessions": 0, "detail": ""},
+                "tts": {"status": "idle", "latency_ms": 0, "queue_size": 0, "speaker_id": None, "detail": ""},
+                "screen": {"status": "connected"},
+                "consoles": {"online": 0, "total": 0, "mic_errors": []},
+            },
+            "system": self._system_info(),
+            "last_seq": 0,
+        }
+
+    def _has_real_match(self) -> bool:
+        """当前快照是否是一场"真实比赛"（而非空白起步状态）。"""
+        return bool((self.snapshot.get("match") or {}).get("id")) and bool(self.snapshot.get("speakers"))
+
+    def _default_template_snapshot(self) -> Dict[str, Any]:
+        """新建比赛在"无当前比赛"时使用的默认名单模板（标准 4+4 名单 / 两队 / 默认环节）。
+        其余 live 状态由 _new_match_snapshot_from_archive 重置。操作员创建后可在「辩手管理」改名单。"""
+        now = utc_now()
+        snap = self._empty_snapshot()
+        snap["match"]["id"] = "template"
+        snap["match"]["status"] = "ready"
+        snap["teams"] = self._demo_teams()
+        snap["speakers"] = self._demo_speakers()
+        snap["agent_configs"] = self._demo_agent_configs(now)
+        snap["phases"] = self._demo_phases()
+        return snap
 
     def _demo_speakers(self) -> List[Dict[str, Any]]:
         return [
@@ -759,12 +833,15 @@ class MatchStore:
     def _stash_active(self) -> None:
         """Persist the active match to its own slot + refresh its registry entry."""
         self._persist_snapshot()
+        if not self._has_real_match():
+            return  # 空白起步状态不入注册表/槽位
         self.repo.set_app_state(self._match_slot_key(self.snapshot["match"]["id"]), self.snapshot, iso_now())
         self._upsert_registry(self.snapshot)
 
     async def list_matches(self) -> Dict[str, Any]:
         async with self._lock:
-            self._upsert_registry(self.snapshot)
+            if self._has_real_match():
+                self._upsert_registry(self.snapshot)
             matches = self._load_registry()
             active_id = self.snapshot["match"]["id"]
         for entry in matches:
@@ -778,7 +855,9 @@ class MatchStore:
             self._stash_active()
             now = utc_now()
             new_id = f"match_{now.strftime('%Y%m%d_%H%M%S_%f')}"
-            new_snapshot = self._new_match_snapshot_from_archive(deepcopy(self.snapshot), new_id, now)
+            # 有真实当前比赛→沿用其名单模板（基于上一场便利）；空白起步→用默认名单模板。
+            template = deepcopy(self.snapshot) if self._has_real_match() else self._default_template_snapshot()
+            new_snapshot = self._new_match_snapshot_from_archive(template, new_id, now)
             title = str(fields.get("title") or "").strip()
             topic = str(fields.get("topic") or "").strip()
             if title:
@@ -854,14 +933,35 @@ class MatchStore:
 
     async def delete_match(self, target_id: str) -> Dict[str, Any]:
         async with self._lock:
-            if target_id == self.snapshot["match"]["id"]:
-                raise MatchStateError("cannot_delete_active", "不能删除当前比赛，请先切换到其它比赛。", {"match_id": target_id})
+            is_active = target_id == self.snapshot["match"]["id"]
             matches = self._load_registry()
-            if not any(m.get("id") == target_id for m in matches):
+            if not is_active and not any(m.get("id") == target_id for m in matches):
                 raise MatchStateError("match_not_found", "未找到该比赛。", {"match_id": target_id})
-            self._save_registry([m for m in matches if m.get("id") != target_id])
+            remaining = [m for m in matches if m.get("id") != target_id]
+            self._save_registry(remaining)
             self.repo.delete_app_state(self._match_slot_key(target_id))
             self.repo.clear_match_history(target_id)
+            if is_active:
+                # 删除当前比赛：切到最近的其它比赛；没有了就回到"空白起步"（无比赛，须手动新建）。
+                remaining.sort(key=lambda m: m.get("created_at") or "", reverse=True)
+                nxt = next((m for m in remaining if self.repo.get_app_state(self._match_slot_key(str(m.get("id"))))), None)
+                if nxt:
+                    target = self.repo.get_app_state(self._match_slot_key(str(nxt["id"])))
+                    self.snapshot = target
+                    self.seq = int((target or {}).get("last_seq", 0))
+                    self._ensure_runtime_fields()
+                    self.events = self.repo.load_events(str(nxt["id"]))
+                    self._asr_streams = {}
+                    self._persist_snapshot()
+                    self.repo.delete_app_state(self._match_slot_key(str(nxt["id"])))
+                    self._upsert_registry(self.snapshot)
+                else:
+                    self.seq = 0
+                    self.events = []
+                    self._asr_streams = {}
+                    self.snapshot = self._empty_snapshot()
+                    self._ensure_runtime_fields()
+                    self._persist_snapshot()
         await self.emit("match.deleted", {"match_id": target_id}, "admin")
         return await self.list_matches()
 

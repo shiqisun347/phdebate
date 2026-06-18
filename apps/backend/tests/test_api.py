@@ -1759,11 +1759,52 @@ def test_multi_match_create_list_switch_delete() -> None:
     assert switched.status_code == 200
     assert switched.json()["data"]["match"]["id"] == "match_001"
 
-    # deleting the active match is rejected; deleting an inactive one works
-    assert client.delete("/api/matches/match_001").status_code == 409
-    deleted = client.delete(f"/api/matches/{new_id}")
-    assert deleted.status_code == 200
-    assert all(m["id"] != new_id for m in deleted.json()["data"]["matches"])
+    # 删除当前比赛：自动切到剩下的另一场（manual match control，需求：可清理比赛）
+    deleted_active = client.delete("/api/matches/match_001")
+    assert deleted_active.status_code == 200
+    after = deleted_active.json()["data"]
+    assert all(m["id"] != "match_001" for m in after["matches"])
+    assert after["active_match_id"] == new_id
+
+    # 删除最后一场 → 回到"空白起步"（无比赛，须手动新建）
+    deleted_last = client.delete(f"/api/matches/{new_id}")
+    assert deleted_last.status_code == 200
+    final = deleted_last.json()["data"]
+    assert all(m["id"] != new_id for m in final["matches"])
+    assert final["active_match_id"] == ""
+
+
+def test_fresh_start_is_blank_and_manual_create_works() -> None:
+    # 模拟全新启动：进入"空白起步"无比赛状态（不自动预置 demo）。
+    async def go_blank():
+        async with store._lock:
+            store.seq = 0
+            store.events = []
+            store.snapshot = store._empty_snapshot()
+            store._ensure_runtime_fields()
+            store._persist_snapshot()
+
+    asyncio.run(go_blank())
+
+    # 无比赛：current 可读、match.id 为空、无名单、列表为空。
+    data = client.get("/api/matches/current").json()["data"]
+    assert data["match"]["id"] == ""
+    assert data["speakers"] == []
+    listed = client.get("/api/matches").json()["data"]
+    assert listed["active_match_id"] == ""
+    assert listed["matches"] == []
+
+    # 手动新建：即便此前无比赛，也能用默认名单模板建出一场并成为 active。
+    created = client.post("/api/matches", json={"title": "我的比赛", "topic": "我的辩题"})
+    assert created.status_code == 200
+    new_id = created.json()["data"]["match_id"]
+    assert new_id != ""
+    snap = client.get("/api/matches/current").json()["data"]
+    assert snap["match"]["id"] == new_id
+    assert snap["match"]["title"] == "我的比赛"
+    assert len(snap["speakers"]) == 8  # 默认 4+4 名单
+    relisted = client.get("/api/matches").json()["data"]
+    assert relisted["active_match_id"] == new_id
 
 
 def test_integration_config_get_patch_toggle_and_redacts_secrets() -> None:

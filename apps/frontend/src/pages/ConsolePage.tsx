@@ -421,6 +421,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   }
 
   if (!snapshot && loadError) return <AuthPrompt role="speaker" speakerId={selectedSpeakerId} message={loadError} />;
+  if (snapshot && !snapshot.match.id) return <div className="loading">比赛尚未创建，请等待主办方在控制台「比赛管理」新建比赛。</div>;
   if (!snapshot || !speaker) return <div className="loading">正在连接辩手端...</div>;
 
   const currentPhase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);

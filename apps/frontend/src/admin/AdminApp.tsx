@@ -33,7 +33,7 @@ function MatchBadge() {
       <div className="hidden text-right md:block">
         <p className="text-xs text-muted-foreground">当前比赛</p>
         <p className="max-w-[220px] truncate text-sm font-medium text-foreground">
-          {snapshot?.match.title ?? "未加载"}
+          {snapshot ? (snapshot.match.id ? (snapshot.match.title || "未命名比赛") : "未创建比赛") : "未加载"}
         </p>
       </div>
       <span
@@ -119,8 +119,10 @@ function MonitorIcon() {
 function Shell() {
   const [active, navigate] = useHashModule();
   const [mobileOpen, setMobileOpen] = React.useState(false);
+  const { snapshot } = useAdminData();
   const item = findItem(active);
   const ModuleComponent = MODULES[active];
+  const noMatch = Boolean(snapshot && !snapshot.match.id);
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -154,6 +156,17 @@ function Shell() {
         </header>
         <main className="flex-1 overflow-y-auto bg-background p-4 md:p-6">
           <div className="mx-auto max-w-6xl">
+            {noMatch && active !== "matches" && (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+                <span>还没有比赛。请先在「比赛管理」新建比赛后再进行其它操作。</span>
+                <button
+                  className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"
+                  onClick={() => navigate("matches")}
+                >
+                  去比赛管理新建
+                </button>
+              </div>
+            )}
             <ModuleComponent />
           </div>
         </main>
