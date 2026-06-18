@@ -12,10 +12,11 @@
     "build:frontend": "cd apps/frontend && npm run build",
     "check:docs": "node scripts/check-docs.mjs",
     "check:backend": "PYTHONPATH=apps/backend .venv/bin/python -m pytest apps/backend/tests",
+    "check:frontend": "npm --prefix apps/frontend run test",
     "smoke": "node scripts/smoke.mjs",
     "smoke:browser": "node scripts/browser-smoke.mjs",
     "ui:audit": "node scripts/ui-audit.mjs",
-    "check": "npm run check:docs && npm run check:backend && npm run build:frontend"
+    "check": "npm run check:docs && npm run check:backend && npm run check:frontend && npm run build:frontend"
   },
   "devDependencies": {
     "playwright-core": "^1.49.1"

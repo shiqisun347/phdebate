@@ -303,44 +303,10 @@ class XfyunTTSGateway:
             raise XfyunGatewayError("TTS 试合成文本不能为空。")
 
         use_super = _is_super_tts_url(url)
-        if use_super:
-            frame = build_super_tts_frame(content, self.credentials, **options)
-            aue = str(frame["parameter"]["tts"]["audio"].get("encoding") or "")
-        else:
-            frame = build_tts_frame(content, self.credentials, **options)
-            aue = str(frame["business"].get("aue") or "")
-        signed_url = xfyun_signed_url(url, self.credentials)
-        started = time.perf_counter()
-        audio_parts = []
-        chunk_count = 0
-        async with self.connect(signed_url, open_timeout=8, close_timeout=3) as websocket:
-            await websocket.send(json.dumps(frame, ensure_ascii=False))
-            async for raw in websocket:
-                message = json.loads(raw)
-                if use_super:
-                    error = super_tts_error(message)
-                    if error:
-                        raise XfyunGatewayError(str(error.get("message")), code=int(error.get("code") or 0))
-                    chunk = extract_super_tts_audio(message)
-                    finished = super_tts_finished(message)
-                else:
-                    code = int(message.get("code", 0))
-                    if code != 0:
-                        raise XfyunGatewayError(str(message.get("message") or "讯飞 TTS 返回错误。"), code=code)
-                    chunk = extract_tts_audio(message)
-                    finished = tts_finished(message)
-                if chunk:
-                    audio_parts.append(chunk)
-                    chunk_count += 1
-                if finished:
-                    break
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        return TTSResult(
-            audio=b"".join(audio_parts),
-            mime_type=_tts_mime_type(aue),
-            latency_ms=latency_ms,
-            chunk_count=chunk_count,
-        )
+        try:
+            return await self._synthesize_once(content, url, use_super, options)
+        except XfyunGatewayError as exc:
+            raise _diagnose_tts_error(exc, url, use_super, options) from exc
 
     async def synthesize_stream(self, text: str, **options: Any) -> AsyncIterator[Dict[str, Any]]:
         """流式合成：每收到一段音频即产出 {'type':'chunk', 'audio': bytes, 'index': int}，
@@ -355,31 +321,49 @@ class XfyunTTSGateway:
             raise XfyunGatewayError("TTS 试合成文本不能为空。")
 
         use_super = _is_super_tts_url(url)
-        if use_super:
-            frame = build_super_tts_frame(content, self.credentials, **options)
-            aue = str(frame["parameter"]["tts"]["audio"].get("encoding") or "")
-        else:
-            frame = build_tts_frame(content, self.credentials, **options)
-            aue = str(frame["business"].get("aue") or "")
+        try:
+            async for event in self._synthesize_stream_once(content, url, use_super, options):
+                yield event
+        except XfyunGatewayError as exc:
+            raise _diagnose_tts_error(exc, url, use_super, options) from exc
+
+    async def _synthesize_once(self, content: str, url: str, use_super: bool, options: Dict[str, Any]) -> TTSResult:
+        frame, aue = _build_tts_frame(content, self.credentials, use_super, options)
+        signed_url = xfyun_signed_url(url, self.credentials)
+        started = time.perf_counter()
+        audio_parts = []
+        chunk_count = 0
+        async with self.connect(signed_url, open_timeout=8, close_timeout=3) as websocket:
+            await websocket.send(json.dumps(frame, ensure_ascii=False))
+            async for raw in websocket:
+                chunk, finished = _parse_tts_message(json.loads(raw), use_super)
+                if chunk:
+                    audio_parts.append(chunk)
+                    chunk_count += 1
+                if finished:
+                    break
+        return TTSResult(
+            audio=b"".join(audio_parts),
+            mime_type=_tts_mime_type(aue),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            chunk_count=chunk_count,
+        )
+
+    async def _synthesize_stream_once(
+        self,
+        content: str,
+        url: str,
+        use_super: bool,
+        options: Dict[str, Any],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        frame, aue = _build_tts_frame(content, self.credentials, use_super, options)
         signed_url = xfyun_signed_url(url, self.credentials)
         started = time.perf_counter()
         chunk_count = 0
         async with self.connect(signed_url, open_timeout=8, close_timeout=3) as websocket:
             await websocket.send(json.dumps(frame, ensure_ascii=False))
             async for raw in websocket:
-                message = json.loads(raw)
-                if use_super:
-                    error = super_tts_error(message)
-                    if error:
-                        raise XfyunGatewayError(str(error.get("message")), code=int(error.get("code") or 0))
-                    chunk = extract_super_tts_audio(message)
-                    finished = super_tts_finished(message)
-                else:
-                    code = int(message.get("code", 0))
-                    if code != 0:
-                        raise XfyunGatewayError(str(message.get("message") or "讯飞 TTS 返回错误。"), code=code)
-                    chunk = extract_tts_audio(message)
-                    finished = tts_finished(message)
+                chunk, finished = _parse_tts_message(json.loads(raw), use_super)
                 if chunk:
                     chunk_count += 1
                     yield {"type": "chunk", "audio": chunk, "index": chunk_count}
@@ -391,6 +375,45 @@ class XfyunTTSGateway:
             "latency_ms": int((time.perf_counter() - started) * 1000),
             "chunk_count": chunk_count,
         }
+
+
+def _build_tts_frame(content: str, credentials: XfyunCredentials, use_super: bool, options: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    frame_options = {key: value for key, value in options.items() if not key.startswith("_")}
+    if use_super:
+        frame = build_super_tts_frame(content, credentials, **frame_options)
+        return frame, str(frame["parameter"]["tts"]["audio"].get("encoding") or "")
+    frame = build_tts_frame(content, credentials, **frame_options)
+    return frame, str(frame["business"].get("aue") or "")
+
+
+def _parse_tts_message(message: Dict[str, Any], use_super: bool) -> tuple[bytes, bool]:
+    if use_super:
+        error = super_tts_error(message)
+        if error:
+            raise XfyunGatewayError(str(error.get("message")), code=int(error.get("code") or 0))
+        return extract_super_tts_audio(message), super_tts_finished(message)
+    code = int(message.get("code", 0))
+    if code != 0:
+        raise XfyunGatewayError(str(message.get("message") or "讯飞 TTS 返回错误。"), code=code)
+    return extract_tts_audio(message), tts_finished(message)
+
+
+def _diagnose_tts_error(exc: XfyunGatewayError, url: str, use_super: bool, options: Dict[str, Any]) -> XfyunGatewayError:
+    if not use_super or not _is_tts_license_error(exc):
+        return exc
+    voice = str(options.get("voice") or os.getenv("XFYUN_TTS_VOICE", "") or "x6_lingfeiyi_pro").strip()
+    return XfyunGatewayError(
+        f"{exc.message}；讯飞超拟人 TTS License 校验失败。"
+        f"当前请求未切换发音人，仍使用 voice={voice}。"
+        "请在讯飞控制台核对：当前 APPID/APIKey 是否绑定该超拟人 TTS 服务资源、"
+        "该发音人是否已开通，以及字符/并发额度是否已用尽。",
+        code=exc.code,
+    )
+
+
+def _is_tts_license_error(exc: XfyunGatewayError) -> bool:
+    message = exc.message.lower()
+    return "licccheck" in message or "licc limit" in message or "unauthenticated" in message
 
 
 def _tts_mime_type(aue: str) -> str:

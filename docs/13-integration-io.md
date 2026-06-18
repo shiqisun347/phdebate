@@ -6,30 +6,45 @@
 
 ### GET `/api/matches/{match_id}/integration-config`
 
-返回 ASR、TTS、Agent 三类接入配置。`secrets` 只返回 `configured` 和 `redacted` 状态。
+返回 ASR、TTS 和音色预设。Agent 配置由 Agent 管理接口维护，不在这里混管。`secrets` 只返回 `configured` 和 `redacted` 状态。
 
 ```json
 {
   "asr": {
     "enabled": true,
-    "provider": "xfyun",
-    "endpoint": "wss://office-api-ast-dx.iflyaisol.com/",
-    "method": "WEBSOCKET",
-    "headers_template": {},
-    "payload_template": { "audio_format": "audio/L16;rate=16000", "encoding": "raw" },
-    "timeout_seconds": 12,
+    "provider": "alicloud",
+    "endpoint": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime",
+    "settings": {
+      "model": "qwen3-asr-flash-realtime",
+      "input_audio_format": "pcm",
+      "sample_rate": 16000,
+      "language": "zh"
+    },
     "secrets": {
-      "app_id": { "configured": true, "redacted": "********" },
-      "api_key": { "configured": true, "redacted": "********" },
-      "api_secret": { "configured": true, "redacted": "********" }
+      "app_id": { "configured": false, "redacted": "" },
+      "api_key": { "configured": false, "redacted": "" },
+      "api_secret": { "configured": false, "redacted": "" },
+      "alicloud": {
+        "api_key": { "configured": true, "redacted": "********" },
+        "workspace_id": { "configured": false, "redacted": "" }
+      },
+      "xfyun": {
+        "app_id": { "configured": false, "redacted": "" },
+        "api_key": { "configured": false, "redacted": "" },
+        "api_secret": { "configured": false, "redacted": "" }
+      }
     }
-  }
+  },
+  "tts": { "provider": "alicloud", "settings": { "model": "qwen3-tts-flash-realtime", "response_format": "mp3" } },
+  "voice_presets": [
+    { "id": "voice_alicloud_neil_debater", "provider": "alicloud", "voice": "Neil", "enabled": true, "is_default": true }
+  ]
 }
 ```
 
 ### PATCH `/api/matches/{match_id}/integration-config`
 
-允许更新 `enabled`、`provider`、`endpoint`、`method`、`headers_template`、`payload_template`、`timeout_seconds` 和 `secrets`。空 secret 表示不更新；传入新值会覆盖后端保存值，但后续读取仍只返回脱敏状态。
+允许更新 `asr`、`tts` 和 `voice_presets`。ASR/TTS 支持 `enabled`、`provider`、`endpoint`、`lang`、`voice`、`settings` 和 `secrets`。空 secret 表示不更新；传入新值会覆盖后端保存值，但后续读取仍只返回脱敏状态。
 
 ## 2. Agent 提供方模式（provider_type）
 
@@ -52,32 +67,45 @@
 
 ## 3. Agent 结构化输入
 
-`rest_api` 模式后端 POST `{endpoint}/speech`；`openai_sdk` 模式由后端转写为对话消息。两者输入同一份结构化 payload，核心字段如下（与 `需求 2.md` 约定一致）：
+`rest_api` 模式后端 POST `{endpoint}/speech`；`openai_sdk` 模式由后端转写为对话消息。两者输入同一份结构化 payload，核心字段与 `请求体(1).json` 样例对齐：
 
 ```json
 {
-  "model_name": "qwen3.6-plus",
+  "model_name": "qwen3.6-27b",
   "debater_name": "乾元",
   "debate_position": "二辩",
-  "debate_topic": "AI 时代，我们更应该培养编程思维 / 提问思维",
-  "current_stage": "正方一辩立论",
-  "next_stage": "反方一辩立论",
+  "debate_topic": "AI 的迅猛发展提升了/降低了人类创作者存在的意义",
+  "current_stage": "自由辩论",
+  "next_stage": "反方四辩总结",
   "holder": "正方",
   "debate_history": [
     {
       "stage": "正方一辩立论",
       "message": [
-        { "speaker": "正方一辩 · 林晚晴", "content": "发言文本" }
+        { "speaker": "正方一辩", "content": "发言文本" }
+      ]
+    },
+    {
+      "stage": "自由辩论",
+      "message": [
+        { "speaker": "正方二辩", "content": "……" },
+        { "speaker": "反方二辩", "content": "……" }
       ]
     }
   ],
+  "max_token": 699,
   "output": { "stream": true, "language": "zh-CN" }
 }
 ```
 
-`debate_history` 是**最重要**的字段：它是全局唯一辩论过程按阶段聚合的结构化文本，供 Agent 据此生成本阶段发言。
+- `debate_history` 是**最重要**的字段：全局唯一、按阶段聚合的发言记录。`stage` 为环节名；`message` 是该环节内按时间顺序的发言数组；`speaker` 为「方+辩位」（如 `正方一辩`，不含姓名）；自由辩论会把多次往返聚合在同一个 `自由辩论` 阶段里。
+- `max_token`：本次发言的 token 上限，由后端按发言限时与 TTS 语速**确定性推导**，约束 Agent 回复尽量不超时。公式：
+  - `char_budget = time_limit_seconds × spoken_chars_per_sec(默认 4.5) × speech_rate(音色预设语速)`
+  - `max_token = round(char_budget × tokens_per_char(默认 0.75) × margin(默认 1.15))`，再钳制到 `[64, 4096]`。
+  - 可调环境变量：`PHDEBATE_TTS_SPEAKING_CPS`、`PHDEBATE_AGENT_TOKENS_PER_CHAR`、`PHDEBATE_AGENT_MAX_TOKEN_MARGIN`。
+  - `openai_sdk` 模式会把 `max_token` 直接作为 `chat.completions.create(max_tokens=…)`；`rest_api` Agent 应自行据此限制输出。
 
-路由/时控兼容字段（`rest_api` Agent 可选用，`openai_sdk` 忽略）：`match_id`、`task_id`、`speech_id`、`speaker_id`、`agent_config_id`、`agent_provider_type`、`time_limit_seconds`、`remaining_seconds`、`target_chars`。
+路由/时控兼容字段（`rest_api` Agent 可选用，`openai_sdk` 忽略）：`match_id`、`task_id`、`speech_id`、`speaker_id`、`agent_config_id`、`agent_provider_type`、`time_limit_seconds`、`remaining_seconds`、`target_chars`，以及 `other_info`（含 `speech_rate`、`chars_per_second`、`char_budget` 等推导明细，便于对账）。
 
 ## 4. Agent 输出
 
@@ -93,13 +121,13 @@ SSE 每帧为 `data: <json>`：
 
 ## 5. ASR/TTS 输入输出
 
-- ASR 输入优先为浏览器上传的 `audio/L16;rate=16000` PCM 分片，后端可实时转发到讯飞 ASR WebSocket。
-- ASR 输出统一写入 `asr.partial` / `asr.final` 事件，并更新大屏字幕和 transcript。
-- TTS 输入为 Agent final 文本或管理端试合成文本。
+- ASR 输入优先为浏览器上传的 `audio/L16;rate=16000` PCM 分片，后端按当前 provider 转发到实时 ASR WebSocket。
+- ASR 输出统一写入 `asr.partial` / `asr.final` 事件，并更新 transcript；当前大屏不展示实时转写。
+- TTS 输入为 Agent final 文本或管理端试合成文本。正式发言优先使用 AI 辩手绑定的 `tts_voice_preset_id`，未绑定则回退当前 provider 的默认音色预设。
 - TTS 输出为音频归档文件、`audio_assets(source = agent_tts)` 和 `tts.started` / `tts.audio_archived` / `tts.finished` 事件。
 
 ## 6. 密钥规则
 
 - 不在前端代码、文档样例或 Git 仓库中写入真实 `APPID`、`APIKey`、`APISecret` 或模型 key。
-- 本地联调优先使用 `XFYUN_APP_ID`、`XFYUN_API_KEY`、`XFYUN_API_SECRET`、`XFYUN_ASR_URL`、`XFYUN_TTS_URL`、`PHDEBATE_AGENT_BASE_URL` 等环境变量。
+- 本地联调可使用 `DASHSCOPE_API_KEY` / `DASHSCOPE_WORKSPACE_ID` 或 `XFYUN_APP_ID`、`XFYUN_API_KEY`、`XFYUN_API_SECRET`、`XFYUN_ASR_URL`、`XFYUN_TTS_URL` 等环境变量。
 - 管理端结构化表单可用于现场一次性输入或确认配置状态，但接口读取只能看到脱敏状态。

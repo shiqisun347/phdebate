@@ -1,73 +1,127 @@
-# 14 · ASR / TTS 交互协议（讯飞实时转写 + 超拟人合成）
+# 14 · ASR / TTS 交互协议（Provider 架构）
 
-本章定义后端与讯飞语音服务的输入输出约定，对应 `需求 2.md` 的「TTS/ASR 的时机和流程是固定的，需要提供一个 md 文件协商好交互的输入输出」。真实密钥只通过环境变量注入，不写入仓库与前端。
+本章定义后端与语音服务的输入输出约定。语音服务不再写死讯飞：运行时配置可选择 `alicloud` 或 `xfyun`，默认使用阿里云百炼 Qwen-ASR / Qwen-TTS。真实密钥只写入 gitignored 的运行时配置或环境变量，不写入仓库、文档和前端响应。
 
-时机（固定流程）：
+固定流程：
 
-1. 人类辩手发言：后端把浏览器上传的 16k/16bit PCM 分片实时转发给 ASR，`asr.partial` / `asr.final` 事件驱动大屏字幕。
-2. AI 辩手发言：Agent 流式文本（`agent.speech.delta`）实时上大屏，同时把 final 文本送 TTS 合成音频播放/归档。
+1. 人类辩手发言：浏览器上传 `16k / 16bit / mono` PCM 分片，后端按当前 ASR provider 建立实时识别流。大屏当前不显示实时转写，只保留最终发言内容。
+2. AI 辩手发言：Agent 文本进入正式 transcript；若正式 TTS 开启且配置可用，后端按 AI 辩手绑定的音色预设合成音频、归档并发送给大屏播放。
+3. 发言结束提示：大屏只显示 `发言完毕`，不再拼接“辩位 · 名称 发言完毕”。
 
-## 1. ASR：讯飞实时语音转写（RTASR 极速版）
+## 1. 统一 Provider 层
 
-- Endpoint：`wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1`
-- 鉴权（查询参数）：`appId`、`accessKeyId`、`utc`、`signature`、`uuid`，以及 `audio_encode=pcm_s16le`、`lang`、`samplerate=16000`。
-  - `utc`：东八区 ISO8601，如 `2025-09-04T15:38:07+0800`（URL 编码后入参与签名）。
-  - `signature`：除 `signature` 外所有参数按参数名升序、键值各自 URL-encode 后以 `&` 连接，得到 baseString；`signature = base64(HMAC-SHA1(accessKeySecret, baseString))`。
-- 音频帧：原始 PCM `16000Hz / 16bit / 单声道`，建议 `1280 字节 / 40ms` 推送；15s 无数据会被服务端断开。
-- 结束：发送 JSON `{"end": true}`。
-- 返回（JSON）：
+后端入口：
+
+- `app/services/speech_gateway.py`
+- `select_asr_gateway()`
+- `select_tts_gateway(voice_preset_id="", speaker=None)`
+
+调用方包括：
+
+- `/ws/asr-test/{match_id}`
+- `/ws/tts-test/{match_id}`
+- `MatchStore.probe_asr`
+- `MatchStore.probe_tts`
+- 人类发言实时 ASR / 归档补识别
+- AI 正式 TTS 合成 / 句子级 TTS
+
+错误统一为可读 provider 错误。TTS 不会因为某个音色失败而自动切换到另一个发音人；若服务商返回 license、额度、模型或音色错误，应直接暴露错误，便于定位真实原因。
+
+## 2. 阿里云 Qwen 默认配置
+
+### ASR
+
+- Provider：`alicloud`
+- Model：`qwen3-asr-flash-realtime`
+- Endpoint：`wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime`
+- 鉴权：`Authorization: Bearer <DASHSCOPE_API_KEY>`
+- 音频：`pcm`，`16000Hz`，mono，16-bit
+- VAD：`server_vad`，`threshold=0.0`，`silence_duration_ms=400`
+
+输入帧：
 
 ```json
-{
-  "msg_type": "result",
-  "data": {
-    "cn": { "st": { "type": "0", "rt": [ { "ws": [ { "cw": [ { "w": "人机辩论赛" } ] } ] } ] } },
-    "ls": true
-  }
-}
+{ "type": "input_audio_buffer.append", "audio": "<base64-pcm>" }
 ```
 
-- 文本：拼接 `data.cn.st.rt[].ws[].cw[].w`。
-- `data.cn.st.type`：`"1"` 中间结果（→ `asr.partial`），`"0"` 最终结果（→ `asr.final`）。
-- 握手首帧 `data.action == "started"`；错误帧 `action == "error"` 或 `msg_type == "error"`。
+识别结果解析：
 
-实现：`app/services/xfyun_rtasr.py`（`XfyunRTASRGateway.recognize` 一次性识别、`open_stream` 流式会话）。`XFYUN_ASR_URL` 指向 iflyaisol 端点时由 `select_asr_gateway` 自动切到 RTASR，否则回退老版 IAT。
+- `conversation.item.input_audio_transcription.text`：partial
+- `conversation.item.input_audio_transcription.completed`：final
+- `session.finished`：会话结束
 
-状态：握手 / 鉴权 / 分帧 / 结束 / 结果解析已对官方端点真实联调通过（`started → result → 正常关闭`）。识别文本质量需现场用真实麦克风音频核验。
+### TTS
 
-## 2. TTS：讯飞超拟人合成（super smart-tts）
+- Provider：`alicloud`
+- Model：`qwen3-tts-flash-realtime`
+- Endpoint：`wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-tts-flash-realtime`
+- 鉴权：`Authorization: Bearer <DASHSCOPE_API_KEY>`
+- Mode：`server_commit`
+- 默认输出：`mp3`，`24000Hz`，mono
 
-- Endpoint：`wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6`
-- 鉴权：标准讯飞 WebAPI 签名（`host` / `date` / `authorization` 的 HMAC-SHA256，放入查询参数），见 `app/services/xfyun_adapter.py:xfyun_signed_url`。
-- 请求（`header` / `parameter` / `payload` 三段式，与老版 TTS 不同）：
+说明：阿里云文档支持 PCM 输出；当前项目默认用 MP3，是为了浏览器流式播放和大屏回放更稳定。若改为 PCM，需要同步调整前端播放器。
 
-```json
-{
-  "header": { "app_id": "<appid>", "status": 2 },
-  "parameter": { "tts": { "vcn": "x7_xinchang_pro", "speed": 50, "volume": 50, "pitch": 50, "audio": { "encoding": "lame", "sample_rate": 24000, "channels": 1, "bit_depth": 16, "frame_size": 0 } } },
-  "payload": { "text": { "encoding": "utf8", "compress": "raw", "format": "plain", "status": 2, "seq": 0, "text": "<base64>" } }
-}
-```
+音频结果解析：
 
-- 返回：音频在 `payload.audio.audio`（base64，按 `seq` 累加）；`header.status == 2` 或 `payload.audio.status == 2` 表示结束；`header.code != 0` 为错误。
-- 发音人 `vcn`：该试用 app（`b16a5121`）**免费发音人**为 `x6_lingfeiyi_pro` / `x6_lingxiaoxuan_pro` / `x6_lingfeibo_pro` / `x6_lingxiaoyue_pro`，默认 `x6_lingfeiyi_pro`，可用 `XFYUN_TTS_VOICE` 覆盖。使用未授权发音人会返回 `LiccCheck failed ... licc limit`。
+- `response.audio.delta`：base64 音频分片
+- `response.done` / `session.finished`：合成结束
 
-实现：`app/services/xfyun_gateway.py:XfyunTTSGateway.synthesize`；URL 含 `/v1/private/` 时自动用超拟人 schema（`build_super_tts_frame` / `extract_super_tts_audio`）。
+## 3. 音色预设
 
-状态：schema、鉴权、合成已对官方端点真实联调通过（免费 x6 发音人返回 MP3 音频，24kHz/单声道）。
+`IntegrationConfig.voice_presets` 维护可用音色。辩手管理页只能选择已启用、且匹配当前 TTS provider 的预设，不能创建音色。音色预设只管理表达层参数，协议层参数从当前 TTS 通用配置继承。
 
-## 3. 环境变量
+音色预设字段：
+
+- `voice`：服务商音色，下拉选择，阿里云默认提供 `Neil`、`Cherry`、`Ethan`、`Serena`。
+- `speech_rate`：语速，默认 `1.0`。
+- `volume`：音量，默认 `70`。
+- `pitch_rate`：音调，默认 `1.0`。
+- `instructions`：表达风格指令；仅在切换到 `qwen3-tts-instruct-flash-realtime` 时发送，普通 `qwen3-tts-flash-realtime` 不发送。
+- `model`、`response_format`、`sample_rate`、`mode`、`language_type`：由当前 TTS 通用配置自动填充，不在音色编辑器中手动维护。
+
+进入阿里云 TTS 前，后端会统一清洗 Agent 文本：去除 Markdown、链接、代码符号、装饰分隔线和明显不适合朗读的符号，并把 `AI`、`ASR`、`TTS`、`Qwen` 等常见英文术语转成更适合中文播报的表达，降低异常发音。
+
+初始推荐：
+
+| 用途 | voice | 名称 | 说明 |
+| --- | --- | --- | --- |
+| 主持 / 系统播报 | `Cherry` | 芊悦 | 亲切自然，适合清晰提示 |
+| AI 辩手默认男声 | `Neil` | 阿闻 | 平直清晰、字正腔圆，适合正式辩论和立论陈词 |
+| AI 辩手备用男声 | `Ethan` | 晨煦 | 标准普通话，带部分北方口音；作为备用男声保留 |
+| AI 辩手默认女声 | `Serena` | 苏瑶 | 温和清晰，适合总结陈词或稳健表达 |
+
+不默认使用 `Chelsie`，因为其描述偏二次元角色，不适合正式辩论场景；不再默认使用 `Ethan`，因为其音色描述包含部分北方口音，英文术语和严肃辩论文本里更容易出现听感波动。
+
+## 4. 讯飞兼容
+
+讯飞仍保留为可选 provider：
+
+- `xfyun` ASR：`app/services/xfyun_rtasr.py` 与老版 IAT gateway。
+- `xfyun` TTS：`app/services/xfyun_gateway.py`，支持超拟人 schema。
+- `LiccCheck failed ... licc limit`：这是讯飞侧 license / 额度 / 授权问题。代码不会自动切发音人，应核对 AppID/APIKey 服务授权、当前 `vcn` 是否开通、字符/并发额度是否已用尽。
+
+## 5. 配置入口
+
+管理端：
+
+- `GET /api/matches/{match_id}/integration-config`
+- `PATCH /api/matches/{match_id}/integration-config`
+- `GET /api/matches/{match_id}/speech/diagnostics`
+- `/admin` → 语音引擎页
+
+环境变量：
 
 ```text
+DASHSCOPE_API_KEY=
+DASHSCOPE_WORKSPACE_ID=
 XFYUN_APP_ID=
-XFYUN_API_KEY=          # = accessKeyId（RTASR）
-XFYUN_API_SECRET=       # = accessKeySecret（RTASR）
-XFYUN_ASR_URL=wss://office-api-ast-dx.iflyaisol.com/
-XFYUN_TTS_URL=wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6
-XFYUN_ASR_LANG=autodialect
-XFYUN_TTS_VOICE=x7_xinchang_pro
-XFYUN_ASR_SCHEMA=       # 置 rtasr 可强制走极速版协议
-XFYUN_TTS_SCHEMA=       # 置 super 可强制走超拟人 schema
+XFYUN_API_KEY=
+XFYUN_API_SECRET=
+XFYUN_ASR_URL=
+XFYUN_TTS_URL=
+PHDEBATE_ASR_REALTIME=
+PHDEBATE_ASR_AUTO_RECOGNIZE=
+PHDEBATE_TTS_FORMAL=
 ```
 
-密钥只存环境变量（本地走 gitignored 的 `.env`，生产走 systemd / 环境注入），不在前端、文档或仓库出现明文。
+生产建议通过语音引擎页写入运行时配置，或通过 systemd / 环境变量注入。前端只显示 `已配置`，不会回显密钥明文。

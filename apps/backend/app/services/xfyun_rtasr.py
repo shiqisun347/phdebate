@@ -271,7 +271,12 @@ class XfyunRTASRStreamSession:
 
     async def _run(self) -> ASRResult:
         signed_url = build_rtasr_url(self.url, self.credentials, **_url_options(self.options))
+        # 回调约定是"累计全文"（与 IAT 网关一致）：转写层会用回调文本整段覆盖字幕。
+        # RTASR 按句给最终结果（type=0），若每句只上报自身文本，字幕会只剩最后一句。
+        # 因此把定稿分句并入 finals，始终上报"已定稿全文 + 当前在写分句"，
+        # 真正的 final 在流结束时统一回调一次。
         finals: List[str] = []
+        current_partial = ""
         async with self.connect(signed_url, open_timeout=self.open_timeout, close_timeout=self.close_timeout) as websocket:
             first = json.loads(await websocket.recv())
             error = rtasr_error(first)
@@ -310,16 +315,20 @@ class XfyunRTASRStreamSession:
                     latency = int((time.perf_counter() - self.started) * 1000)
                     if rtasr_is_final(message):
                         finals.append(text)
-                        await _call(self.on_final, text, latency, self.chunk_count)
+                        current_partial = ""
+                        await _call(self.on_partial, "".join(finals), latency, self.chunk_count)
                     else:
-                        await _call(self.on_partial, text, latency, self.chunk_count)
+                        current_partial = text
+                        await _call(self.on_partial, "".join(finals) + current_partial, latency, self.chunk_count)
             except (websockets.ConnectionClosedOK, websockets.ConnectionClosed):
                 pass
             finally:
                 if not pump_task.done():
                     pump_task.cancel()
         latency_ms = int((time.perf_counter() - self.started) * 1000)
-        return ASRResult(text="".join(finals), latency_ms=latency_ms, chunk_count=self.chunk_count)
+        full_text = "".join(finals)
+        await _call(self.on_final, full_text, latency_ms, self.chunk_count)
+        return ASRResult(text=full_text, latency_ms=latency_ms, chunk_count=self.chunk_count)
 
 
 async def _call(callback: Optional[Any], *args: Any) -> None:

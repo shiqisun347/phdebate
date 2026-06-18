@@ -7,6 +7,7 @@ import io
 import re
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import httpx
@@ -34,7 +35,26 @@ def load_mock_agent_app():
 @pytest.fixture(autouse=True)
 def reset_demo_state(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("PHDEBATE_RUNTIME_AUTH_FILE", str(tmp_path / "runtime_auth.json"))
+    from app.services.integration_config import integration_config
+
+    integration_config.config = integration_config._seed_from_env()
+    integration_config._normalize()
+    integration_config._apply_to_env()
     client.post("/api/demo/reset")
+
+
+def _patch_tts_selection(monkeypatch, gateway, provider: str = "test", preset=None) -> None:
+    monkeypatch.setattr(
+        "app.services.match_store.select_tts_gateway",
+        lambda **_kwargs: SimpleNamespace(gateway=gateway, provider=provider, options={}, preset=preset),
+    )
+
+
+def _patch_asr_selection(monkeypatch, gateway, provider: str = "test") -> None:
+    monkeypatch.setattr(
+        "app.services.match_store.select_asr_gateway",
+        lambda **_kwargs: SimpleNamespace(gateway=gateway, provider=provider, options={}),
+    )
 
 
 def _use_embedded_mock_agent(speaker_id: str = "spk_aff_2") -> None:
@@ -53,6 +73,50 @@ def test_health() -> None:
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_streaming_tts_splits_long_prefix_on_soft_break(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_EARLY_SEGMENT_CHARS", "48")
+    text = "我们首先要明确今天的争议焦点并不是技术本身是否有价值，而是它是否应该成为所有人必须掌握的基础能力，后续论证还在继续生成"
+
+    segment, position = store._next_tts_sentence(text, 0)
+
+    assert segment.endswith("，")
+    assert 0 < position < len(text)
+
+
+def test_streaming_tts_hard_splits_near_default_threshold(monkeypatch) -> None:
+    monkeypatch.delenv("PHDEBATE_TTS_EARLY_SEGMENT_CHARS", raising=False)
+    text = "我们首先要明确今天的争议焦点并不是技术本身是否有价值，而是它是否应该成为所有人必须掌握的基础能力，后续论证还在继续生成"
+
+    segment, position = store._next_tts_sentence(text, 0)
+
+    assert len(segment) <= 68
+    assert position == len(segment)
+
+
+def test_streaming_tts_first_segment_starts_early(monkeypatch) -> None:
+    # 首段尽快出声：完整的短开场句（即便很短）立刻发出，不再为了凑长度而合并——这样首句更早
+    # 开始合成、更短=合成更快，把"开口很慢"压下来。切点是自然句末/逗号，不会把词切断。
+    monkeypatch.delenv("PHDEBATE_TTS_EARLY_SEGMENT_CHARS", raising=False)
+    monkeypatch.delenv("PHDEBATE_TTS_FIRST_SEGMENT_CHARS", raising=False)
+    text = "谢谢主席。我们首先要明确今天的争议焦点并不是技术本身是否有价值，而是它是否应该成为所有人必须掌握的基础能力，后续论证还在继续生成。"
+
+    # 第一段立即取到完整的短开场句"谢谢主席。"，不再合并到 40 字。
+    segment, position = store._next_tts_sentence(text, 0)
+    assert segment == "谢谢主席。"
+    assert position == len("谢谢主席。")
+
+    # 还没有句末、仅有逗号时（模拟生成中），首段在第一个 >= first_min 的逗号处即切出
+    # （自然停顿，远早于 early_chars）。注意：不含句末标点。
+    comma_text = "我们首先要明确今天的争议焦点并不是技术本身是否有价值，而是它是否应该成为所有人必须掌握的基础能力，后续论证还在继续生成"
+    seg2, pos2 = store._next_tts_sentence(comma_text, 0)
+    assert seg2.endswith("，")
+    assert 0 < pos2 < len(comma_text)
+
+    # 后续段（allow_soft_break=False）只在真正句末切，绝不在逗号处把句子切断。
+    seg_mid, _ = store._next_tts_sentence(comma_text, 0, allow_soft_break=False)
+    assert seg_mid == ""  # 还没遇到句末 → 不切
 
 
 def test_production_auth_requires_read_token_and_keeps_vote_options_public(monkeypatch) -> None:
@@ -333,8 +397,8 @@ def test_speech_diagnostics_reports_mock_fallback_when_xfyun_missing(monkeypatch
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["overall_status"] == "mock_fallback"
-    assert data["provider"] == "mock"
-    assert "XFYUN_APP_ID" in data["asr"]["missing"]
+    assert data["provider"] == {"asr": "alicloud", "tts": "alicloud"}
+    assert "DASHSCOPE_API_KEY / alicloud.api_key" in data["asr"]["missing"]
     assert data["asr"]["runtime_config"]["open_timeout_s"] == 8.0
     assert data["asr"]["runtime_config"]["final_timeout_s"] == 12.0
     assert data["audio_archive"]["writable"] is True
@@ -355,13 +419,30 @@ def test_speech_diagnostics_reports_ready_when_xfyun_configured(monkeypatch, tmp
     monkeypatch.setenv("XFYUN_ASR_OPEN_TIMEOUT_S", "5")
     monkeypatch.setenv("XFYUN_ASR_FINAL_TIMEOUT_S", "9")
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
+    client.patch(
+        "/api/matches/match_001/integration-config",
+        json={
+            "asr": {
+                "enabled": True,
+                "provider": "xfyun",
+                "endpoint": "wss://iat-api.xfyun.cn/v2/iat?token=secret",
+                "secrets": {"app_id": "appid", "api_key": "apikey", "api_secret": "secret"},
+            },
+            "tts": {
+                "enabled": True,
+                "provider": "xfyun",
+                "endpoint": "wss://tts-api.xfyun.cn/v2/tts",
+                "secrets": {"app_id": "appid", "api_key": "apikey", "api_secret": "secret"},
+            },
+        },
+    )
 
     response = client.get("/api/matches/match_001/speech/diagnostics")
 
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["overall_status"] == "ready"
-    assert data["provider"] == "xfyun"
+    assert data["provider"] == {"asr": "xfyun", "tts": "xfyun"}
     assert data["asr"]["missing"] == []
     assert data["asr"]["url"].endswith("?...")
     assert data["asr"]["auth_ready"] is True
@@ -425,7 +506,7 @@ def test_tts_probe_synthesizes_and_archives_audio(monkeypatch, tmp_path) -> None
             return TTSResult(audio=b"mp3-bytes", mime_type="audio/mpeg", latency_ms=123, chunk_count=2)
 
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
-    monkeypatch.setattr("app.services.match_store.XfyunTTSGateway", FakeGateway)
+    _patch_tts_selection(monkeypatch, FakeGateway("wss://fake-tts"), provider="xfyun")
 
     response = client.post("/api/matches/match_001/speech/tts/probe", json={"text": "语音合成自检"})
 
@@ -456,7 +537,7 @@ def test_asr_probe_recognizes_audio_and_updates_status(monkeypatch) -> None:
             assert encoding == "raw"
             return ASRResult(text="自检通过", latency_ms=234, chunk_count=1)
 
-    monkeypatch.setattr("app.services.match_store.XfyunASRGateway", FakeGateway)
+    _patch_asr_selection(monkeypatch, FakeGateway("wss://fake-asr"), provider="xfyun")
 
     response = client.post(
         "/api/matches/match_001/speech/asr/probe",
@@ -487,13 +568,13 @@ def test_asr_probe_returns_clear_error_when_unconfigured(monkeypatch) -> None:
     assert response.status_code == 409
     body = response.json()
     assert body["error"]["code"] == "speech_service_error"
-    assert "XFYUN" in body["error"]["message"]
+    assert "DashScope API Key" in body["error"]["message"]
     requests = store.repo.load_speech_service_requests("match_001", 10)
     assert len(requests) == 1
     assert requests[0]["service"] == "asr"
     assert requests[0]["operation"] == "probe"
     assert requests[0]["status"] == "failed"
-    assert "XFYUN" in requests[0]["error_message"]
+    assert "DashScope API Key" in requests[0]["error_message"]
     summary = client.get("/api/matches/current/data-summary")
     assert summary.status_code == 200
     health = summary.json()["data"]["request_health"]
@@ -512,13 +593,13 @@ def test_tts_probe_returns_clear_error_when_unconfigured(monkeypatch) -> None:
     assert response.status_code == 409
     body = response.json()
     assert body["error"]["code"] == "speech_service_error"
-    assert "XFYUN" in body["error"]["message"]
+    assert "DashScope API Key" in body["error"]["message"]
     requests = store.repo.load_speech_service_requests("match_001", 10)
     assert len(requests) == 1
     assert requests[0]["service"] == "tts"
     assert requests[0]["operation"] == "probe"
     assert requests[0]["status"] == "failed"
-    assert "XFYUN" in requests[0]["error_message"]
+    assert "DashScope API Key" in requests[0]["error_message"]
     summary = client.get("/api/matches/current/data-summary")
     assert summary.status_code == 200
     health = summary.json()["data"]["request_health"]
@@ -1295,6 +1376,11 @@ def test_mock_agent_speech_records_final_transcript(monkeypatch) -> None:
 
     asyncio.run(store.run_agent_speech("spk_aff_2"))
 
+    # TTS disabled → speech waits for screen playback; finalize it manually
+    mid = client.get("/api/matches/match_001").json()["data"]
+    if mid["current_speech"]:
+        asyncio.run(store.complete_agent_playback(mid["current_speech"]["id"], mid["current_speech"].get("tts_task_id") or ""))
+
     response = client.get("/api/matches/match_001")
     assert response.status_code == 200
     data = response.json()["data"]
@@ -1380,6 +1466,11 @@ def test_agent_speech_can_use_injected_gateway(monkeypatch) -> None:
         asyncio.run(store.run_agent_speech("spk_aff_2"))
     finally:
         store.agent_gateway = original
+
+    # TTS disabled → speech waits for screen playback; finalize it manually
+    mid = client.get("/api/matches/match_001").json()["data"]
+    if mid["current_speech"]:
+        asyncio.run(store.complete_agent_playback(mid["current_speech"]["id"], mid["current_speech"].get("tts_task_id") or ""))
 
     data = client.get("/api/matches/match_001").json()["data"]
     assert data["recent_transcript"][0]["text"] == "外部 Agent 流式接入成功。"
@@ -1499,37 +1590,51 @@ def test_agent_speech_formal_tts_archives_audio(monkeypatch, tmp_path) -> None:
             self.url = url
 
         async def synthesize(self, text: str) -> TTSResult:
-            assert "可执行" in text
+            # 首段提前切分后，一段发言会被切成多句；每句都应被合成、归档（不再假设整段=一句）。
             return TTSResult(audio=b"agent-mp3", mime_type="audio/mpeg", latency_ms=321, chunk_count=1)
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
-    monkeypatch.setattr("app.services.match_store.XfyunTTSGateway", FakeGateway)
+    _patch_tts_selection(monkeypatch, FakeGateway("wss://fake-tts"), provider="xfyun")
     _use_embedded_mock_agent("spk_aff_2")
 
     asyncio.run(store.run_agent_speech("spk_aff_2"))
 
-    data = client.get("/api/matches/match_001").json()["data"]
-    asset = data["audio_assets"][0]
+    # TTS succeeded → speech waits for screen playback; get speech_id before finalization
+    mid = client.get("/api/matches/match_001").json()["data"]
+    speech_id = mid["current_speech"]["id"] if mid["current_speech"] else None
+    task_id = (mid["current_speech"] or {}).get("tts_task_id") or ""
+
+    # Verify audio archived and service request recorded before finalization
+    mid_assets = mid["audio_assets"]
+    assert len(mid_assets) >= 1
+    asset = mid_assets[0]
     assert asset["speaker_id"] == "spk_aff_2"
-    assert asset["speech_id"] == data["recent_transcript"][0]["speech_id"]
     assert asset["source"] == "agent_tts"
     assert asset["status"] == "completed"
     assert asset["mime_type"] == "audio/mpeg"
-    assert asset["size_bytes"] == len(b"agent-mp3")
+    assert len(asset["chunks"]) >= 1
+    assert asset["size_bytes"] == len(b"agent-mp3") * len(asset["chunks"])  # 每句一个分片
+    assert asset["chunks"][0]["chunk_index"] == 0
+    assert asset["chunks"][0]["audio_url"].startswith("/api/audio/match_001/")
     assert Path(asset["chunks"][0]["file_path"]).read_bytes() == b"agent-mp3"
-    assert data["speech_service"]["tts"]["status"] == "idle"
-    assert data["speech_service"]["tts"]["latency_ms"] == 321
     requests = store.repo.load_speech_service_requests("match_001", 10)
-    assert len(requests) == 1
-    assert requests[0]["service"] == "tts"
-    assert requests[0]["operation"] == "agent_synthesis"
-    assert requests[0]["speech_id"] == data["recent_transcript"][0]["speech_id"]
-    assert requests[0]["speaker_id"] == "spk_aff_2"
-    assert requests[0]["status"] == "completed"
-    assert requests[0]["request"]["speaker_id"] == "spk_aff_2"
+    assert len(requests) >= 1  # 首段提前切分 → 一段发言可能产生多条合成请求
+    assert all(r["service"] == "tts" and r["operation"] == "agent_synthesis" for r in requests)
+    assert all(r["speech_id"] == asset["speech_id"] and r["status"] == "completed" for r in requests)
+    assert all(r["speaker_id"] == "spk_aff_2" for r in requests)
     assert requests[0]["response"]["size_bytes"] == len(b"agent-mp3")
     assert requests[0]["latency_ms"] == 321
+
+    # Finalize playback (normally done by screen reporting playback complete)
+    if speech_id:
+        asyncio.run(store.complete_agent_playback(speech_id, task_id))
+
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["audio_assets"][0]["speech_id"] == data["recent_transcript"][0]["speech_id"]
+    assert data["speech_service"]["tts"]["status"] == "idle"
+    assert data["speech_service"]["tts"]["latency_ms"] == 321
 
 
 def test_agent_speech_formal_tts_failure_keeps_text_transcript(monkeypatch) -> None:
@@ -1541,7 +1646,7 @@ def test_agent_speech_formal_tts_failure_keeps_text_transcript(monkeypatch) -> N
             raise XfyunGatewayError("tts unavailable", code=500)
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
-    monkeypatch.setattr("app.services.match_store.XfyunTTSGateway", FailingGateway)
+    _patch_tts_selection(monkeypatch, FailingGateway("wss://fake-tts"), provider="xfyun")
     _use_embedded_mock_agent("spk_aff_2")
 
     asyncio.run(store.run_agent_speech("spk_aff_2"))
@@ -1553,19 +1658,17 @@ def test_agent_speech_formal_tts_failure_keeps_text_transcript(monkeypatch) -> N
     assert data["speech_service"]["tts"]["degraded_to"] == "text_only"
     assert data["current_speech"] is None
     requests = store.repo.load_speech_service_requests("match_001", 10)
-    assert len(requests) == 1
-    assert requests[0]["service"] == "tts"
-    assert requests[0]["operation"] == "agent_synthesis"
-    assert requests[0]["status"] == "failed"
-    assert requests[0]["error_code"] == "500"
-    assert requests[0]["error_message"] == "tts unavailable"
-    assert requests[0]["response"]["degraded_to"] == "text_only"
+    assert len(requests) >= 1  # 首段提前切分 → 可能多条；每条都应失败并降级为 text_only
+    assert all(r["service"] == "tts" and r["operation"] == "agent_synthesis" for r in requests)
+    assert all(r["status"] == "failed" for r in requests)
+    assert all(r["error_code"] == "500" and r["error_message"] == "tts unavailable" for r in requests)
+    assert all(r["response"]["degraded_to"] == "text_only" for r in requests)
 
 
 def test_agent_health_check_updates_agent_status() -> None:
     class FakeHealthGateway:
         def endpoint_for(self, speaker):
-            return speaker.get("agent_endpoint") or "http://fake-agent"
+            return "http://fake-agent"
 
         async def health(self, endpoint):
             assert endpoint == "http://fake-agent"
@@ -1670,19 +1773,27 @@ def test_integration_config_get_patch_toggle_and_redacts_secrets() -> None:
     try:
         base = client.get("/api/matches/match_001/integration-config")
         assert base.status_code == 200
-        assert set(base.json()["data"].keys()) == {"asr", "tts"}
+        assert set(base.json()["data"].keys()) == {"asr", "tts", "voice_presets"}
+        assert len(base.json()["data"]["voice_presets"]) >= 3
 
         patched = client.patch(
             "/api/matches/match_001/integration-config",
             json={
                 "asr": {"enabled": False},
-                "tts": {"enabled": True, "endpoint": "wss://example/tts", "voice": "x6_lingxiaoxuan_pro", "secrets": {"api_key": "SECRET_K"}},
+                "tts": {
+                    "enabled": True,
+                    "provider": "xfyun",
+                    "endpoint": "wss://example/tts",
+                    "voice": "x6_lingxiaoxuan_pro",
+                    "secrets": {"api_key": "SECRET_K"},
+                },
             },
         )
         assert patched.status_code == 200
         data = patched.json()["data"]
         assert data["asr"]["enabled"] is False
         assert data["tts"]["enabled"] is True
+        assert data["tts"]["provider"] == "xfyun"
         assert data["tts"]["endpoint"] == "wss://example/tts"
         assert data["tts"]["voice"] == "x6_lingxiaoxuan_pro"
         assert data["tts"]["secrets"]["api_key"] == {"configured": True, "redacted": "********"}
@@ -1927,6 +2038,401 @@ def test_timer_tick_emits_expiry_and_auto_ends_current_speech() -> None:
 
     emitted_again = asyncio.run(store.tick_timers())
     assert emitted_again == []
+
+
+def test_timer_tick_cuts_off_agent_tts_playback_at_timeout() -> None:
+    phase = client.post("/api/matches/match_001/phases/phase_free_debate/start")
+    assert phase.status_code == 200
+
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts",
+                "phase_id": "phase_free_debate",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "",
+                "content_partial": "AI TTS 正在播放",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts",
+            }
+            store._start_relevant_clocks("affirmative")
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    adjusted = client.post(
+        "/api/matches/match_001/clocks/turn/adjust",
+        json={"remaining_ms": 0, "reason": "unit_timeout"},
+    )
+    assert adjusted.status_code == 200
+
+    emitted = asyncio.run(store.tick_timers())
+    assert [event["type"] for event in emitted] == ["clock.expired", "speech.timeout", "speech.ended", "flow.awaiting_host_confirm"]
+    assert emitted[1]["payload"]["task_id"] == "task_agent_tts"
+    assert emitted[2]["payload"]["reason"] == "timeout"
+    assert emitted[2]["payload"]["task_id"] == "task_agent_tts"
+
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["recent_transcript"][0]["speech_id"] == "speech_agent_tts"
+    assert data["speech_service"]["tts"]["status"] == "idle"
+    assert data["speech_service"]["tts"]["detail"] == "timeout"
+    assert data["flow"]["awaiting_host_confirm"] is True
+
+
+def test_tts_playback_progress_updates_current_speech() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_progress",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "",
+                "content_partial": "AI TTS 正在播放",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_progress",
+                "tts_expected_sentences": 4,
+                "tts_created_sentences": 4,
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_progress/tts/playback-progress",
+        json={"task_id": "task_agent_tts_progress", "sentence_idx": 2},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    speech = data["current_speech"]
+    assert speech["tts_playing_sentence_idx"] == 2
+    assert speech["tts_played_sentences"] == 3
+    assert data["speech_service"]["tts"]["queue_size"] == 1
+
+
+def test_tts_playback_resume_emits_event() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_resume",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "",
+                "content_partial": "AI TTS 正在播放",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_resume",
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_resume/tts/playback-resume",
+        json={"task_id": "task_agent_tts_resume"},
+    )
+
+    assert response.status_code == 200
+    assert store.events[-1]["type"] == "tts.playback_resume_requested"
+    assert store.events[-1]["payload"]["task_id"] == "task_agent_tts_resume"
+
+
+def test_tts_playback_stop_emits_event_without_ending_speech() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_stop",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "",
+                "content_partial": "AI TTS 正在播放",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_stop",
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_stop/tts/playback-stop",
+        json={"task_id": "task_agent_tts_stop"},
+    )
+
+    assert response.status_code == 200
+    assert store.events[-1]["type"] == "tts.playback_stop_requested"
+    assert store.events[-1]["payload"]["task_id"] == "task_agent_tts_stop"
+    # Pure audio control: the speech itself is untouched (not ended).
+    assert store.snapshot["current_speech"]["id"] == "speech_agent_tts_stop"
+    assert store.snapshot["current_speech"]["state"] == "speaking"
+
+
+def test_streaming_tts_never_cuts_mid_sentence_after_first_segment() -> None:
+    text = "我们首先要明确今天的争议焦点并不是技术本身是否有价值，而是它是否应该成为所有人必须掌握的基础能力，后续论证还在继续生成"
+
+    # Without soft breaks (every segment past the first), a paragraph with no
+    # sentence-ending punctuation yet must wait rather than be cut at a comma.
+    segment, position = store._next_tts_sentence(text, 0, allow_soft_break=False)
+
+    assert segment == ""
+    assert position == 0
+
+
+def test_agent_output_budget_is_deterministic_and_scales() -> None:
+    base = store._agent_output_budget(180, 1.0)
+    assert base["max_token"] >= 64
+    assert base["target_chars"] >= 40
+    # Deterministic: same inputs → same output.
+    assert store._agent_output_budget(180, 1.0) == base
+    # More time and faster speech both allow more spoken content → larger ceiling.
+    assert store._agent_output_budget(360, 1.0)["max_token"] > base["max_token"]
+    assert store._agent_output_budget(180, 1.5)["max_token"] > base["max_token"]
+
+
+def test_agent_payload_carries_max_token_and_message_history() -> None:
+    speaker = store._find_speaker("spk_aff_2")
+    payload = store._build_agent_payload("task_budget", "speech_budget", speaker)
+
+    assert payload["max_token"] >= 64
+    assert payload["target_chars"] >= 40
+    # debate_history matches 请求体(1).json: "message" key, speaker is side+seat only.
+    for stage in payload["debate_history"]:
+        assert "message" in stage and "content" not in stage
+        for msg in stage["message"]:
+            assert " · " not in msg["speaker"]
+
+
+def test_match_update_syncs_positions_to_teams_and_brand_fields() -> None:
+    response = client.patch(
+        "/api/matches/match_001",
+        json={
+            "title": "同步测试赛",
+            "affirmative_position": "立场甲",
+            "negative_position": "立场乙",
+            "title_display": "image",
+            "organizer_display": "text",
+        },
+    )
+    assert response.status_code == 200
+    match = store.snapshot["match"]
+    assert match["title"] == "同步测试赛"
+    assert match["title_display"] == "image"
+    assert match["organizer_display"] == "text"
+    teams = {team["side"]: team for team in store.snapshot["teams"]}
+    assert teams["affirmative"]["position"] == "立场甲"
+    assert teams["negative"]["position"] == "立场乙"
+
+
+def test_match_image_upload_sets_url_and_image_mode() -> None:
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    response = client.post(
+        "/api/matches/match_001/image/title",
+        files={"file": ("title.png", png, "image/png")},
+    )
+    assert response.status_code == 200
+    match = response.json()["data"]["match"]
+    assert match["title_display"] == "image"
+    assert match["title_image_url"].startswith("/api/files/match-images/")
+
+
+def test_self_introduction_recorded_but_excluded_from_history(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+
+    async def set_ready() -> str:
+        async with store._lock:
+            prev = store.snapshot["match"]["status"]
+            store.snapshot["match"]["status"] = "ready"  # 赛前：尚未“开始比赛”
+            return prev
+
+    async def restore(prev: str) -> None:
+        async with store._lock:
+            store.snapshot["match"]["status"] = prev
+
+    prev = asyncio.run(set_ready())
+    try:
+        # Self-introduction must be allowed before the match is "running".
+        asyncio.run(store.run_agent_speech("spk_aff_2", mode="self_intro"))
+
+        seg = next((s for s in store.snapshot["recent_transcript"] if s.get("kind") == "self_intro"), None)
+        assert seg is not None, "self-introduction should be recorded to the transcript"
+        assert seg.get("exclude_from_history") is True
+        assert seg.get("text")
+
+        # The self-intro text must never be sent back as agent conversation history.
+        history = store._build_debate_history()
+        for stage in history:
+            for msg in stage["message"]:
+                assert msg["content"] != seg["text"]
+    finally:
+        asyncio.run(restore(prev))
+
+
+def test_reset_current_speech_works_after_speech_ended() -> None:
+    async def seed() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = None
+            store.snapshot["recent_transcript"].insert(0, {
+                "id": "seg_reset_ended",
+                "speech_id": "speech_reset_ended",
+                "phase_id": store.snapshot["match"]["current_phase_id"],
+                "speaker_id": "spk_aff_2",
+                "speaker_label": "正方二辩 · 测试",
+                "source": "agent_text",
+                "is_final": True,
+                "valid": True,
+                "text": "待复位的发言内容",
+            })
+            flow = store._fresh_flow_state()
+            flow.update({"awaiting_host_confirm": True, "speech_id": "speech_reset_ended", "speaker_id": "spk_aff_2"})
+            store.snapshot["flow"] = flow
+            store._persist_snapshot()
+
+    asyncio.run(seed())
+    asyncio.run(store.reset_current_speech("test_reset_ended"))
+
+    assert all(s.get("speech_id") != "speech_reset_ended" for s in store.snapshot["recent_transcript"])
+    assert store.snapshot["flow"]["awaiting_host_confirm"] is False
+    assert store.snapshot["current_speech"] is None
+
+
+def test_conversion_autostart_phase_predicate() -> None:
+    from app.main import _conversion_autostart_phase
+
+    phase = {"id": "p1", "phase_type": "constructive", "side": "affirmative", "speaker_seat": 1}
+    snapshot = {
+        "match": {"status": "running", "current_phase_id": "p1"},
+        "phases": [phase],
+        "current_speech": None,
+        "flow": {"awaiting_host_confirm": False},
+        "speakers": [],
+    }
+    updated = {"id": "s1", "speaker_type": "agent", "side": "affirmative", "seat": 1}
+
+    # human → agent at the current turn's seat: auto-start.
+    assert _conversion_autostart_phase("human", updated, snapshot) is phase
+    # editing an already-agent speaker: no auto-start.
+    assert _conversion_autostart_phase("agent", updated, snapshot) is None
+    # agent at a different seat (not the current turn): no.
+    assert _conversion_autostart_phase("human", {**updated, "seat": 2}, snapshot) is None
+    # a speech already in progress: no.
+    assert _conversion_autostart_phase("human", updated, {**snapshot, "current_speech": {"id": "x"}}) is None
+    # awaiting host confirm (already spoken): no.
+    assert _conversion_autostart_phase("human", updated, {**snapshot, "flow": {"awaiting_host_confirm": True}}) is None
+    # free debate uses turn-based auto-agent, not this path: no.
+    assert _conversion_autostart_phase("human", updated, {**snapshot, "phases": [{**phase, "phase_type": "free_debate"}]}) is None
+    # match not running yet: no.
+    assert _conversion_autostart_phase("human", updated, {**snapshot, "match": {"status": "ready", "current_phase_id": "p1"}}) is None
+
+
+def test_skipped_sentence_index_recorded_on_speech() -> None:
+    async def scenario() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_skip_test",
+                "phase_id": store.snapshot["match"]["current_phase_id"],
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "source": "agent_text",
+                "state": "thinking",
+                "content_final": "",
+                "content_partial": "",
+                "tts_task_id": "task_skip_test",
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+        speaker = store._find_speaker("spk_aff_2")
+        # Empty text triggers the skip path, which must record the index so the screen
+        # can fill the ordered gap deterministically (instead of stalling forever).
+        ok = await store._synthesize_sentence_tts("   ", 3, "task_skip_test", "speech_skip_test", speaker)
+        assert ok is False
+
+    asyncio.run(scenario())
+    assert 3 in (store.snapshot["current_speech"] or {}).get("tts_skipped_sentences", [])
+
+
+def test_transcript_streams_then_finalizes_and_keeps_full_history() -> None:
+    from app.services.match_store import _RECENT_TRANSCRIPT_LIMIT
+
+    # Cap raised well past the old 12 so a full debate stays in 实时辩论过程 + debate_history.
+    assert _RECENT_TRANSCRIPT_LIMIT >= 100
+
+    async def scenario() -> None:
+        async with store._lock:
+            speech = {
+                "id": "speech_stream_x",
+                "phase_id": store.snapshot["match"]["current_phase_id"],
+                "speaker_id": "spk_aff_2",
+                "turn_index": 1,
+            }
+            # Streaming: text appears as a non-final ("实时") segment before the speech ends.
+            store._upsert_transcript_segment(speech, "spk_aff_2", "实时第一句", False, "agent_text")
+            mid = next(s for s in store.snapshot["recent_transcript"] if s["speech_id"] == "speech_stream_x")
+            assert mid["is_final"] is False
+            assert "实时第一句" in mid["text"]
+            # Generation done: the same segment finalizes in place (enters debate_history).
+            store._upsert_transcript_segment(speech, "spk_aff_2", "实时第一句，完整定稿。", True, "agent_text")
+            done = next(s for s in store.snapshot["recent_transcript"] if s["speech_id"] == "speech_stream_x")
+            assert done["is_final"] is True
+            assert "完整定稿" in done["text"]
+            # Exactly one segment for the speech (streaming updates in place, no duplicate).
+            assert sum(1 for s in store.snapshot["recent_transcript"] if s["speech_id"] == "speech_stream_x") == 1
+            store._persist_snapshot()
+
+    asyncio.run(scenario())
+
+
+def test_phase_advance_finalizes_in_progress_speech_into_history() -> None:
+    async def scenario() -> str:
+        async with store._lock:
+            store.snapshot["match"]["status"] = "running"
+            store.snapshot["current_speech"] = {
+                "id": "speech_inprogress_x",
+                "phase_id": store.snapshot["match"]["current_phase_id"],
+                "speaker_id": "spk_aff_1",
+                "side": "affirmative",
+                "source": "agent_text",
+                "state": "speaking",
+                "content_partial": "正方一辩的立论内容要点。",
+                "content_final": "",
+                "tts_task_id": "task_inprogress_x",
+                "turn_index": 1,
+            }
+            # Only a non-final ("实时") segment exists, as during an unfinished speech.
+            store._upsert_transcript_segment(
+                store.snapshot["current_speech"], "spk_aff_1", "正方一辩的立论内容要点。", False, "agent_text"
+            )
+            store._persist_snapshot()
+            cur = store.snapshot["match"]["current_phase_id"]
+            nxt = next(
+                p for p in sorted(store.snapshot["phases"], key=lambda x: x["display_order"])
+                if p["id"] != cur and p.get("phase_type") != "free_debate"
+            )
+        await store.start_phase(nxt["id"])
+        return cur
+
+    asyncio.run(scenario())
+
+    # Advancing the phase mid-speech must finalize that speech into the global history.
+    seg = next((s for s in store.snapshot["recent_transcript"] if s.get("speech_id") == "speech_inprogress_x"), None)
+    assert seg is not None
+    assert seg["is_final"] is True
+    history = store._build_debate_history()
+    assert any("正方一辩的立论内容要点" in msg["content"] for stage in history for msg in stage["message"])
 
 
 def test_clock_control_rejects_unknown_and_negative_values() -> None:
@@ -2192,7 +2698,7 @@ def test_archived_pcm_audio_can_be_recognized_and_written_to_transcript(monkeypa
             return ASRResult(text="归档识别文本", latency_ms=345, chunk_count=2)
 
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
-    monkeypatch.setattr("app.services.match_store.XfyunASRGateway", FakeGateway)
+    _patch_asr_selection(monkeypatch, FakeGateway(), provider="xfyun")
 
     first = client.post(
         "/api/matches/match_001/speeches/speech_live/audio-chunks",
@@ -2259,7 +2765,7 @@ def test_complete_audio_archive_can_auto_recognize_pcm(monkeypatch, tmp_path) ->
             return ASRResult(text="自动识别完成", latency_ms=210, chunk_count=1)
 
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
-    monkeypatch.setattr("app.services.match_store.XfyunASRGateway", FakeGateway)
+    _patch_asr_selection(monkeypatch, FakeGateway(), provider="xfyun")
 
     upload = client.post(
         "/api/matches/match_001/speeches/speech_live/audio-chunks",
@@ -2305,7 +2811,7 @@ def test_pcm_chunks_drive_realtime_asr_partial_and_final(monkeypatch, tmp_path) 
 
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
     monkeypatch.setenv("PHDEBATE_ASR_REALTIME", "1")
-    monkeypatch.setattr("app.services.match_store.XfyunASRGateway", FakeGateway)
+    _patch_asr_selection(monkeypatch, FakeGateway(), provider="xfyun")
 
     first = client.post(
         "/api/matches/match_001/speeches/speech_live/audio-chunks",
@@ -2449,4 +2955,3 @@ def test_tts_failure_marks_text_only_degradation_for_agent_speech() -> None:
     assert data["speech_service"]["tts"]["status"] == "failed"
     assert data["speech_service"]["tts"]["speaker_id"] == "spk_aff_2"
     assert data["speech_service"]["tts"]["degraded_to"] == "text_only"
-

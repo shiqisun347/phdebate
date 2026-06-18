@@ -24,6 +24,7 @@ export function Debaters() {
     { side: "affirmative", label: "正方", color: "text-blue-600" },
     { side: "negative", label: "反方", color: "text-rose-600" },
   ];
+  const voiceById = new Map((snapshot.integration_config.voice_presets ?? []).map((preset) => [preset.id, preset]));
 
   return (
     <div className="space-y-5">
@@ -53,6 +54,11 @@ export function Debaters() {
                           {s.speaker_type === "agent" ? <Bot className="size-3" /> : <User className="size-3" />}
                           {s.speaker_type === "agent" ? `AI · ${s.model_name || "未绑定"}` : "人类辩手"}
                         </p>
+                        {s.speaker_type === "agent" && s.tts_voice_preset_id && (
+                          <p className="text-xs text-muted-foreground">
+                            音色：{voiceById.get(s.tts_voice_preset_id)?.name ?? s.tts_voice_preset_id}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -83,12 +89,17 @@ function EditSpeaker({ speaker, onClose }: { speaker: Speaker; onClose: () => vo
   const [name, setName] = React.useState(speaker.name);
   const [type, setType] = React.useState<"human" | "agent">(speaker.speaker_type);
   const [agentConfigId, setAgentConfigId] = React.useState(speaker.agent_config_id ?? "");
+  const [voicePresetId, setVoicePresetId] = React.useState(speaker.tts_voice_preset_id ?? "");
   const [saving, setSaving] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
   // Live speaker (so the preview updates after an upload refresh).
   const live = snapshot?.speakers.find((s) => s.id === speaker.id) ?? speaker;
   const configs = snapshot?.agent_configs ?? [];
+  const ttsProvider = snapshot?.integration_config.tts.provider ?? "alicloud";
+  const voicePresets = (snapshot?.integration_config.voice_presets ?? []).filter(
+    (preset) => preset.enabled && preset.provider === ttsProvider
+  );
 
   async function pickImage(file: File) {
     setUploading(true);
@@ -111,7 +122,10 @@ function EditSpeaker({ speaker, onClose }: { speaker: Speaker; onClose: () => vo
     setSaving(true);
     try {
       const body: Record<string, unknown> = { name, speaker_type: type };
-      if (type === "agent") body.agent_config_id = agentConfigId;
+      if (type === "agent") {
+        body.agent_config_id = agentConfigId;
+        body.tts_voice_preset_id = voicePresetId || null;
+      }
       await patch(`/api/matches/${matchId}/speakers/${speaker.id}`, body);
       await refresh();
       toast("已保存", "success");
@@ -168,18 +182,32 @@ function EditSpeaker({ speaker, onClose }: { speaker: Speaker; onClose: () => vo
           </Select>
         </div>
         {type === "agent" && (
-          <div className="space-y-1.5">
-            <Label>绑定 Agent 配置</Label>
-            <Select value={agentConfigId} onChange={(e) => setAgentConfigId(e.target.value)}>
-              <option value="">请选择…</option>
-              {configs.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}（{c.model_name}）
-                </option>
-              ))}
-            </Select>
-            {configs.length === 0 && <p className="text-xs text-warning">尚无 Agent 配置，请先到「Agent 管理」创建。</p>}
-          </div>
+          <>
+            <div className="space-y-1.5">
+              <Label>绑定 Agent 配置</Label>
+              <Select value={agentConfigId} onChange={(e) => setAgentConfigId(e.target.value)}>
+                <option value="">请选择…</option>
+                {configs.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}（{c.model_name}）
+                  </option>
+                ))}
+              </Select>
+              {configs.length === 0 && <p className="text-xs text-warning">尚无 Agent 配置，请先到「Agent 管理」创建。</p>}
+            </div>
+            <div className="space-y-1.5">
+              <Label>预设音色</Label>
+              <Select value={voicePresetId} onChange={(e) => setVoicePresetId(e.target.value)}>
+                <option value="">使用语音引擎默认音色</option>
+                {voicePresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}（{preset.voice}）
+                  </option>
+                ))}
+              </Select>
+              {voicePresets.length === 0 && <p className="text-xs text-warning">当前 TTS 服务商暂无启用音色，请先到「语音引擎」维护。</p>}
+            </div>
+          </>
         )}
       </DialogBody>
       <DialogFooter>

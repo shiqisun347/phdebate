@@ -103,7 +103,7 @@ export function getIntegrationConfig(matchId: string): Promise<IntegrationConfig
   return request<IntegrationConfig>(`/api/matches/${matchId}/integration-config`);
 }
 
-export function patchIntegrationConfig(matchId: string, body: Partial<Record<"asr" | "tts", unknown>>): Promise<IntegrationConfig> {
+export function patchIntegrationConfig(matchId: string, body: Partial<Record<"asr" | "tts" | "voice_presets", unknown>>): Promise<IntegrationConfig> {
   return patch<IntegrationConfig>(`/api/matches/${matchId}/integration-config`, body);
 }
 
@@ -111,8 +111,8 @@ export function getPreflightReport(matchId: string): Promise<PreflightReport> {
   return request<PreflightReport>(`/api/matches/${matchId}/preflight-report`);
 }
 
-export function probeTts(matchId: string, text = "人机辩论赛语音合成自检。"): Promise<TTSProbeResult> {
-  return post<TTSProbeResult>(`/api/matches/${matchId}/speech/tts/probe`, { text });
+export function probeTts(matchId: string, text = "人机辩论赛语音合成自检。", voicePresetId = ""): Promise<TTSProbeResult> {
+  return post<TTSProbeResult>(`/api/matches/${matchId}/speech/tts/probe`, { text, voice_preset_id: voicePresetId });
 }
 
 export function probeAsr(
@@ -274,6 +274,22 @@ export async function uploadSpeakerImage(matchId: string, speakerId: string, fil
   return body.data;
 }
 
+export async function uploadMatchImage(matchId: string, kind: "title" | "organizer", file: File): Promise<MatchSnapshot> {
+  const token = authTokenForCurrentPage();
+  const form = new FormData();
+  form.set("file", file, file.name);
+  const response = await fetch(`${apiBase}/api/matches/${matchId}/image/${kind}`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: form
+  });
+  const body = (await response.json()) as ApiResponse<MatchSnapshot>;
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.error?.message ?? `上传失败：${response.status}`);
+  }
+  return body.data;
+}
+
 /** Edit/correct a past speech (transcript) segment; edited text flows into future agent debate_history. */
 export function patchSpeech(matchId: string, speechId: string, body: { text?: string; content_final?: string; valid?: boolean; reason?: string }): Promise<MatchSnapshot> {
   return patch<MatchSnapshot>(`/api/matches/${matchId}/speeches/${speechId}`, body);
@@ -293,6 +309,15 @@ export function websocketUrl(matchId: string, lastSeq: number, channel: string, 
   const token = authTokenForRole(channel === "speaker" ? "speaker" : channel === "admin" ? "admin" : channel === "host" ? "host" : "screen", speakerId);
   if (token) params.set("token", token);
   return `${base}/ws/matches/${matchId}?${params.toString()}`;
+}
+
+export function ttsLiveWsUrl(matchId: string, speechId: string, taskId: string, sentenceIdx: number): string {
+  const explicit = import.meta.env.VITE_WS_BASE as string | undefined;
+  const base = explicit || `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
+  const params = new URLSearchParams();
+  const token = authTokenForRole("screen");
+  if (token) params.set("token", token);
+  return `${base}/ws/tts-live/${matchId}/${speechId}/${taskId}/${sentenceIdx}?${params.toString()}`;
 }
 
 export type AuthRole = "admin" | "host" | "screen" | "speaker";

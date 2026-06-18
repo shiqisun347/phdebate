@@ -104,6 +104,38 @@ def test_rtasr_gateway_recognize_collects_final_text():
     assert ws.sent_json[-1] == {"end": True}
 
 
+def test_rtasr_stream_session_reports_cumulative_text_across_segments():
+    ws = FakeRTASRWebSocket(
+        [
+            _result("各位", False),
+            _result("各位评委大家好", True),
+            _result("我方", False),
+            _result("我方认为编程思维更重要", True),
+        ]
+    )
+    gateway = XfyunRTASRGateway(credentials=CREDS, url="wss://office-api-ast-dx.iflyaisol.com/", connect=_connect_factory(ws))
+    partials = []
+    finals = []
+
+    async def run_stream():
+        session = await gateway.open_stream(
+            on_partial=lambda text, latency, chunk: partials.append(text),
+            on_final=lambda text, latency, chunk: finals.append(text),
+        )
+        await session.send_audio(b"\x00" * 1280)
+        return await session.finish()
+
+    result = asyncio.run(run_stream())
+
+    full = "各位评委大家好我方认为编程思维更重要"
+    # 历史 bug：每句 final 只上报自身文本，整段发言最终只剩最后一句（如只剩一个"嗯"）。
+    # 修复后：流结束统一回调一次 final，且为累计全文。
+    assert result.text == full
+    assert finals == [full]
+    assert partials[-1] == full
+    assert "各位评委大家好我方" in partials
+
+
 # --- super smart-tts schema ---
 
 def test_build_super_tts_frame_uses_header_parameter_payload():

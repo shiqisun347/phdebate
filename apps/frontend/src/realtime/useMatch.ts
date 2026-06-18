@@ -57,6 +57,9 @@ export function useMatch(matchId: string, channel: string, speakerId?: string) {
           }
           lastSeqRef.current = message.seq;
           setLastEvent(message);
+          // 收到任何实时事件都重新拉取快照，否则 UI（实时辩论过程、当前发言、计时、
+          // 流式转写等依赖 snapshot 的部分）只会在手动刷新时更新。事件本身只更新
+          // lastEvent，快照不会自动跟进。
           await refresh();
         };
       } catch (err) {

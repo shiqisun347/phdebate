@@ -106,6 +106,36 @@ def test_tts_gateway_synthesizes_audio_with_fake_websocket() -> None:
     assert captured["kwargs"]["open_timeout"] == 8
 
 
+def test_super_tts_gateway_reports_licc_limit_without_switching_voice(monkeypatch) -> None:
+    socket = FakeWebSocket([{"header": {"code": 11200, "message": "LiccCheck failed, unauthenticated, err: licc limit"}}])
+    sent_frames = []
+
+    def fake_connect(_url, **_kwargs):
+        original_send = socket.send
+
+        async def capture_send(payload):
+            await original_send(payload)
+            sent_frames.append(json.loads(payload))
+
+        socket.send = capture_send
+        return socket
+
+    monkeypatch.setenv("XFYUN_TTS_VOICE", "x7_xinchang_pro")
+    gateway = XfyunTTSGateway(
+        credentials=XfyunCredentials(app_id="appid", api_key="apikey", api_secret="secret"),
+        url="wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6",
+        connect=fake_connect,
+    )
+
+    with pytest.raises(XfyunGatewayError) as exc:
+        asyncio.run(gateway.synthesize("测试语音"))
+
+    assert exc.value.code == 11200
+    assert "License 校验失败" in exc.value.message
+    assert "未切换发音人" in exc.value.message
+    assert [frame["parameter"]["tts"]["vcn"] for frame in sent_frames] == ["x7_xinchang_pro"]
+
+
 def test_asr_gateway_recognizes_audio_with_fake_websocket() -> None:
     captured = {}
 

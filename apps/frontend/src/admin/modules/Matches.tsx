@@ -1,13 +1,13 @@
 import * as React from "react";
-import { Trophy, Plus, Trash2, Check, ArrowRight, ArrowLeft, Pencil, Star } from "lucide-react";
+import { Trophy, Plus, Trash2, Check, ArrowRight, ArrowLeft, Pencil, Star, Type, Image as ImageIcon, Upload } from "lucide-react";
 import { Button, Card, CardContent, Badge, Input, Label, Spinner, EmptyState, Separator, Switch } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
 import { FlowDiagram } from "../ui/FlowDiagram";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
-import { listMatches, switchMatch, deleteMatch, post, patch, listRulesets } from "../../api/client";
+import { listMatches, switchMatch, deleteMatch, post, patch, listRulesets, uploadMatchImage } from "../../api/client";
 import { STATUS_LABELS } from "../lib/labels";
-import type { MatchListEntry, Ruleset } from "../../types/contracts";
+import type { BrandDisplay, MatchListEntry, Ruleset } from "../../types/contracts";
 
 export function Matches() {
   const { matchList, refresh, refreshList, snapshot } = useAdminData();
@@ -285,7 +285,7 @@ function CreateWizard({ previousActiveId, onClose, onDone }: { previousActiveId:
 }
 
 function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
-  const { snapshot, matchId } = useAdminData();
+  const { snapshot, matchId, refresh } = useAdminData();
   const toast = useToast();
   const m = snapshot!.match;
   const [base, setBase] = React.useState<Base>({
@@ -296,13 +296,15 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     negative_position: m.negative_position,
     venue: m.venue,
   });
+  const [titleDisplay, setTitleDisplay] = React.useState<BrandDisplay>(m.title_display ?? "text");
+  const [organizerDisplay, setOrganizerDisplay] = React.useState<BrandDisplay>(m.organizer_display ?? "text");
   const [saving, setSaving] = React.useState(false);
   const setB = <K extends keyof Base>(k: K, v: Base[K]) => setBase((p) => ({ ...p, [k]: v }));
 
   async function save() {
     setSaving(true);
     try {
-      await patch(`/api/matches/${matchId}`, base);
+      await patch(`/api/matches/${matchId}`, { ...base, title_display: titleDisplay, organizer_display: organizerDisplay });
       toast("已保存", "success");
       await onSaved();
     } catch (err) {
@@ -312,17 +314,47 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     }
   }
 
+  async function uploadImage(kind: "title" | "organizer", file: File) {
+    try {
+      await uploadMatchImage(matchId, kind, file);
+      if (kind === "title") setTitleDisplay("image");
+      else setOrganizerDisplay("image");
+      await refresh();
+      toast("图片已上传", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "上传失败", "error");
+    }
+  }
+
   return (
     <Dialog open onClose={onClose} size="lg">
-      <DialogHeader title="编辑比赛基础信息" description="仅当前比赛可编辑" onClose={onClose} />
+      <DialogHeader title="编辑比赛基础信息" description="仅当前比赛可编辑，保存后实时同步到大屏" onClose={onClose} />
       <DialogBody>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="比赛名称"><Input value={base.title} onChange={(e) => setB("title", e.target.value)} /></Field>
-          <Field label="主办机构"><Input value={base.organizer} onChange={(e) => setB("organizer", e.target.value)} /></Field>
+          <BrandField
+            label="比赛名称"
+            hint="显示于大屏左上角"
+            mode={titleDisplay}
+            onModeChange={setTitleDisplay}
+            text={base.title}
+            onTextChange={(v) => setB("title", v)}
+            imageUrl={m.title_image_url}
+            onUpload={(file) => uploadImage("title", file)}
+          />
+          <BrandField
+            label="主办机构"
+            hint="显示于大屏右上角"
+            mode={organizerDisplay}
+            onModeChange={setOrganizerDisplay}
+            text={base.organizer}
+            onTextChange={(v) => setB("organizer", v)}
+            imageUrl={m.organizer_image_url}
+            onUpload={(file) => uploadImage("organizer", file)}
+          />
           <Field label="辩题"><Input value={base.topic} onChange={(e) => setB("topic", e.target.value)} /></Field>
           <Field label="场地"><Input value={base.venue} onChange={(e) => setB("venue", e.target.value)} /></Field>
-          <Field label="正方立场"><Input value={base.affirmative_position} onChange={(e) => setB("affirmative_position", e.target.value)} /></Field>
-          <Field label="反方立场"><Input value={base.negative_position} onChange={(e) => setB("negative_position", e.target.value)} /></Field>
+          <Field label="正方立场" hint="同步到大屏正方立场"><Input value={base.affirmative_position} onChange={(e) => setB("affirmative_position", e.target.value)} /></Field>
+          <Field label="反方立场" hint="同步到大屏反方立场"><Input value={base.negative_position} onChange={(e) => setB("negative_position", e.target.value)} /></Field>
         </div>
       </DialogBody>
       <DialogFooter>
@@ -330,6 +362,77 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
         <Button onClick={save} loading={saving}>保存</Button>
       </DialogFooter>
     </Dialog>
+  );
+}
+
+function BrandField({
+  label,
+  hint,
+  mode,
+  onModeChange,
+  text,
+  onTextChange,
+  imageUrl,
+  onUpload,
+}: {
+  label: string;
+  hint?: string;
+  mode: BrandDisplay;
+  onModeChange: (mode: BrandDisplay) => void;
+  text: string;
+  onTextChange: (value: string) => void;
+  imageUrl?: string;
+  onUpload: (file: File) => void | Promise<void>;
+}) {
+  const fileRef = React.useRef<HTMLInputElement>(null);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label>{label}</Label>
+        <div className="inline-flex overflow-hidden rounded-md border border-border text-xs">
+          <button
+            type="button"
+            onClick={() => onModeChange("text")}
+            className={`flex items-center gap-1 px-2 py-1 ${mode === "text" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+          >
+            <Type className="size-3" /> 文本
+          </button>
+          <button
+            type="button"
+            onClick={() => onModeChange("image")}
+            className={`flex items-center gap-1 px-2 py-1 ${mode === "image" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+          >
+            <ImageIcon className="size-3" /> 图片
+          </button>
+        </div>
+      </div>
+      {mode === "text" ? (
+        <Input value={text} onChange={(e) => onTextChange(e.target.value)} />
+      ) : (
+        <div className="space-y-2 rounded-md border border-border p-2">
+          {imageUrl ? (
+            <img src={imageUrl} alt={label} className="max-h-16 rounded object-contain" />
+          ) : (
+            <p className="text-xs text-muted-foreground">尚未上传图片，将回退为文本显示。</p>
+          )}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void onUpload(file);
+              e.target.value = "";
+            }}
+          />
+          <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}>
+            <Upload /> {imageUrl ? "更换图片" : "上传图片"}
+          </Button>
+        </div>
+      )}
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
   );
 }
 

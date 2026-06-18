@@ -5,25 +5,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from app.services.integration_config import integration_config
 from app.services.xfyun_adapter import credentials_from_env, xfyun_auth_preview
 
 
 def build_speech_diagnostics(audio_root: Path) -> Dict[str, Any]:
-    asr = _xfyun_component("asr", "XFYUN_ASR_URL")
+    asr = _component("asr")
     asr["runtime_config"] = _asr_runtime_config()
-    tts = _xfyun_component("tts", "XFYUN_TTS_URL")
+    tts = _component("tts")
     archive = _audio_archive_status(audio_root)
     overall_status = _overall_status(asr, tts, archive)
     return {
         "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "overall_status": overall_status,
-        "provider": "xfyun" if asr["configured"] or tts["configured"] else "mock",
+        "provider": {"asr": asr["provider"], "tts": tts["provider"]},
         "asr": asr,
         "tts": tts,
         "audio_archive": archive,
-        "realtime_asr": _feature_status("PHDEBATE_ASR_REALTIME", asr, "PCM/L16 分片会进入讯飞 ASR 长连接", "PCM/L16 分片只归档和补识别"),
+        "realtime_asr": _feature_status("PHDEBATE_ASR_REALTIME", asr, "PCM/L16 分片会进入当前 ASR 服务商长连接", "PCM/L16 分片只归档和补识别"),
         "auto_recognize": _auto_recognize_status(asr),
-        "formal_tts": _feature_status("PHDEBATE_TTS_FORMAL", tts, "AI 正式发言会调用讯飞 TTS 并归档音频", "AI 正式发言仅展示文字/模拟 TTS 状态"),
+        "formal_tts": _feature_status("PHDEBATE_TTS_FORMAL", tts, "AI 正式发言会调用当前 TTS 服务商并归档音频", "AI 正式发言仅展示文字/模拟 TTS 状态"),
         "fallbacks": {
             "mock_agent": True,
             "manual_asr_controls": True,
@@ -67,6 +68,74 @@ def _xfyun_component(component: str, url_var: str) -> Dict[str, Any]:
         "missing": missing,
         "url": _redact_url(url),
         "auth_ready": auth_preview is not None,
+        "auth_preview": auth_preview,
+        "detail": "讯飞配置完整" if status == "ready" else f"缺少 {', '.join(missing)}",
+    }
+
+
+def _component(component: str) -> Dict[str, Any]:
+    section = integration_config.active_section(component)
+    provider = str(section.get("provider") or "alicloud")
+    if not section.get("enabled"):
+        return {
+            "component": component,
+            "provider": provider,
+            "status": "disabled",
+            "configured": [],
+            "missing": [],
+            "url": _redact_url(str(section.get("endpoint") or "")),
+            "auth_ready": False,
+            "detail": f"{component.upper()} 未启用",
+        }
+    if provider == "xfyun":
+        return _xfyun_component_from_section(component, section)
+    if provider == "alicloud":
+        secrets = (section.get("secrets") or {}).get("alicloud") or {}
+        api_key_ready = bool(str(secrets.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")).strip())
+        missing = [] if api_key_ready else ["DASHSCOPE_API_KEY / alicloud.api_key"]
+        settings = section.get("settings") or {}
+        return {
+            "component": component,
+            "provider": "alicloud",
+            "status": "ready" if api_key_ready else "missing_config",
+            "configured": ["alicloud.api_key"] if api_key_ready else [],
+            "missing": missing,
+            "url": _redact_url(str(section.get("endpoint") or "")),
+            "auth_ready": api_key_ready,
+            "model": settings.get("model"),
+            "detail": "阿里云 DashScope 配置完整" if api_key_ready else "缺少阿里云 DashScope API Key",
+        }
+    return {
+        "component": component,
+        "provider": provider,
+        "status": "missing_config",
+        "configured": [],
+        "missing": [f"{component}.provider"],
+        "url": _redact_url(str(section.get("endpoint") or "")),
+        "auth_ready": False,
+        "detail": f"未知语音服务商：{provider}",
+    }
+
+
+def _xfyun_component_from_section(component: str, section: Dict[str, Any]) -> Dict[str, Any]:
+    secrets = section.get("secrets") or {}
+    secret = secrets.get("xfyun") if isinstance(secrets.get("xfyun"), dict) else secrets
+    names = ["app_id", "api_key", "api_secret"]
+    configured = [name for name in names if str(secret.get(name) or "").strip()]
+    missing = [f"xfyun.{name}" for name in names if name not in configured]
+    if not str(section.get("endpoint") or "").strip():
+        missing.append(f"{component}.endpoint")
+    status = "ready" if not missing else "missing_config"
+    url = str(section.get("endpoint") or "")
+    auth_preview = xfyun_auth_preview(url) if status == "ready" and credentials_from_env() else None
+    return {
+        "component": component,
+        "provider": "xfyun",
+        "status": status,
+        "configured": configured,
+        "missing": missing,
+        "url": _redact_url(url),
+        "auth_ready": status == "ready",
         "auth_preview": auth_preview,
         "detail": "讯飞配置完整" if status == "ready" else f"缺少 {', '.join(missing)}",
     }
@@ -118,7 +187,7 @@ def _next_steps(asr: Dict[str, Any], tts: Dict[str, Any], archive: Dict[str, Any
     steps: List[str] = []
     if asr["missing"] or tts["missing"]:
         missing = sorted(set(asr["missing"] + tts["missing"]))
-        steps.append(f"补齐讯飞环境变量：{', '.join(missing)}。")
+        steps.append(f"补齐语音服务配置：{', '.join(missing)}。")
     if archive["status"] != "ready":
         steps.append("修复音频归档目录权限或设置 PHDEBATE_AUDIO_DIR 到可写路径。")
     if not steps:

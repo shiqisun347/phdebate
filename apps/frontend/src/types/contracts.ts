@@ -6,13 +6,19 @@ export type ScreenScene = "idle" | "live" | "paused" | "judge_commentary" | "jud
 export type LiveMode = "single" | "free" | "prep";
 export type AudioOutputMode = "host" | "admin" | "screen" | "off";
 
+export type BrandDisplay = "text" | "image";
+
 export interface MatchInfo {
   id: string;
   title: string;
+  title_display: BrandDisplay;
+  title_image_url: string;
   topic: string;
   affirmative_position: string;
   negative_position: string;
   organizer: string;
+  organizer_display: BrandDisplay;
+  organizer_image_url: string;
   venue: string;
   status: MatchStatus;
   screen_scene: ScreenScene;
@@ -52,6 +58,7 @@ export interface Speaker {
   image_url?: string;
   agent_config_id?: string | null;
   agent_endpoint?: string;
+  tts_voice_preset_id?: string | null;
   mic_permission?: "granted" | "denied" | "prompt" | "unknown" | null;
   device_label?: string | null;
   last_seen_at?: string | null;
@@ -96,6 +103,17 @@ export interface Speech {
   started_at: string | null;
   paused_at?: string | null;
   ended_at?: string | null;
+  tts_task_id?: string | null;
+  tts_expected_sentences?: number | null;
+  tts_created_sentences?: number | null;
+  tts_streaming_sentences?: number | null;
+  tts_ready_sentences?: number | null;
+  tts_playing_sentence_idx?: number | null;
+  tts_played_sentences?: number | null;
+  tts_skipped_sentences?: number[] | null;
+  tts_last_playback_status?: string | null;
+  tts_last_progress_at?: string | null;
+  tts_resume_requested_at?: string | null;
 }
 
 export interface TranscriptSegment {
@@ -140,6 +158,7 @@ export interface AudioAsset {
   chunks?: Array<{
     chunk_index: number;
     file_path: string;
+    audio_url?: string;
     size_bytes: number;
     mime_type: string;
     duration_ms: number | null;
@@ -238,7 +257,15 @@ export interface AudienceVotePayload {
 
 export interface SpeechServiceState {
   asr: { status: string; latency_ms: number; active_sessions?: number; detail?: string };
-  tts: { status: string; latency_ms: number; queue_size?: number; speaker_id?: string | null; detail?: string; degraded_to?: string };
+  tts: {
+    status: string;
+    latency_ms: number;
+    queue_size?: number;
+    speaker_id?: string | null;
+    detail?: string;
+    degraded_to?: string;
+    last_progress_at?: string;
+  };
   screen: { status: string };
   consoles: {
     online: number;
@@ -256,7 +283,7 @@ export interface SpeechServiceState {
 export interface SpeechDiagnostics {
   checked_at: string;
   overall_status: "ready" | "mock_fallback" | "failed" | string;
-  provider: "xfyun" | "mock" | string;
+  provider: "xfyun" | "alicloud" | "mock" | string | { asr?: string; tts?: string };
   asr: SpeechDiagnosticsComponent;
   tts: SpeechDiagnosticsComponent;
   audio_archive: {
@@ -291,6 +318,7 @@ export interface SpeechDiagnostics {
 
 export interface SpeechDiagnosticsComponent {
   component: "asr" | "tts" | string;
+  provider?: string;
   status: "ready" | "missing_config" | string;
   configured: string[];
   missing: string[];
@@ -473,22 +501,54 @@ export interface IntegrationSecretStatus {
   redacted: string;
 }
 
+export type SpeechProvider = "xfyun" | "alicloud";
+
+export interface IntegrationSecretGroup {
+  app_id?: IntegrationSecretStatus;
+  api_key?: IntegrationSecretStatus;
+  api_secret?: IntegrationSecretStatus;
+  workspace_id?: IntegrationSecretStatus;
+}
+
 export interface IntegrationSection {
   enabled: boolean;
-  provider: string;
+  provider: SpeechProvider | string;
   endpoint: string;
   lang?: string;
   voice?: string;
+  settings?: Record<string, unknown>;
   secrets: {
     app_id: IntegrationSecretStatus;
     api_key: IntegrationSecretStatus;
     api_secret: IntegrationSecretStatus;
+    xfyun?: IntegrationSecretGroup;
+    alicloud?: IntegrationSecretGroup;
   };
+}
+
+export interface VoicePreset {
+  id: string;
+  name: string;
+  provider: SpeechProvider | string;
+  model: string;
+  voice: string;
+  response_format: string;
+  mode: string;
+  language_type: string;
+  enabled: boolean;
+  is_default: boolean;
+  description?: string;
+  sample_rate?: number;
+  speech_rate?: number;
+  volume?: number;
+  pitch_rate?: number;
+  instructions?: string;
 }
 
 export interface IntegrationConfig {
   asr: IntegrationSection;
   tts: IntegrationSection;
+  voice_presets: VoicePreset[];
 }
 
 export interface MatchSnapshot {

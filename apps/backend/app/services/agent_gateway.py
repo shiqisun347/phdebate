@@ -122,6 +122,14 @@ class AgentGateway:
 
         messages = self._build_openai_messages(payload)
         task_id = payload.get("task_id", "")
+        # Deterministic per-speech ceiling derived from the time limit + TTS rate so the
+        # spoken reply stays within the phase clock; falls back to a safe default.
+        try:
+            max_tokens = int(payload.get("max_token") or 0)
+        except (TypeError, ValueError):
+            max_tokens = 0
+        if max_tokens <= 0:
+            max_tokens = 800
 
         client_kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -133,7 +141,7 @@ class AgentGateway:
             stream = await client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=800,
+                max_tokens=max_tokens,
                 stream=True,
             )
             async for chunk in stream:
@@ -163,6 +171,19 @@ class AgentGateway:
         target_chars = payload.get("target_chars", 400)
         debate_history: list = payload.get("debate_history", [])
 
+        if payload.get("task_type") == "self_intro":
+            system_prompt = (
+                f"你是即将参加辩论赛的 AI 辩手【{debater_name}】，担任{holder}{debate_position}。"
+                f"本场辩题：{topic}。"
+                f"请做一段简短的赛前自我介绍，介绍你的身份与风格，可表达对本场比赛的期待，"
+                f"目标 {target_chars} 字以内，语气自信友好，用中文直接开始，不要重复辩题全文，不要展开论证。"
+            )
+            user_content = "现在请你做赛前自我介绍。"
+            return [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ]
+
         history_text = ""
         for stage in debate_history:
             stage_name = stage.get("stage", "")
@@ -187,6 +208,7 @@ class AgentGateway:
         ]
 
     async def _stream_http_speech(self, endpoint: str, payload: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+        task_id = payload.get("task_id", "")
         timeout = httpx.Timeout(self.connect_timeout_ms / 1000, read=self.read_timeout_ms / 1000)
         try:
             async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
@@ -198,36 +220,73 @@ class AgentGateway:
                 ) as response:
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "")
-                    if "text/event-stream" not in content_type:
-                        data = response.json()
-                        yield self._event_from_json_response(data, payload["task_id"])
+
+                    if "text/event-stream" in content_type:
+                        # SSE stream — supports both phdebate format (type:delta/final)
+                        # and OpenAI-compatible format (choices[].delta.content).
+                        openai_content = ""
+                        got_phdebate_final = False
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line or line.startswith(":"):
+                                continue
+                            if not line.startswith("data:"):
+                                continue
+                            raw = line.removeprefix("data:").strip()
+                            if raw == "[DONE]":
+                                break
+                            try:
+                                event = json.loads(raw)
+                            except json.JSONDecodeError as exc:
+                                raise AgentGatewayError(
+                                    "agent_protocol_error",
+                                    "Agent SSE 返回了非法 JSON。",
+                                    {"raw": raw, "error": str(exc)},
+                                )
+                            # phdebate native error event
+                            if event.get("type") == "error":
+                                error = event.get("error") or {}
+                                raise AgentGatewayError(
+                                    error.get("code", "agent_error"),
+                                    error.get("message", "Agent 返回错误。"),
+                                    {"task_id": event.get("task_id"), "endpoint": endpoint},
+                                )
+                            # OpenAI-compatible SSE chunk
+                            if "choices" in event:
+                                choices = event.get("choices") or []
+                                if choices:
+                                    delta_text = (choices[0].get("delta") or {}).get("content") or ""
+                                    if delta_text:
+                                        openai_content += delta_text
+                                        yield {"type": "delta", "task_id": task_id, "delta": delta_text}
+                                continue
+                            # Custom debate API format: {"delta": {"content": "..."}, ...}
+                            if isinstance(event.get("delta"), dict):
+                                delta_text = str(event["delta"].get("content") or "")
+                                if delta_text:
+                                    openai_content += delta_text
+                                    yield {"type": "delta", "task_id": task_id, "delta": delta_text}
+                                continue
+                            # phdebate native event — pass through
+                            if event.get("type") == "final":
+                                got_phdebate_final = True
+                            yield event
+                        # Emit final event for formats that end with [DONE] (no explicit final)
+                        if openai_content and not got_phdebate_final:
+                            yield {"type": "final", "task_id": task_id, "content": openai_content, "usage": {}}
                         return
 
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        if not line or line.startswith(":"):
-                            continue
-                        if not line.startswith("data:"):
-                            continue
-                        raw = line.removeprefix("data:").strip()
-                        if raw == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(raw)
-                        except json.JSONDecodeError as exc:
-                            raise AgentGatewayError(
-                                "agent_protocol_error",
-                                "Agent SSE 返回了非法 JSON。",
-                                {"raw": raw, "error": str(exc)},
-                            )
-                        if event.get("type") == "error":
-                            error = event.get("error") or {}
-                            raise AgentGatewayError(
-                                error.get("code", "agent_error"),
-                                error.get("message", "Agent 返回错误。"),
-                                {"task_id": event.get("task_id"), "endpoint": endpoint},
-                            )
-                        yield event
+                    if "application/json" in content_type or not content_type:
+                        data = await response.aread()
+                        yield self._event_from_json_response(json.loads(data), task_id)
+                        return
+
+                    # Plain text / unknown streaming — accumulate and emit as single speech
+                    raw_content = await response.aread()
+                    text = raw_content.decode("utf-8", errors="replace").strip()
+                    if text:
+                        yield {"type": "delta", "task_id": task_id, "delta": text}
+                        yield {"type": "final", "task_id": task_id, "content": text, "usage": {}}
         except AgentGatewayError:
             raise
         except httpx.HTTPError as exc:

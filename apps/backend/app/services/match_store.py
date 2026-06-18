@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import time
 import zipfile
 from copy import deepcopy
@@ -18,19 +19,44 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.services.agent_gateway import AgentGateway, AgentGatewayError
 from app.services.integration_config import integration_config
+from app.services.speech_gateway import SpeechGatewayError, normalize_tts_text, select_asr_gateway, select_tts_gateway
 from app.services.sqlite_repo import SQLiteRepository, project_root
-from app.services.xfyun_gateway import XfyunASRGateway, XfyunGatewayError, XfyunTTSGateway
+from app.services.tts_live import tts_live_manager
+from app.services.xfyun_gateway import TTSResult, XfyunASRGateway, XfyunGatewayError, XfyunTTSGateway
 
 
 def _select_asr_gateway():
-    """Pick the RTASR (极速版) gateway for the iFlytek real-time endpoint, otherwise the
-    legacy IAT gateway. References the module-level XfyunASRGateway so tests can monkeypatch it."""
-    url = os.getenv("XFYUN_ASR_URL", "").strip()
-    from app.services.xfyun_rtasr import XfyunRTASRGateway, is_rtasr_url
+    return select_asr_gateway().gateway
 
-    if is_rtasr_url(url):
-        return XfyunRTASRGateway(url=url)
-    return XfyunASRGateway(url=url)
+
+SpeechProviderError = (SpeechGatewayError, XfyunGatewayError)
+
+
+def _recent_transcript_limit() -> int:
+    """Max distinct speeches kept in the in-snapshot transcript (and thus in
+    debate_history). Large enough to hold a full debate; bounded for snapshot size."""
+    raw = os.getenv("PHDEBATE_RECENT_TRANSCRIPT_LIMIT", "100").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 100
+    return max(12, min(500, value))
+
+
+_RECENT_TRANSCRIPT_LIMIT = _recent_transcript_limit()
+
+
+def _speech_error_message(exc: Exception) -> str:
+    return str(getattr(exc, "message", None) or exc)
+
+
+def _speech_error_code(exc: Exception, fallback: str) -> str:
+    code = getattr(exc, "code", None)
+    return str(code) if code is not None else fallback
+
+
+def _speech_error_provider(exc: Exception, fallback: str = "") -> str:
+    return str(getattr(exc, "provider", "") or fallback)
 
 
 class MatchStateError(Exception):
@@ -78,6 +104,7 @@ class MatchStore:
             self.snapshot = loaded
             self.seq = int(loaded.get("last_seq", 0))
             self._ensure_runtime_fields()
+            self._persist_snapshot()  # persist any migrations applied during normalization
             self.events = self.repo.load_events(loaded["match"]["id"])
         else:
             self.reset_demo()
@@ -99,10 +126,14 @@ class MatchStore:
             "match": {
                 "id": "match_001",
                 "title": "中科院计算所第一届人机辩论赛",
+                "title_display": "text",
+                "title_image_url": "",
                 "topic": "AI 时代，我们更应该培养编程思维 / 提问思维",
                 "affirmative_position": "更应该培养编程思维",
                 "negative_position": "更应该培养提问思维",
                 "organizer": "中国科学院计算技术研究所",
+                "organizer_display": "image",
+                "organizer_image_url": "/assets/logo-full-white.png",
                 "venue": "现场会场",
                 "status": "running",
                 "screen_scene": "idle",
@@ -409,11 +440,43 @@ class MatchStore:
     async def get_snapshot(self) -> Dict[str, Any]:
         async with self._lock:
             self._refresh_clocks()
+            self._refresh_tts_runtime_status()
             snap = deepcopy(self.snapshot)
             snap["last_seq"] = self.seq
             self._sanitize_snapshot(snap)
             snap["xiaoqi"] = self._xiaoqi_public()
             return snap
+
+    def _refresh_tts_runtime_status(self) -> None:
+        speech = self.snapshot.get("current_speech") or {}
+        task_id = speech.get("tts_task_id")
+        if speech.get("source") != "agent_text" or speech.get("state") == "ended" or not task_id:
+            return
+        tts = self.snapshot.get("speech_service", {}).setdefault("tts", {})
+        if tts.get("status") not in {None, "", "idle"} and tts.get("speaker_id") == speech.get("speaker_id"):
+            return
+        created = int(speech.get("tts_created_sentences") or 0)
+        ready = int(speech.get("tts_ready_sentences") or 0)
+        played = int(speech.get("tts_played_sentences") or 0)
+        if created <= 0 and ready <= 0 and played <= 0:
+            return
+        status = "playing" if played > 0 or speech.get("state") == "speaking" else "synthesizing"
+        if status == "playing":
+            queue_size = max(0, int(speech.get("tts_expected_sentences") or created or ready or 1) - played)
+            detail = f"screen playing segment {max(1, int(speech.get('tts_playing_sentence_idx') or 0) + 1)}/{speech.get('tts_expected_sentences') or created or ready or '?'}"
+        else:
+            queue_size = max(1, created - ready)
+            detail = f"TTS archived {ready}/{created or '?'} segments"
+        tts.update(
+            {
+                "status": status,
+                "latency_ms": int(tts.get("latency_ms") or 0),
+                "queue_size": queue_size,
+                "speaker_id": speech.get("speaker_id"),
+                "detail": detail,
+                "last_progress_at": speech.get("tts_last_progress_at") or iso_now(),
+            }
+        )
 
     @staticmethod
     def _xiaoqi_public() -> Dict[str, Any]:
@@ -722,14 +785,28 @@ class MatchStore:
                 new_snapshot["match"]["title"] = title
             if topic:
                 new_snapshot["match"]["topic"] = topic
+            # 新比赛默认用文本标题（不沿用上一场的图片标题）；主办机构图片可继承沿用。
+            new_snapshot["match"]["title_display"] = "text"
+            new_snapshot["match"]["title_image_url"] = ""
             for key in (
                 "affirmative_position",
                 "negative_position",
                 "organizer",
                 "venue",
+                "title_display",
+                "title_image_url",
+                "organizer_display",
+                "organizer_image_url",
             ):
                 if key in fields:
                     new_snapshot["match"][key] = fields.get(key)
+            for field_key, side in (("affirmative_position", "affirmative"), ("negative_position", "negative")):
+                value = str(fields.get(field_key) or "").strip()
+                if not value:
+                    continue
+                for team in new_snapshot.get("teams", []):
+                    if team.get("side") == side:
+                        team["position"] = value
             ruleset_id = str(fields.get("ruleset_id") or "").strip()
             if ruleset_id:
                 from app.services.ruleset_store import ruleset_store
@@ -794,7 +871,13 @@ class MatchStore:
         payload: Dict[str, Any],
         actor_type: str = "system",
         actor_id: Optional[str] = None,
+        *,
+        persist: bool = True,
+        sync_structured: bool = True,
     ) -> Dict[str, Any]:
+        # persist=False 仅用于高频瞬态事件（如 agent.speech.delta）：跳过整张快照落盘以避免锁拥塞。
+        # sync_structured=False 用于高频但需要落盘的事件（如 tts.sentence_ready）：仍写 app_state 实时
+        # 快照，但跳过昂贵的结构化镜像同步（在关键节点统一同步）。事件仍记录、仍广播。
         async with self._lock:
             self.seq += 1
             match_id = self.snapshot["match"]["id"]
@@ -813,7 +896,8 @@ class MatchStore:
             self.events = self.events[-200:]
             self.snapshot["last_seq"] = self.seq
             self.repo.save_event(event)
-            self._persist_snapshot()
+            if persist:
+                self._persist_snapshot(sync_structured=sync_structured)
             self._save_audit_for_event(event)
             await self._broadcast({"type": event_type, **event})
             return event
@@ -847,18 +931,38 @@ class MatchStore:
         async with self._lock:
             allowed = {
                 "title",
+                "title_display",
+                "title_image_url",
                 "topic",
                 "affirmative_position",
                 "negative_position",
                 "organizer",
+                "organizer_display",
+                "organizer_image_url",
                 "venue",
             }
             for key, value in fields.items():
                 if key in allowed:
+                    if key in {"title_display", "organizer_display"}:
+                        value = "image" if str(value) == "image" else "text"
                     self.snapshot["match"][key] = value
+            self._sync_team_positions(fields)
             self.snapshot["match"]["updated_at"] = iso_now()
             self._persist_snapshot()
         return await self.emit("match.updated", {"fields": sorted(set(fields) & allowed)}, "admin")
+
+    def _sync_team_positions(self, fields: Dict[str, Any]) -> None:
+        """Keep each team's `position`（大屏展示的立场）in sync with the match-level立场."""
+        mapping = {"affirmative_position": "affirmative", "negative_position": "negative"}
+        for field_key, side in mapping.items():
+            if field_key not in fields:
+                continue
+            value = str(fields.get(field_key) or "").strip()
+            if not value:
+                continue
+            for team in self.snapshot.get("teams", []):
+                if team.get("side") == side:
+                    team["position"] = value
 
     async def set_audio_output(self, mode: str, reason: str = "manual", actor_type: str = "host") -> Dict[str, Any]:
         next_mode = self._normalize_audio_output_mode(mode)
@@ -897,7 +1001,7 @@ class MatchStore:
     async def update_speaker(self, speaker_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             speaker = self._find_speaker(speaker_id)
-            allowed = {"name", "speaker_type", "agent_config_id", "image_url"}
+            allowed = {"name", "speaker_type", "agent_config_id", "image_url", "tts_voice_preset_id"}
             managed_agent_fields = {"model_name", "model_kind", "agent_endpoint"}
             if managed_agent_fields.intersection(fields):
                 raise MatchStateError(
@@ -928,6 +1032,7 @@ class MatchStore:
                         speaker["model_kind"] = None
                         speaker.pop("agent_config_id", None)
                         speaker.pop("agent_endpoint", None)
+                        speaker.pop("tts_voice_preset_id", None)
                         speaker["status"] = "online"
                         speaker["mic_permission"] = "unknown"
                     else:
@@ -960,6 +1065,25 @@ class MatchStore:
                     self._apply_agent_config_to_speaker(speaker)
                     updated.append(key)
                     continue
+                if key == "tts_voice_preset_id":
+                    if speaker["speaker_type"] != "agent":
+                        speaker.pop("tts_voice_preset_id", None)
+                        continue
+                    preset_id = str(value or "").strip()
+                    if preset_id:
+                        preset = integration_config.voice_preset(preset_id)
+                        provider = str((integration_config.active_section("tts") or {}).get("provider") or "alicloud")
+                        if not preset or not preset.get("enabled") or preset.get("provider") != provider:
+                            raise MatchStateError(
+                                "invalid_tts_voice_preset",
+                                "请选择语音引擎页已启用、且匹配当前 TTS 服务商的音色预设。",
+                                {"speaker_id": speaker_id, "tts_voice_preset_id": preset_id, "provider": provider},
+                            )
+                        speaker["tts_voice_preset_id"] = preset_id
+                    else:
+                        speaker["tts_voice_preset_id"] = None
+                    updated.append(key)
+                    continue
                 speaker[key] = None if value == "" and key in {"model_name", "model_kind"} else value
                 updated.append(key)
 
@@ -977,8 +1101,34 @@ class MatchStore:
     async def update_integration_config(self, body: Dict[str, Any]) -> Dict[str, Any]:
         config = integration_config.update(body or {})
         changed = [kind for kind in ("asr", "tts") if isinstance((body or {}).get(kind), dict)]
+        if isinstance((body or {}).get("voice_presets"), list):
+            changed.append("voice_presets")
+        if "tts" in changed or "voice_presets" in changed:
+            await self._clear_invalid_tts_voice_assignments()
         await self.emit("integration_config.updated", {"sections": changed}, "admin")
         return config
+
+    async def _clear_invalid_tts_voice_assignments(self) -> None:
+        provider = str((integration_config.active_section("tts") or {}).get("provider") or "alicloud")
+        valid_ids = {
+            str(preset.get("id"))
+            for preset in integration_config.voice_presets()
+            if preset.get("enabled") and preset.get("provider") == provider
+        }
+        async with self._lock:
+            changed = False
+            for speaker in self.snapshot.get("speakers", []):
+                if speaker.get("speaker_type") != "agent":
+                    if speaker.pop("tts_voice_preset_id", None) is not None:
+                        changed = True
+                    continue
+                preset_id = str(speaker.get("tts_voice_preset_id") or "").strip()
+                if preset_id and preset_id not in valid_ids:
+                    speaker["tts_voice_preset_id"] = None
+                    changed = True
+            if changed:
+                self.snapshot["match"]["updated_at"] = iso_now()
+                self._persist_snapshot()
 
     async def create_agent_config(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
@@ -1125,10 +1275,32 @@ class MatchStore:
             self._persist_snapshot()
         return await self.emit("screen.scene_changed", {"scene": normalized_scene, "requested_scene": scene, "live_mode": live_mode}, "host")
 
+    def _finalize_current_speech_for_history(self) -> None:
+        """Persist the in-progress speech's text as a FINAL transcript segment before it
+        is abandoned (e.g. host advances the phase mid-speech). Without this, a speech
+        that has already produced text never becomes is_final and is silently dropped
+        from the global debate_history sent to later agents."""
+        speech = self.snapshot.get("current_speech")
+        if not speech:
+            return
+        speaker_id = speech.get("speaker_id")
+        if not speaker_id:
+            return
+        text = (speech.get("content_final") or speech.get("content_partial") or "").strip()
+        if not text:
+            return
+        source = speech.get("source", "agent_text")
+        segment = self._upsert_transcript_segment(speech, speaker_id, text, True, source)
+        if speech.get("kind") == "self_intro":
+            segment["exclude_from_history"] = True
+            segment["kind"] = "self_intro"
+
     async def start_phase(self, phase_id: str) -> Dict[str, Any]:
         async with self._lock:
             self._ensure_match_allows_control("start_phase")
             phase = self._find_phase(phase_id)
+            # 推进环节前，先把上一段（可能仍在播报的）发言定稿进全局历史，避免丢失。
+            self._finalize_current_speech_for_history()
             self.snapshot["current_speech"] = None
             self._clear_flow_state()
             for item in self.snapshot["phases"]:
@@ -1238,6 +1410,7 @@ class MatchStore:
                 "content_final": "",
                 "content_partial": "",
                 "started_at": None,
+                "state": "thinking" if speaker["speaker_type"] == "agent" else "ready",
             }
             self.snapshot["match"]["live_mode"] = "prep" if speaker["speaker_type"] == "agent" else self.snapshot["match"]["live_mode"]
             self._persist_snapshot()
@@ -1290,12 +1463,24 @@ class MatchStore:
                     pass
         return await self.get_snapshot()
 
-    async def run_agent_speech(self, speaker_id: str) -> None:
+    async def run_agent_speech(self, speaker_id: str, mode: str = "speech") -> None:
+        is_self_intro = mode == "self_intro"
         speaker = self._find_speaker(speaker_id)
         if speaker["speaker_type"] != "agent":
             return
-        self._ensure_match_allows_control("run_agent_speech")
-        self._ensure_speaker_allowed_for_current_phase(speaker)
+        # 自我介绍属于赛前动作：比赛通常还是 "ready" 而非 "running"，因此放宽限制，
+        # 只要比赛未结束/未归档即可，且不受当前环节轮次限制。
+        if is_self_intro:
+            status = self.snapshot["match"]["status"]
+            if status in {"finished", "archived"}:
+                raise MatchStateError(
+                    "invalid_state",
+                    "比赛已结束，不能进行自我介绍。",
+                    {"command": "self_introduction", "status": status},
+                )
+        else:
+            self._ensure_match_allows_control("run_agent_speech")
+            self._ensure_speaker_allowed_for_current_phase(speaker)
         config = self._agent_config_for_speaker(speaker)
         if config and not config.get("enabled", True):
             raise MatchStateError(
@@ -1304,13 +1489,24 @@ class MatchStore:
                 {"speaker_id": speaker_id, "agent_config_id": config.get("id")},
             )
 
+        # Finalize any still-in-progress previous speech into history BEFORE building this
+        # request's debate_history, so a speech that was interrupted (e.g. by a free-debate
+        # turn change) is still seen by the next agent. (Phase advances finalize in
+        # start_phase; this covers same-phase / free-debate handovers.)
+        async with self._lock:
+            current = self.snapshot.get("current_speech")
+            if current and current.get("id") and current.get("speaker_id") != speaker_id:
+                self._finalize_current_speech_for_history()
+                self._persist_snapshot()
+
         task_id = f"task_{self.seq + 1}"
         speech_id = f"speech_{self.seq + 1}"
         endpoint = self.agent_gateway.endpoint_for(speaker)
-        payload = self._build_agent_payload(task_id, speech_id, speaker)
+        payload = self._build_self_intro_payload(task_id, speech_id, speaker) if is_self_intro else self._build_agent_payload(task_id, speech_id, speaker)
         endpoint_label = endpoint or "embedded://mock"
         agent_started_at = iso_now()
         agent_started_time = time.perf_counter()
+        tts_enabled = self._tts_formal_enabled()
         self.repo.save_agent_request_started(
             match_id=payload["match_id"],
             task_id=task_id,
@@ -1339,10 +1535,24 @@ class MatchStore:
                 "side": speaker["side"],
                 "turn_index": self._current_turn_index(),
                 "source": "agent_text",
+                "kind": "self_intro" if is_self_intro else "speech",
                 "content_final": "",
                 "content_partial": "",
                 "started_at": None,
+                "state": "thinking",
+                "tts_task_id": task_id if tts_enabled else None,
+                "tts_expected_sentences": None,
+                "tts_skipped_sentences": [],
             }
+            if tts_enabled:
+                self.snapshot["speech_service"]["tts"] = {
+                    "status": "synthesizing",
+                    "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                    "queue_size": 0,
+                    "speaker_id": speaker_id,
+                    "detail": "waiting for first TTS segment",
+                    "last_progress_at": iso_now(),
+                }
             self._set_agent_status(speaker_id, "streaming", "Agent task sent")
             self._persist_snapshot()
 
@@ -1353,18 +1563,27 @@ class MatchStore:
         )
 
         full_text = ""
-        playback_started = False
+        tts_sent_chars = 0
+        tts_sentence_idx = 0
+        tts_sentence_tasks: List[asyncio.Task] = []
+        tts_semaphore = asyncio.Semaphore(self._tts_sentence_concurrency())
+
+        async def synthesize_sentence(sentence: str, sentence_idx: int) -> bool:
+            async with tts_semaphore:
+                return await self._synthesize_sentence_tts(sentence, sentence_idx, task_id, speech_id, speaker)
+
         try:
             async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
                 event_type = event.get("type")
                 if event_type == "delta":
                     delta = event.get("delta", "")
-                    if delta and not playback_started:
-                        await self._start_agent_playback(task_id, speaker)
-                        playback_started = True
                     full_text += delta
                     async with self._lock:
-                        if not self.snapshot.get("current_speech"):
+                        cs = self.snapshot.get("current_speech")
+                        # Stop if this speech was cleared OR replaced by another speech
+                        # (e.g. the host advanced the phase / a new speaker took over) —
+                        # otherwise this task would corrupt the new current_speech.
+                        if not cs or cs.get("id") != speech_id:
                             self.repo.finish_agent_request(
                                 match_id=payload["match_id"],
                                 task_id=task_id,
@@ -1375,7 +1594,14 @@ class MatchStore:
                             )
                             return
                         self.snapshot["current_speech"]["content_partial"] = full_text
-                        self._persist_snapshot()
+                        # 实时把回复流写入实时辩论过程（非定稿段），不必等发言/播报结束。
+                        self._upsert_transcript_segment(
+                            self.snapshot["current_speech"], speaker_id, full_text, False, "agent_text"
+                        )
+                        # 不在每个 delta 落盘整张快照：delta 是高频事件（流式逐字），而 _persist_snapshot
+                        # 要序列化整张 ~157KB 快照并同步结构化表，逐字落盘会把后端锁霸占住，拖慢一切——
+                        # 包括真正驱动出声的 tts.sentence_ready 广播（首句"特别慢"的主因）。内存快照已更新，
+                        # 实时字幕（getMatch 读内存）照常；定稿/分段就绪等关键节点仍会落盘。
                     await self.emit(
                         "agent.speech.delta",
                         {
@@ -1387,7 +1613,38 @@ class MatchStore:
                         },
                         "agent",
                         speaker_id,
+                        persist=False,
                     )
+                    # Kick off TTS for each newly available segment. Prefer full
+                    # sentences, but allow long comma-separated prefixes so the
+                    # first audio can start before the agent finishes a paragraph.
+                    if tts_enabled:
+                        while True:
+                            # Only the very first segment may be cut at a comma to keep
+                            # time-to-first-audio low; everything after is whole-sentence
+                            # so playback stays continuous without mid-sentence breaks.
+                            sentence, new_sent_chars = self._next_tts_sentence(
+                                full_text, tts_sent_chars, allow_soft_break=tts_sentence_idx == 0
+                            )
+                            tts_sent_chars = new_sent_chars  # always advance, even for short/empty
+                            if not sentence:
+                                break
+                            tts_sentence_tasks.append(asyncio.create_task(synthesize_sentence(sentence, tts_sentence_idx)))
+                            tts_sentence_idx += 1
+                            async with self._lock:
+                                speech = self.snapshot.get("current_speech")
+                                if speech and speech.get("id") == speech_id:
+                                    speech["tts_created_sentences"] = tts_sentence_idx
+                                    self.snapshot["speech_service"]["tts"].update(
+                                        {
+                                            "status": "synthesizing",
+                                            "queue_size": max(1, tts_sentence_idx - int(speech.get("tts_ready_sentences") or 0)),
+                                            "speaker_id": speaker_id,
+                                            "detail": f"TTS segment {tts_sentence_idx} queued",
+                                            "last_progress_at": iso_now(),
+                                        }
+                                    )
+                                    self._persist_snapshot()
                     continue
                 if event_type == "final":
                     full_text = event.get("content", full_text)
@@ -1415,30 +1672,67 @@ class MatchStore:
             completed_at=iso_now(),
         )
 
-        if not playback_started:
-            await self._start_agent_playback(task_id, speaker)
+        # 文本生成完成的瞬间就把本段定稿到全局历史（debate_history 依赖 is_final），
+        # 不能等到 TTS 合成/播报结束 —— 否则在 TTS 期间推进到下一环节时，下一位 agent
+        # 的 debate_history 会缺失这段刚说完的发言。自我介绍仍由 complete 流程处理。
+        async with self._lock:
+            speech = self.snapshot.get("current_speech")
+            if speech and speech.get("id") == speech_id and speech.get("kind") != "self_intro":
+                speech["content_final"] = full_text
+                speech["agent_final_ready"] = True
+                self._upsert_transcript_segment(speech, speaker_id, full_text, True, "agent_text")
+                self._persist_snapshot()
 
-        tts_result = await self._synthesize_agent_tts(task_id, speech_id, speaker, full_text)
+        # Fire TTS for any remaining text that didn't end with punctuation
+        remaining_tail = full_text[tts_sent_chars:].strip()
+        if remaining_tail and tts_enabled:
+            tts_sentence_tasks.append(asyncio.create_task(synthesize_sentence(remaining_tail, tts_sentence_idx)))
+            tts_sentence_idx += 1
+            async with self._lock:
+                speech = self.snapshot.get("current_speech")
+                if speech and speech.get("id") == speech_id:
+                    speech["tts_created_sentences"] = tts_sentence_idx
+                    self.snapshot["speech_service"]["tts"].update(
+                        {
+                            "status": "synthesizing",
+                            "queue_size": max(1, tts_sentence_idx - int(speech.get("tts_ready_sentences") or 0)),
+                            "speaker_id": speaker_id,
+                            "detail": f"TTS segment {tts_sentence_idx} queued",
+                            "last_progress_at": iso_now(),
+                        }
+                    )
+                    self._persist_snapshot()
+
+        # tts_sentence_idx now equals the number of sentence tasks actually created;
+        # the screen waits for exactly this many tts.sentence_ready events.
+        expected_sentence_count = tts_sentence_idx
+
+        sentence_results: List[bool] = []
+        if tts_sentence_tasks:
+            raw = await asyncio.gather(*tts_sentence_tasks, return_exceptions=True)
+            sentence_results = [bool(r) for r in raw if isinstance(r, bool)]
+
+        all_tts_failed = bool(tts_enabled and tts_sentence_tasks and sentence_results and not any(sentence_results))
 
         async with self._lock:
             speech = self.snapshot.get("current_speech")
             if speech:
                 speech["content_final"] = full_text
-                self._upsert_transcript_segment(speech, speaker_id, full_text, True, "agent_text")
-            self.snapshot["current_speech"] = None
-            self._pause_running_clocks()
-            self._advance_free_debate_turn_if_needed(speaker["side"])
-            if tts_result and tts_result.get("failed"):
-                self.snapshot["speech_service"]["tts"]["queue_size"] = 0
-            else:
-                self.snapshot["speech_service"]["tts"] = {
-                    "status": "idle",
-                    "latency_ms": int((tts_result or {}).get("latency_ms") or 0),
-                    "queue_size": 0,
-                    "speaker_id": None,
-                    "detail": self._tts_completion_detail(tts_result),
-                }
-            self._set_agent_status(speaker_id, "ready", "last task completed")
+                speech["agent_final_ready"] = True
+                speech["tts_task_id"] = task_id
+                speech["tts_expected_sentences"] = expected_sentence_count
+                speech["tts_created_sentences"] = expected_sentence_count
+                # 段落已在生成完成时定稿（见上方）；此处仅更新 TTS 计数。
+                # 完成对账：保证 [0,expected) 的每个 idx 都已 ready 或 skipped，否则补进
+                # tts_skipped_sentences——这样大屏仅凭快照就能走到 nextIdx==expected，永不卡死。
+                self._reconcile_tts_gaps(speech, expected_sentence_count)
+            current_tts = self.snapshot["speech_service"]["tts"]
+            if not all_tts_failed:
+                current_tts["status"] = "playing"
+                current_tts["queue_size"] = max(1, int(speech.get("tts_expected_sentences", 1) if speech else 1))
+                current_tts["speaker_id"] = speaker_id
+                current_tts["detail"] = "sentence TTS playback pending"
+            current_tts["latency_ms"] = int(current_tts.get("latency_ms", 0) or 0)
             self._persist_snapshot()
 
         await self.emit(
@@ -1447,19 +1741,98 @@ class MatchStore:
             "agent",
             speaker_id,
         )
-        finished_payload = {"task_id": task_id, "speaker_id": speaker_id}
-        if tts_result:
-            finished_payload.update(
-                {
-                    "speech_id": speech_id,
-                    "status": "failed" if tts_result.get("failed") else "completed",
-                    "audio_asset_id": tts_result.get("audio_asset_id"),
-                    "latency_ms": tts_result.get("latency_ms", 0),
-                    "degraded_to": tts_result.get("degraded_to"),
-                }
-            )
+        finished_payload = {
+            "task_id": task_id,
+            "speech_id": speech_id,
+            "speaker_id": speaker_id,
+            "expected_sentence_count": expected_sentence_count,
+        }
         await self.emit("tts.finished", finished_payload, "system")
-        await self.emit("speech.ended", {"speaker_id": speaker_id, "side": speaker["side"]}, "agent", speaker_id)
+        if all_tts_failed:
+            await self.complete_agent_playback(speech_id, task_id, reason="tts_failed")
+        elif not tts_enabled or expected_sentence_count == 0:
+            await self.start_agent_playback(speech_id, task_id, reason="text_only")
+            await self.complete_agent_playback(speech_id, task_id, reason="text_only")
+        else:
+            asyncio.create_task(self._complete_agent_playback_after_grace(speech_id, task_id, finished_payload["expected_sentence_count"]))
+
+    async def _complete_agent_playback_after_grace(self, speech_id: str, task_id: str, expected_sentence_count: int) -> None:
+        # 进度感知的兜底：只有当大屏在「idle_limit 秒内没有任何播放进度」时才强行收尾，
+        # 而不是在生成完成后固定 N 秒就收尾——否则一段较短发言（grace=120s）若播放中途卡顿、
+        # 总时长超过这个固定窗口，就会在还在出声时被提前判为"发言完毕"（事件没结束就收尾）。
+        # 只要大屏还在按句上报进度，空闲计时就会被重置，兜底永不在活跃播放期间触发；真正
+        # 离线/卡死（长时间无进度）时才收尾。比固定计时更保守，不改变正常播放路径。
+        idle_limit = max(120, min(900, int(expected_sentence_count or 1) * 12))
+        poll_seconds = 15
+        while True:
+            await asyncio.sleep(poll_seconds)
+            async with self._lock:
+                speech = self.snapshot.get("current_speech")
+                if not (speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id):
+                    return  # 已被正常收尾 / 已切换发言
+                last_iso = speech.get("tts_last_progress_at") or speech.get("started_at")
+                last_dt = parse_iso(last_iso) if last_iso else None
+                idle_seconds = (utc_now() - last_dt).total_seconds() if last_dt else idle_limit + 1
+            if idle_seconds >= idle_limit:
+                await self.complete_agent_playback(speech_id, task_id, reason="screen_playback_timeout")
+                return
+
+    async def complete_agent_playback(self, speech_id: str, task_id: str, reason: str = "screen_playback_complete") -> Dict[str, Any]:
+        ignored_payload: Optional[Dict[str, Any]] = None
+        ended_payload: Optional[Dict[str, Any]] = None
+        async with self._lock:
+            speech = self.snapshot.get("current_speech")
+            if not speech or speech.get("id") != speech_id:
+                ignored_payload = {"speech_id": speech_id, "task_id": task_id, "ignored": True, "reason": reason}
+            elif speech.get("tts_task_id") and speech.get("tts_task_id") != task_id:
+                ignored_payload = {"speech_id": speech_id, "task_id": task_id, "ignored": True, "reason": "task_mismatch"}
+            if ignored_payload:
+                self._persist_snapshot()
+            else:
+                speaker_id = speech["speaker_id"]
+                speaker = self._find_speaker(speaker_id)
+                is_self_intro = speech.get("kind") == "self_intro"
+                text = speech.get("content_final") or speech.get("content_partial") or ""
+                speech["content_final"] = text
+                speech["state"] = "ended"
+                speech["ended_at"] = iso_now()
+                speech["ended_reason"] = reason
+                segment = self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "agent_text"))
+                # 自我介绍：记录系统、可在大屏展示，但不进入 agent 历史会话，也不推进辩论流程/计时。
+                if is_self_intro:
+                    segment["exclude_from_history"] = True
+                    segment["kind"] = "self_intro"
+                self.snapshot["current_speech"] = None
+                if not is_self_intro:
+                    self._pause_running_clocks()
+                    self._advance_free_debate_turn_if_needed(speaker["side"])
+                    self._set_flow_waiting_after_speech_end(speech, speaker, reason)
+                self._set_agent_status(speaker_id, "ready", "self introduction completed" if is_self_intro else "last task completed")
+                if reason == "tts_failed":
+                    self.snapshot["speech_service"]["tts"] = {
+                        "status": "failed",
+                        "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                        "queue_size": 0,
+                        "speaker_id": None,
+                        "detail": "TTS synthesis failed for all sentences",
+                        "degraded_to": "text_only",
+                    }
+                else:
+                    self.snapshot["speech_service"]["tts"] = {
+                        "status": "idle",
+                        "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                        "queue_size": 0,
+                        "speaker_id": None,
+                        "detail": "browser playback completed",
+                    }
+                ended_payload = {"speaker_id": speaker_id, "side": speaker["side"], "speech_id": speech_id}
+                self._persist_snapshot()
+
+        if ignored_payload:
+            await self.emit("tts.playback_complete_ignored", ignored_payload, "screen")
+            return await self.get_snapshot()
+        await self.emit("speech.ended", ended_payload or {"speech_id": speech_id}, "agent", (ended_payload or {}).get("speaker_id"))
+        return await self.get_snapshot()
 
     async def run_mock_agent_speech(self, speaker_id: str) -> None:
         await self.run_agent_speech(speaker_id)
@@ -1482,6 +1855,7 @@ class MatchStore:
         match = self.snapshot["match"]
         command_text = str(command or "custom").strip() or "custom"
         prompt_text = str(prompt or "").strip()
+        cmd_budget = self._agent_output_budget(60, self._speaker_speech_rate(speaker))
         payload = {
             "model_name": (config or {}).get("model_name", speaker.get("model_name") or ""),
             "debater_name": speaker["name"],
@@ -1490,6 +1864,8 @@ class MatchStore:
             "current_stage": command_text,
             "next_stage": phase.get("name", ""),
             "holder": "正方" if speaker["side"] == "affirmative" else "反方",
+            "debate_history": self._build_debate_history(),
+            "max_token": cmd_budget["max_token"],
             "other_info": {
                 "command": command_text,
                 "prompt": prompt_text,
@@ -1497,8 +1873,10 @@ class MatchStore:
                 "speaker_id": speaker_id,
                 "side": speaker["side"],
                 "seat": speaker["seat"],
+                "speech_rate": cmd_budget["speech_rate"],
+                "chars_per_second": cmd_budget["chars_per_second"],
+                "char_budget": cmd_budget["char_budget"],
             },
-            "debate_history": self._build_debate_history(),
             "match_id": match["id"],
             "task_id": task_id,
             "speech_id": None,
@@ -1507,7 +1885,7 @@ class MatchStore:
             "agent_provider_type": (config or {}).get("provider_type"),
             "time_limit_seconds": 60,
             "remaining_seconds": 60,
-            "target_chars": 260,
+            "target_chars": cmd_budget["target_chars"],
             "output": {"stream": True, "language": "zh-CN"},
         }
 
@@ -1654,6 +2032,8 @@ class MatchStore:
                     "side": speaker["side"],
                     "turn_index": self._current_turn_index(),
                     "source": "human_asr" if speaker["speaker_type"] == "human" else "agent_text",
+                    "content_final": speech.get("content_final", ""),
+                    "content_partial": speech.get("content_partial", ""),
                     "started_at": iso_now(),
                     "state": "speaking",
                     "started_clock_remaining_ms": {
@@ -1736,10 +2116,12 @@ class MatchStore:
             speech["content_final"] = text
             speech["state"] = "ended"
             speech["ended_at"] = iso_now()
+            speech["ended_reason"] = "speaker_stop"
             self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
             self.snapshot["current_speech"] = None
             self._pause_running_clocks()
             self._advance_free_debate_turn_if_needed(speaker["side"])
+            self._set_flow_waiting_after_speech_end(speech, speaker, "speaker_stop")
             if speech.get("source") == "human_asr":
                 self.snapshot["speech_service"]["asr"] = {
                     "status": "ok",
@@ -1754,6 +2136,9 @@ class MatchStore:
         async with self._lock:
             self._ensure_match_allows_control("reset_current_speech")
             speech = self.snapshot.get("current_speech") or {}
+            # 复位按钮：既能重置进行中的发言，也能对“刚结束/发言完毕”的上一段发言生效。
+            if not speech:
+                speech = self._last_resettable_speech()
             if not speech:
                 raise MatchStateError("no_active_speech", "当前没有可重置的发言。")
             speaker_id = speech["speaker_id"]
@@ -1782,6 +2167,16 @@ class MatchStore:
             self._reset_relevant_clocks_for_speech(speech)
             self.snapshot["current_speech"] = None
             self._clear_flow_state()
+            # 复位：丢弃本次发言信息，并把该辩手恢复为可重新开始发言的就绪状态。
+            if speaker.get("speaker_type") == "agent":
+                self._set_agent_status(speaker_id, "ready", "speech reset")
+            self.snapshot["speech_service"]["tts"] = {
+                "status": "idle",
+                "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                "queue_size": 0,
+                "speaker_id": None,
+                "detail": "speech reset",
+            }
             if speech.get("source") == "human_asr":
                 self.snapshot["speech_service"]["asr"] = {
                     "status": "ok",
@@ -1799,6 +2194,32 @@ class MatchStore:
             }
             self._persist_snapshot()
         return await self.emit("speech.reset", payload, "host")
+
+    def _last_resettable_speech(self) -> Optional[Dict[str, Any]]:
+        """Reconstruct a minimal speech for the most-recently-ended turn so the 复位
+        button works after a speech has already ended (current_speech is None)."""
+        flow = self.snapshot.get("flow") or {}
+        target_id = flow.get("speech_id")
+        segment = None
+        for seg in self.snapshot.get("recent_transcript", []):
+            if target_id and seg.get("speech_id") == target_id:
+                segment = seg
+                break
+        if segment is None:
+            segment = next((seg for seg in self.snapshot.get("recent_transcript", []) if seg.get("is_final")), None)
+        if not segment:
+            return None
+        speaker_id = segment.get("speaker_id")
+        try:
+            speaker = self._find_speaker(speaker_id)
+        except MatchStateError:
+            return None
+        return {
+            "id": segment.get("speech_id") or segment.get("id"),
+            "speaker_id": speaker_id,
+            "side": speaker["side"],
+            "phase_id": segment.get("phase_id") or self.snapshot["match"]["current_phase_id"],
+        }
 
     async def record_asr_partial(self, speaker_id: str, text: str, latency_ms: Optional[int] = None) -> Dict[str, Any]:
         async with self._lock:
@@ -2059,7 +2480,12 @@ class MatchStore:
         if not session:
             request_id = f"asr_stream_{speech_id}"
             stream_started_at = iso_now()
-            gateway = _select_asr_gateway()
+            try:
+                selection = select_asr_gateway()
+            except SpeechProviderError as exc:
+                await self._record_live_asr_failed(speech_id, speaker_id, _speech_error_message(exc), _speech_error_code(exc, "asr_config_error"))
+                return
+            gateway = selection.gateway
 
             async def on_partial(text: str, latency_ms: int, chunk_count: int) -> None:
                 await self._record_live_asr_text(speech_id, speaker_id, text, False, latency_ms, chunk_count)
@@ -2067,8 +2493,8 @@ class MatchStore:
             async def on_final(text: str, latency_ms: int, chunk_count: int) -> None:
                 await self._record_live_asr_text(speech_id, speaker_id, text, True, latency_ms, chunk_count)
 
-            async def on_error(exc: XfyunGatewayError) -> None:
-                await self._record_live_asr_failed(speech_id, speaker_id, exc.message, exc.code)
+            async def on_error(exc: Exception) -> None:
+                await self._record_live_asr_failed(speech_id, speaker_id, _speech_error_message(exc), _speech_error_code(exc, "asr_stream_error"))
 
             async with self._lock:
                 self.repo.save_speech_service_request_started(
@@ -2078,15 +2504,15 @@ class MatchStore:
                     operation="realtime_stream",
                     speech_id=speech_id,
                     speaker_id=speaker_id,
-                    request={"speech_id": speech_id, "speaker_id": speaker_id, "mime_type": mime_type},
+                    request={"speech_id": speech_id, "speaker_id": speaker_id, "mime_type": mime_type, "provider": selection.provider},
                     started_at=stream_started_at,
                     origin="live",
                     **self._log_context(),
                 )
             try:
-                session = await gateway.open_stream(on_partial=on_partial, on_final=on_final, on_error=on_error)
-            except XfyunGatewayError as exc:
-                await self._record_live_asr_failed(speech_id, speaker_id, exc.message, exc.code)
+                session = await gateway.open_stream(on_partial=on_partial, on_final=on_final, on_error=on_error, **selection.options)
+            except SpeechProviderError as exc:
+                await self._record_live_asr_failed(speech_id, speaker_id, _speech_error_message(exc), _speech_error_code(exc, "asr_stream_error"))
                 return
             self._asr_streams[speech_id] = session
             async with self._lock:
@@ -2098,15 +2524,15 @@ class MatchStore:
                     "status": "streaming",
                     "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
                     "active_sessions": 1,
-                    "detail": f"Xunfei realtime ASR stream started · {speech_id}",
+                    "detail": f"{selection.provider} realtime ASR stream started · {speech_id}",
                 }
                 self._persist_snapshot()
             await self.emit("asr.stream_started", {"speech_id": speech_id, "speaker_id": speaker_id}, "speech", speaker_id)
         try:
             await session.send_audio(content)
-        except XfyunGatewayError as exc:
+        except SpeechProviderError as exc:
             self._asr_streams.pop(speech_id, None)
-            await self._record_live_asr_failed(speech_id, speaker_id, exc.message, exc.code)
+            await self._record_live_asr_failed(speech_id, speaker_id, _speech_error_message(exc), _speech_error_code(exc, "asr_stream_error"))
 
     async def _finish_live_asr_stream(self, speech_id: str, speaker_id: str) -> None:
         session = self._asr_streams.pop(speech_id, None)
@@ -2114,8 +2540,8 @@ class MatchStore:
             return
         try:
             result = await session.finish()
-        except XfyunGatewayError as exc:
-            await self._record_live_asr_failed(speech_id, speaker_id, exc.message, exc.code)
+        except SpeechProviderError as exc:
+            await self._record_live_asr_failed(speech_id, speaker_id, _speech_error_message(exc), _speech_error_code(exc, "asr_stream_error"))
             return
         async with self._lock:
             self.repo.finish_speech_service_request(
@@ -2266,29 +2692,32 @@ class MatchStore:
             raise MatchStateError("invalid_audio_archive", "归档音频为空，无法识别。", {"speech_id": speech_id})
         await self.emit("asr.archive_recognition_started", {"speech_id": speech_id, "audio_bytes": len(content)}, "host")
 
-        gateway = _select_asr_gateway()
         try:
-            result = await gateway.recognize(content, audio_format="audio/L16;rate=16000", encoding="raw")
-        except XfyunGatewayError as exc:
+            selection = select_asr_gateway()
+            options = {**selection.options, "audio_format": "audio/L16;rate=16000", "encoding": "raw"}
+            result = await selection.gateway.recognize(content, **options)
+        except SpeechProviderError as exc:
+            message = _speech_error_message(exc)
+            code = _speech_error_code(exc, "asr_error")
             async with self._lock:
                 self.snapshot["speech_service"]["asr"] = {
                     "status": "failed",
                     "latency_ms": 0,
                     "active_sessions": 0,
-                    "detail": exc.message,
+                    "detail": message,
                 }
                 self.repo.finish_speech_service_request(
                     match_id=self.snapshot["match"]["id"],
                     request_id=request_id,
                     status="failed",
-                    error_code=str(exc.code) if exc.code is not None else "xfyun_asr_error",
-                    error_message=exc.message,
+                    error_code=code,
+                    error_message=message,
                     latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
                     completed_at=iso_now(),
                 )
                 self._persist_snapshot()
-            await self.emit("asr.failed", {"speech_id": speech_id, "reason": exc.message, "code": exc.code}, "host")
-            raise MatchStateError("speech_service_error", f"ASR 归档识别失败：{exc.message}", {"code": exc.code})
+            await self.emit("asr.failed", {"speech_id": speech_id, "reason": message, "code": code}, "host")
+            raise MatchStateError("speech_service_error", f"ASR 归档识别失败：{message}", {"code": code})
 
         async with self._lock:
             self._apply_archived_asr_text(speech_id, result.text)
@@ -2363,34 +2792,37 @@ class MatchStore:
                 "status": "recognizing",
                 "latency_ms": 0,
                 "active_sessions": 1,
-                "detail": "Xunfei ASR probe started",
+                "detail": "ASR probe started",
             }
             self._persist_snapshot()
         await self.emit("asr.probe_started", {"audio_bytes": len(content), "format": audio_format, "encoding": encoding}, "host")
 
-        gateway = _select_asr_gateway()
         try:
-            result = await gateway.recognize(content, audio_format=audio_format, encoding=encoding)
-        except XfyunGatewayError as exc:
+            selection = select_asr_gateway()
+            options = {**selection.options, "audio_format": audio_format, "encoding": encoding}
+            result = await selection.gateway.recognize(content, **options)
+        except SpeechProviderError as exc:
+            message = _speech_error_message(exc)
+            code = _speech_error_code(exc, "asr_error")
             async with self._lock:
                 self.snapshot["speech_service"]["asr"] = {
                     "status": "failed",
                     "latency_ms": 0,
                     "active_sessions": 0,
-                    "detail": exc.message,
+                    "detail": message,
                 }
                 self.repo.finish_speech_service_request(
                     match_id=self.snapshot["match"]["id"],
                     request_id=request_id,
                     status="failed",
-                    error_code=str(exc.code) if exc.code is not None else "xfyun_asr_error",
-                    error_message=exc.message,
+                    error_code=code,
+                    error_message=message,
                     latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
                     completed_at=iso_now(),
                 )
                 self._persist_snapshot()
-            await self.emit("asr.failed", {"probe": True, "reason": exc.message, "code": exc.code}, "host")
-            raise MatchStateError("speech_service_error", f"ASR 试识别失败：{exc.message}", {"code": exc.code})
+            await self.emit("asr.failed", {"probe": True, "reason": message, "code": code}, "host")
+            raise MatchStateError("speech_service_error", f"ASR 试识别失败：{message}", {"code": code})
 
         payload = {
             "probe": True,
@@ -2419,17 +2851,23 @@ class MatchStore:
         await self.emit("asr.probe_completed", payload, "host")
         return {"result": payload, "snapshot": await self.get_snapshot()}
 
-    async def probe_tts(self, text: str) -> Dict[str, Any]:
+    async def probe_tts(self, text: str, voice_preset_id: str = "") -> Dict[str, Any]:
         content = str(text or "").strip() or "人机辩论赛语音合成自检。"
         request_id = self._new_speech_service_request_id("tts", "probe")
         request_started_time = time.perf_counter()
+        selection = select_tts_gateway(voice_preset_id=voice_preset_id)
         async with self._lock:
             self.repo.save_speech_service_request_started(
                 match_id=self.snapshot["match"]["id"],
                 request_id=request_id,
                 service="tts",
                 operation="probe",
-                request={"text": content, "text_length": len(content)},
+                request={
+                    "text": content,
+                    "text_length": len(content),
+                    "provider": selection.provider,
+                    "voice_preset_id": (selection.preset or {}).get("id"),
+                },
                 started_at=iso_now(),
                 origin="test",
                 **self._log_context(),
@@ -2439,36 +2877,37 @@ class MatchStore:
                 "latency_ms": 0,
                 "queue_size": 1,
                 "speaker_id": None,
-                "detail": "Xunfei TTS probe started",
+                "detail": f"{selection.provider} TTS probe started",
             }
             self._persist_snapshot()
         await self.emit("tts.started", {"probe": True, "text_length": len(content)}, "host")
 
-        gateway = XfyunTTSGateway(url=os.getenv("XFYUN_TTS_URL", "").strip())
         try:
-            result = await gateway.synthesize(content)
-        except XfyunGatewayError as exc:
+            result = await selection.gateway.synthesize(content, **selection.options)
+        except SpeechProviderError as exc:
+            message = _speech_error_message(exc)
+            code = _speech_error_code(exc, "tts_error")
             async with self._lock:
                 self.snapshot["speech_service"]["tts"] = {
                     "status": "failed",
                     "latency_ms": 0,
                     "queue_size": 0,
                     "speaker_id": None,
-                    "detail": exc.message,
+                    "detail": message,
                     "degraded_to": "text_only",
                 }
                 self.repo.finish_speech_service_request(
                     match_id=self.snapshot["match"]["id"],
                     request_id=request_id,
                     status="failed",
-                    error_code=str(exc.code) if exc.code is not None else "xfyun_tts_error",
-                    error_message=exc.message,
+                    error_code=code,
+                    error_message=message,
                     latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
                     completed_at=iso_now(),
                 )
                 self._persist_snapshot()
-            await self.emit("tts.failed", {"probe": True, "reason": exc.message, "code": exc.code}, "host")
-            raise MatchStateError("speech_service_error", f"TTS 试合成失败：{exc.message}", {"code": exc.code})
+            await self.emit("tts.failed", {"probe": True, "reason": message, "code": code}, "host")
+            raise MatchStateError("speech_service_error", f"TTS 试合成失败：{message}", {"code": code})
 
         archive_dir = self.audio_root_path() / "diagnostics"
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -2482,6 +2921,8 @@ class MatchStore:
             "chunk_count": result.chunk_count,
             "latency_ms": result.latency_ms,
             "file_path": str(file_path),
+            "provider": selection.provider,
+            "voice_preset_id": (selection.preset or {}).get("id"),
             # 让前端可直接在本机播放试合成音频
             "audio_base64": base64.b64encode(result.audio).decode("ascii"),
         }
@@ -2583,7 +3024,7 @@ class MatchStore:
                 speech = self.snapshot["current_speech"]
                 speaker_id = speech["speaker_id"]
                 speaker = self._find_speaker(speaker_id)
-                text = speech.get("content_partial") or "时间到，本次发言结束。"
+                text = speech.get("content_final") or speech.get("content_partial") or "时间到，本次发言结束。"
                 speech["content_final"] = text
                 speech["state"] = "ended"
                 speech["ended_at"] = to_iso(now)
@@ -2599,8 +3040,17 @@ class MatchStore:
                         "active_sessions": 0,
                         "detail": "timeout",
                     }
+                if speech.get("source") == "agent_text" and speech.get("tts_task_id"):
+                    self.snapshot["speech_service"]["tts"] = {
+                        "status": "idle",
+                        "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                        "queue_size": 0,
+                        "speaker_id": None,
+                        "detail": "timeout",
+                    }
                 timeout_payload = {
                     "speech_id": speech["id"],
+                    "task_id": speech.get("tts_task_id"),
                     "speaker_id": speaker_id,
                     "side": speaker["side"],
                     "expired_clocks": [item["clock_name"] for item in expired_payloads],
@@ -2621,7 +3071,18 @@ class MatchStore:
                 events.append(("clock.expired", payload))
             if timeout_payload:
                 events.append(("speech.timeout", timeout_payload))
-                events.append(("speech.ended", {"speaker_id": timeout_payload["speaker_id"], "side": timeout_payload["side"], "reason": "timeout"}))
+                events.append(
+                    (
+                        "speech.ended",
+                        {
+                            "speech_id": timeout_payload["speech_id"],
+                            "task_id": timeout_payload.get("task_id"),
+                            "speaker_id": timeout_payload["speaker_id"],
+                            "side": timeout_payload["side"],
+                            "reason": "timeout",
+                        },
+                    )
+                )
             if flow_payload:
                 events.append(("flow.awaiting_host_confirm", flow_payload))
 
@@ -3122,10 +3583,10 @@ class MatchStore:
                 clock["state"] = "expired"
                 clock["deadline_at"] = None
 
-    def _persist_snapshot(self) -> None:
+    def _persist_snapshot(self, *, sync_structured: bool = True) -> None:
         self._ensure_runtime_fields()
         self.snapshot["last_seq"] = self.seq
-        self.repo.save_snapshot(self.snapshot, iso_now())
+        self.repo.save_snapshot(self.snapshot, iso_now(), sync_structured=sync_structured)
 
     def _new_match_snapshot_from_archive(self, archived: Dict[str, Any], new_match_id: str, now: datetime) -> Dict[str, Any]:
         phases = deepcopy(archived.get("phases", []))
@@ -3276,17 +3737,18 @@ class MatchStore:
         return f"agent_{speaker_id}"
 
     def _agent_config_from_speaker(self, speaker: Dict[str, Any], now: str) -> Dict[str, Any]:
+        endpoint = speaker.get("agent_endpoint") or self._agent_endpoint_for_speaker(str(speaker.get("id") or ""))
         return {
             "id": speaker.get("agent_config_id") or self._default_agent_config_id(str(speaker.get("id") or "")),
             "name": f"{speaker.get('name') or '未命名'} Agent",
-            "provider_type": "openai_sdk",
+            "provider_type": "rest_api",
             "request_method": "POST",
             "model_name": speaker.get("model_name") or "qwen3.6-plus",
             "model_id": speaker.get("model_id") or "qwen3.6-plus",
             "model_kind": speaker.get("model_kind") or "closed_source",
-            "endpoint": speaker.get("agent_endpoint") or self._agent_endpoint_for_speaker(str(speaker.get("id") or "")),
+            "endpoint": endpoint or "",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key_env": "DASHSCOPE_API_KEY",
+            "api_key_env": "",
             "timeout_ms": getattr(self.agent_gateway, "read_timeout_ms", 30000),
             "enabled": True,
             "created_at": now,
@@ -3423,6 +3885,12 @@ class MatchStore:
 
     def _ensure_runtime_fields(self) -> None:
         self.snapshot["system"] = self._system_info()
+        # 大屏左上角/右上角的「比赛名称」「主办机构」支持文本或图片两种展示方式。
+        match = self.snapshot.setdefault("match", {})
+        match.setdefault("title_display", "text")
+        match.setdefault("title_image_url", "")
+        match.setdefault("organizer_image_url", "/assets/logo-full-white.png")
+        match.setdefault("organizer_display", "image" if match.get("organizer_image_url") else "text")
         flow = self.snapshot.setdefault("flow", self._fresh_flow_state())
         fresh_flow = self._fresh_flow_state()
         for key, value in fresh_flow.items():
@@ -3474,28 +3942,46 @@ class MatchStore:
         now = iso_now()
         self.snapshot.setdefault("agent_configs", [])
         config_ids = {config.get("id") for config in self.snapshot["agent_configs"]}
+        # Pass 1: ensure every agent speaker has a config entry (create defaults if missing).
         for speaker in self.snapshot.get("speakers", []):
             if speaker.get("speaker_type") == "human":
                 speaker.setdefault("mic_permission", "unknown")
                 speaker.setdefault("device_label", None)
                 speaker.setdefault("last_seen_at", None)
                 speaker.pop("agent_config_id", None)
+                speaker.pop("tts_voice_preset_id", None)
             else:
                 speaker.setdefault("mic_permission", None)
                 speaker.setdefault("device_label", None)
                 speaker.setdefault("last_seen_at", None)
+                speaker.setdefault("tts_voice_preset_id", None)
                 speaker.setdefault("agent_config_id", self._default_agent_config_id(str(speaker.get("id") or "")))
                 if speaker["agent_config_id"] not in config_ids:
                     config = self._agent_config_from_speaker(speaker, now)
                     self.snapshot["agent_configs"].append(config)
                     config_ids.add(config["id"])
-                self._apply_agent_config_to_speaker(speaker)
+        # Pass 2: normalize + migrate all configs before syncing back to speakers.
         normalized_configs = []
         for config in self.snapshot.get("agent_configs", []):
             normalized = self._normalize_agent_config_fields(config, existing=config, now=now, create=False)
             normalized["id"] = str(config.get("id") or self._unique_agent_config_id(normalized["name"]))
+            # Migrate openai_sdk configs whose API key is not present at runtime to rest_api,
+            # so the admin page reflects what will actually execute and agents don't silently fail.
+            if normalized.get("provider_type") == "openai_sdk":
+                api_key_env = normalized.get("api_key_env", "").strip()
+                api_key_available = bool(api_key_env and os.getenv(api_key_env, "").strip())
+                if not api_key_available:
+                    normalized["provider_type"] = "rest_api"
+                    if not normalized.get("endpoint"):
+                        normalized["endpoint"] = (
+                            os.getenv("PHDEBATE_AGENT_BASE_URL", "").strip() or "http://localhost:8000/api/debate"
+                        )
             normalized_configs.append(normalized)
         self.snapshot["agent_configs"] = normalized_configs
+        # Pass 3: sync migrated/normalized config fields back to each agent speaker.
+        for speaker in self.snapshot.get("speakers", []):
+            if speaker.get("speaker_type") == "agent":
+                self._apply_agent_config_to_speaker(speaker)
         current_phase_id = self.snapshot.get("match", {}).get("current_phase_id")
         for segment in self.snapshot.get("recent_transcript", []):
             segment.setdefault("phase_id", current_phase_id)
@@ -3505,6 +3991,7 @@ class MatchStore:
             segment.setdefault("invalid_reason", None)
         self.snapshot.setdefault("speech_revisions", [])
         self.snapshot.setdefault("audio_assets", [])
+        self._ensure_audio_asset_urls()
         speech_service = self.snapshot.setdefault("speech_service", {})
         speech_service.setdefault("asr", {})
         speech_service["asr"].setdefault("status", "ok")
@@ -3524,6 +4011,24 @@ class MatchStore:
             len([item for item in self.snapshot.get("speakers", []) if item.get("speaker_type") == "human"]),
         )
         speech_service["consoles"].setdefault("mic_errors", [])
+
+    def _ensure_audio_asset_urls(self) -> None:
+        try:
+            audio_root = self.audio_root_path()
+        except Exception:
+            return
+        for asset in self.snapshot.get("audio_assets", []):
+            for chunk in asset.get("chunks") or []:
+                if chunk.get("audio_url"):
+                    continue
+                raw_path = str(chunk.get("file_path") or "").strip()
+                if not raw_path:
+                    continue
+                try:
+                    rel = Path(raw_path).resolve().relative_to(audio_root)
+                except (OSError, ValueError):
+                    continue
+                chunk["audio_url"] = "/api/audio/" + "/".join(rel.parts)
 
     def _system_info(self) -> Dict[str, Any]:
         return {
@@ -3931,23 +4436,47 @@ class MatchStore:
         consoles["total"] = len(humans)
         consoles["mic_errors"] = mic_errors
 
+    def _history_speaker_label(self, segment: Dict[str, Any]) -> str:
+        """Side+seat label (e.g. 「正方一辩」) matching the agent request sample.
+
+        Falls back to the stored label (stripping a trailing「 · 姓名」) if the speaker
+        is no longer present in the roster.
+        """
+        speaker_id = segment.get("speaker_id")
+        if speaker_id:
+            try:
+                speaker = self._find_speaker(speaker_id)
+                side = "正方" if speaker["side"] == "affirmative" else "反方"
+                return f"{side}{self._seat_label(speaker['seat'])}"
+            except Exception:
+                pass
+        label = str(segment.get("speaker_label", ""))
+        return label.split(" · ", 1)[0] if " · " in label else label
+
     def _build_debate_history(self) -> list:
-        """Group final+valid transcript segments by phase, return ordered list."""
+        """Group final+valid transcript segments by phase, return ordered list.
+
+        Shape matches 请求体(1).json: ``[{"stage": ..., "message": [{"speaker", "content"}]}]``.
+        Self-introductions (`exclude_from_history`) are recorded/displayed but never sent
+        back to the agent as conversation history.
+        """
         phase_by_id = {p["id"]: p["name"] for p in self.snapshot["phases"]}
         ordered_phase_ids = [p["id"] for p in sorted(self.snapshot["phases"], key=lambda x: x["display_order"])]
         groups: Dict[str, list] = {}
         for segment in self.snapshot.get("recent_transcript", []):
             if not segment.get("valid", True) or not segment.get("is_final"):
                 continue
+            if segment.get("exclude_from_history"):
+                continue
             pid = segment.get("phase_id", "")
             if pid not in groups:
                 groups[pid] = []
             groups[pid].append({
-                "speaker": segment["speaker_label"],
+                "speaker": self._history_speaker_label(segment),
                 "content": segment["text"],
             })
         return [
-            {"stage": phase_by_id.get(pid, pid), "content": groups[pid]}
+            {"stage": phase_by_id.get(pid, pid), "message": groups[pid]}
             for pid in ordered_phase_ids
             if pid in groups
         ]
@@ -3961,8 +4490,10 @@ class MatchStore:
         remaining_seconds = int((clock["remaining_ms"] if clock else time_limit * 1000) / 1000)
         next_phase = self._next_phase(phase)
         holder = "正方" if speaker["side"] == "affirmative" else "反方"
+        speech_rate = self._speaker_speech_rate(speaker)
+        budget = self._agent_output_budget(time_limit, speech_rate)
         return {
-            # 结构化辩论格式（Agent 接口核心字段）
+            # 结构化辩论格式（Agent 接口核心字段，与 请求体(1).json 对齐）
             "model_name": config.get("model_name", ""),
             "debater_name": speaker["name"],
             "debate_position": self._seat_label(speaker["seat"]),
@@ -3970,6 +4501,9 @@ class MatchStore:
             "current_stage": phase["name"],
             "next_stage": next_phase["name"] if next_phase else "比赛结束",
             "holder": holder,
+            "debate_history": self._build_debate_history(),
+            # 输出预算：由本次发言限时 + TTS 语速确定性推导，约束 Agent 回复不超时
+            "max_token": budget["max_token"],
             "other_info": {
                 "match_id": match["id"],
                 "speaker_id": speaker["id"],
@@ -3977,8 +4511,10 @@ class MatchStore:
                 "phase_type": phase["phase_type"],
                 "remaining_seconds": remaining_seconds,
                 "time_limit_seconds": time_limit,
+                "speech_rate": budget["speech_rate"],
+                "chars_per_second": budget["chars_per_second"],
+                "char_budget": budget["char_budget"],
             },
-            "debate_history": self._build_debate_history(),
             # 内部路由字段
             "match_id": match["id"],
             "task_id": task_id,
@@ -3989,9 +4525,341 @@ class MatchStore:
             # 时控字段
             "time_limit_seconds": time_limit,
             "remaining_seconds": remaining_seconds,
-            "target_chars": max(40, int(time_limit * 4.5)),
+            "target_chars": budget["target_chars"],
             "output": {"stream": True, "language": "zh-CN"},
         }
+
+    def _build_self_intro_payload(self, task_id: str, speech_id: str, speaker: Dict[str, Any]) -> Dict[str, Any]:
+        """Pre-match self-introduction request. Not tied to a debate clock, and the
+        result is excluded from debate_history (handled at completion)."""
+        match = self.snapshot["match"]
+        config = self._agent_config_for_speaker(speaker) or {}
+        first_phase = next(iter(sorted(self.snapshot["phases"], key=lambda x: x["display_order"])), None)
+        time_limit = 40
+        speech_rate = self._speaker_speech_rate(speaker)
+        budget = self._agent_output_budget(time_limit, speech_rate)
+        holder = "正方" if speaker["side"] == "affirmative" else "反方"
+        return {
+            "model_name": config.get("model_name", ""),
+            "debater_name": speaker["name"],
+            "debate_position": self._seat_label(speaker["seat"]),
+            "debate_topic": match["topic"],
+            "current_stage": "自我介绍",
+            "next_stage": first_phase["name"] if first_phase else "正式比赛",
+            "holder": holder,
+            # 自我介绍不需要历史会话作为上下文。
+            "debate_history": [],
+            "task_type": "self_intro",
+            "max_token": budget["max_token"],
+            "other_info": {
+                "match_id": match["id"],
+                "speaker_id": speaker["id"],
+                "side": speaker["side"],
+                "phase_type": "self_intro",
+                "time_limit_seconds": time_limit,
+                "speech_rate": budget["speech_rate"],
+                "chars_per_second": budget["chars_per_second"],
+                "char_budget": budget["char_budget"],
+            },
+            "match_id": match["id"],
+            "task_id": task_id,
+            "speech_id": speech_id,
+            "speaker_id": speaker["id"],
+            "agent_config_id": speaker.get("agent_config_id"),
+            "agent_provider_type": config.get("provider_type"),
+            "time_limit_seconds": time_limit,
+            "remaining_seconds": time_limit,
+            "target_chars": budget["target_chars"],
+            "output": {"stream": True, "language": "zh-CN"},
+        }
+
+    async def start_agent_playback(self, speech_id: str, task_id: str, reason: str = "screen_playback_started") -> Dict[str, Any]:
+        ignored_payload: Optional[Dict[str, Any]] = None
+        started_payload: Optional[Dict[str, Any]] = None
+        async with self._lock:
+            speech = self.snapshot.get("current_speech") or {}
+            if not speech or speech.get("id") != speech_id:
+                ignored_payload = {"speech_id": speech_id, "task_id": task_id, "ignored": True, "reason": reason}
+            elif speech.get("tts_task_id") and speech.get("tts_task_id") != task_id:
+                ignored_payload = {"speech_id": speech_id, "task_id": task_id, "ignored": True, "reason": "task_mismatch"}
+            elif speech.get("state") == "speaking":
+                speaker_id = speech.get("speaker_id")
+                started_payload = {"speech_id": speech_id, "task_id": task_id, "speaker_id": speaker_id, "already_started": True}
+            if ignored_payload:
+                self._persist_snapshot()
+                awaitable_payload = ignored_payload
+            else:
+                speaker_id = speech["speaker_id"]
+                speaker = self._find_speaker(speaker_id)
+                phase_id = speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
+                is_self_intro = speech.get("kind") == "self_intro"
+                if not is_self_intro:
+                    self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+                speech["started_at"] = speech.get("started_at") or iso_now()
+                speech["state"] = "speaking"
+                if task_id and not speech.get("tts_task_id"):
+                    speech["tts_task_id"] = task_id
+                # 自我介绍不消耗任何辩论计时。
+                if not is_self_intro:
+                    self._start_relevant_clocks(speaker["side"])
+                self.snapshot["speech_service"]["tts"] = {
+                    "status": "playing",
+                    "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0) or 420,
+                    "queue_size": self.snapshot["speech_service"]["tts"].get("queue_size", 1) or 1,
+                    "speaker_id": speaker_id,
+                    "detail": "TTS playing",
+                }
+                started_payload = started_payload or {"speech_id": speech_id, "task_id": task_id, "speaker_id": speaker_id, "reason": reason}
+                self._persist_snapshot()
+                awaitable_payload = started_payload
+        if ignored_payload:
+            await self.emit("tts.playback_start_ignored", ignored_payload, "screen")
+            return await self.get_snapshot()
+        await self.emit("tts.started", started_payload or awaitable_payload, "system", (started_payload or {}).get("speaker_id"))
+        await self.emit("speech.started", started_payload or awaitable_payload, "agent", (started_payload or {}).get("speaker_id"))
+        return await self.get_snapshot()
+
+    async def record_tts_playback_progress(
+        self,
+        speech_id: str,
+        task_id: str,
+        sentence_idx: int,
+        status: str = "playing",
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "speech_id": speech_id,
+            "task_id": task_id,
+            "sentence_idx": max(0, int(sentence_idx)),
+            "status": status,
+        }
+        async with self._lock:
+            speech = self.snapshot.get("current_speech") or {}
+            if speech.get("id") != speech_id:
+                payload["ignored"] = True
+                payload["reason"] = "speech_mismatch"
+            elif speech.get("tts_task_id") and speech.get("tts_task_id") != task_id:
+                payload["ignored"] = True
+                payload["reason"] = "task_mismatch"
+            else:
+                expected = int(speech.get("tts_expected_sentences") or speech.get("tts_created_sentences") or 0)
+                playing_idx = max(0, int(sentence_idx))
+                if speech.get("state") == "thinking" and status in {"playing", "played"}:
+                    speaker_id = speech.get("speaker_id")
+                    speaker = self._find_speaker(speaker_id)
+                    phase_id = speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
+                    if speech.get("kind") != "self_intro":
+                        self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+                        self._start_relevant_clocks(speaker["side"])
+                    speech["started_at"] = speech.get("started_at") or iso_now()
+                    speech["state"] = "speaking"
+                speech["tts_playing_sentence_idx"] = playing_idx
+                speech["tts_played_sentences"] = max(int(speech.get("tts_played_sentences") or 0), playing_idx + 1)
+                speech["tts_last_playback_status"] = status
+                speech["tts_last_progress_at"] = iso_now()
+                if status == "played":
+                    detail = f"screen played segment {playing_idx + 1}/{expected or '?'}"
+                elif status in {"stalled", "error", "play_rejected", "failed"}:
+                    detail = f"screen playback {status} at segment {playing_idx + 1}/{expected or '?'}"
+                else:
+                    detail = f"screen playing segment {playing_idx + 1}/{expected or '?'}"
+                self.snapshot["speech_service"]["tts"].update(
+                    {
+                        "status": "playing",
+                        "queue_size": max(0, expected - int(speech.get("tts_played_sentences") or 0)),
+                        "speaker_id": speech.get("speaker_id"),
+                        "detail": detail,
+                        "last_progress_at": speech["tts_last_progress_at"],
+                    }
+                )
+                payload.update(
+                    {
+                        "speaker_id": speech.get("speaker_id"),
+                        "played_sentences": speech.get("tts_played_sentences"),
+                        "expected_sentence_count": expected or None,
+                        "last_progress_at": speech.get("tts_last_progress_at"),
+                    }
+                )
+            self._persist_snapshot()
+        await self.emit("tts.playback_progress", payload, "screen", payload.get("speaker_id"))
+        return await self.get_snapshot()
+
+    async def request_tts_playback_resume(self, speech_id: str, task_id: str = "", reason: str = "host_resume_tts") -> Dict[str, Any]:
+        async with self._lock:
+            speech = self.snapshot.get("current_speech") or {}
+            if speech and speech.get("id") == speech_id and (not task_id or speech.get("tts_task_id") == task_id):
+                speech["tts_resume_requested_at"] = iso_now()
+                self.snapshot["speech_service"]["tts"].update(
+                    {
+                        "status": "synthesizing" if speech.get("state") == "thinking" else "playing",
+                        "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                        "queue_size": max(1, int(speech.get("tts_created_sentences") or speech.get("tts_ready_sentences") or 1) - int(speech.get("tts_played_sentences") or 0)),
+                        "speaker_id": speech.get("speaker_id"),
+                        "detail": "playback resume requested",
+                        "last_progress_at": speech["tts_resume_requested_at"],
+                    }
+                )
+                self._persist_snapshot()
+            payload = {
+                "speech_id": speech_id,
+                "task_id": task_id or speech.get("tts_task_id"),
+                "speaker_id": speech.get("speaker_id"),
+                "reason": reason,
+            }
+        await self.emit("tts.playback_resume_requested", payload, "host", payload.get("speaker_id"))
+        return await self.get_snapshot()
+
+    async def request_tts_playback_stop(self, speech_id: str, task_id: str = "", reason: str = "host_stop_tts_audio") -> Dict[str, Any]:
+        """Ask the screen to cut the live TTS audio source without ending the speech.
+
+        This is a pure audio control: the speech and the overall match flow keep their
+        state, only the projector's sound output is silenced (and can be resumed via
+        ``request_tts_playback_resume``).
+        """
+        async with self._lock:
+            speech = self.snapshot.get("current_speech") or {}
+            payload = {
+                "speech_id": speech_id,
+                "task_id": task_id or speech.get("tts_task_id"),
+                "speaker_id": speech.get("speaker_id"),
+                "reason": reason,
+            }
+        await self.emit("tts.playback_stop_requested", payload, "host", payload.get("speaker_id"))
+        return await self.get_snapshot()
+
+    async def force_skip_sentence(self, speech_id: str, sentence_idx: int, reason: str = "host_force_skip") -> Dict[str, Any]:
+        """操作员手动把卡住的某个分段标记为跳过，让大屏对账越过它继续播放。
+
+        纯救援控制：把 idx 记进 tts_skipped_sentences（大屏 reducer 读快照即推进），
+        并补发一个 skip 形态的 tts.sentence_ready 触发刷新。"""
+        async with self._lock:
+            self._ensure_match_allows_control("force_skip_sentence")
+            speech = self.snapshot.get("current_speech") or {}
+            if not speech or speech.get("id") != speech_id:
+                raise MatchStateError("speech_not_found", "未找到要跳过的当前发言。", {"speech_id": speech_id})
+            speaker_id = speech.get("speaker_id")
+            task_id = speech.get("tts_task_id")
+            skipped = speech.setdefault("tts_skipped_sentences", [])
+            if int(sentence_idx) not in skipped:
+                skipped.append(int(sentence_idx))
+                skipped.sort()
+            self.snapshot["speech_service"]["tts"]["last_progress_at"] = iso_now()
+            self._persist_snapshot()
+            payload = {
+                "speech_id": speech_id,
+                "task_id": task_id,
+                "speaker_id": speaker_id,
+                "sentence_idx": int(sentence_idx),
+                "audio_url": "",
+                "skipped": True,
+                "reason": reason,
+            }
+        await self.emit("tts.sentence_ready", payload, "screen", speaker_id)
+        return await self.get_snapshot()
+
+    async def resynthesize_speech_tts(self, speech_id: str, reason: str = "host_resynthesize") -> Dict[str, Any]:
+        """用已生成的文本对当前 AI 发言重跑 TTS。
+
+        清空旧音频与 TTS 计数、分配新的 task_id、用 content_final 重新分句合成。新的 task_id
+        会让大屏对账触发 STOP(task_changed)，随后从头重播新归档——无需新增前端协议。"""
+        async with self._lock:
+            self._ensure_match_allows_control("resynthesize_tts")
+            speech = self.snapshot.get("current_speech")
+            if not speech or speech.get("id") != speech_id:
+                raise MatchStateError("speech_not_found", "未找到要重新合成的当前发言。", {"speech_id": speech_id})
+            if speech.get("source") != "agent_text":
+                raise MatchStateError("invalid_speech_source", "只有 AI 发言可以重新合成 TTS。", {"speech_id": speech_id})
+            full_text = (speech.get("content_final") or speech.get("content_partial") or "").strip()
+            if not full_text:
+                raise MatchStateError("empty_speech_text", "该发言尚无可合成的文本。", {"speech_id": speech_id})
+            speaker_id = speech.get("speaker_id")
+            speaker = self._find_speaker(speaker_id)
+            new_task_id = f"task_{self.seq + 1}"
+            self.snapshot["audio_assets"] = [
+                asset for asset in self.snapshot.get("audio_assets", []) if asset.get("speech_id") != speech_id
+            ]
+            speech["tts_task_id"] = new_task_id
+            speech["tts_expected_sentences"] = None
+            speech["tts_created_sentences"] = 0
+            speech["tts_ready_sentences"] = 0
+            speech["tts_played_sentences"] = 0
+            speech["tts_skipped_sentences"] = []
+            speech.pop("tts_playing_sentence_idx", None)
+            speech["tts_last_playback_status"] = "resynthesizing"
+            self.snapshot["speech_service"]["tts"].update(
+                {
+                    "status": "synthesizing",
+                    "queue_size": 0,
+                    "speaker_id": speaker_id,
+                    "detail": "resynthesizing TTS for current speech",
+                    "last_progress_at": iso_now(),
+                }
+            )
+            self._persist_snapshot()
+        await self.emit(
+            "tts.resynthesize_started",
+            {"speech_id": speech_id, "task_id": new_task_id, "speaker_id": speaker_id, "reason": reason},
+            "screen",
+            speaker_id,
+        )
+
+        expected = await self._synthesize_text_tts(speech_id, new_task_id, speaker, full_text)
+
+        async with self._lock:
+            speech = self.snapshot.get("current_speech")
+            if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == new_task_id:
+                speech["tts_expected_sentences"] = expected
+                speech["tts_created_sentences"] = expected
+                self._reconcile_tts_gaps(speech, expected)
+                self.snapshot["speech_service"]["tts"].update(
+                    {
+                        "status": "playing",
+                        "queue_size": max(1, expected),
+                        "speaker_id": speaker_id,
+                        "detail": "resynthesized TTS playback pending",
+                        "last_progress_at": iso_now(),
+                    }
+                )
+                self._persist_snapshot()
+        await self.emit(
+            "tts.finished",
+            {"task_id": new_task_id, "speech_id": speech_id, "speaker_id": speaker_id, "expected_sentence_count": expected},
+            "system",
+        )
+        return await self.get_snapshot()
+
+    async def _synthesize_text_tts(self, speech_id: str, task_id: str, speaker: Dict[str, Any], full_text: str) -> int:
+        """对一段完整文本分句并发合成 TTS，返回创建的分段数（expected）。
+
+        复用 run_agent_speech 流式路径里的同一套分句逻辑（_next_tts_sentence）与单句合成
+        （_synthesize_sentence_tts），但输入是完整文本——供「重新合成」复用。"""
+        semaphore = asyncio.Semaphore(self._tts_sentence_concurrency())
+
+        async def synth(sentence: str, idx: int) -> bool:
+            async with semaphore:
+                return await self._synthesize_sentence_tts(sentence, idx, task_id, speech_id, speaker)
+
+        tasks: List[asyncio.Task] = []
+        sent_chars = 0
+        idx = 0
+        guard = 0
+        while True:
+            guard += 1
+            if guard > 10000:  # 防御性上限，正常发言远不会触及
+                break
+            sentence, new_pos = self._next_tts_sentence(full_text, sent_chars, allow_soft_break=(idx == 0))
+            if new_pos <= sent_chars and not sentence:
+                break  # 没有进展、也没有完整句子 —— 剩余作为 tail 处理
+            sent_chars = new_pos
+            if sentence:
+                tasks.append(asyncio.create_task(synth(sentence, idx)))
+                idx += 1
+        tail = full_text[sent_chars:].strip()
+        if tail:
+            tasks.append(asyncio.create_task(synth(tail, idx)))
+            idx += 1
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return idx
 
     async def _start_agent_playback(self, task_id: str, speaker: Dict[str, Any]) -> None:
         async with self._lock:
@@ -3999,6 +4867,7 @@ class MatchStore:
             self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
             if self.snapshot.get("current_speech"):
                 self.snapshot["current_speech"]["started_at"] = iso_now()
+                self.snapshot["current_speech"]["state"] = "speaking"
             self._start_relevant_clocks(speaker["side"])
             self.snapshot["speech_service"]["tts"] = {
                 "status": "playing",
@@ -4024,6 +4893,19 @@ class MatchStore:
 
         request_id = f"tts_{task_id}"
         request_started_time = time.perf_counter()
+        try:
+            selection = select_tts_gateway(speaker=speaker)
+        except SpeechProviderError as exc:
+            return {
+                "task_id": task_id,
+                "speech_id": speech_id,
+                "speaker_id": speaker["id"],
+                "reason": _speech_error_message(exc),
+                "code": _speech_error_code(exc, "tts_config_error"),
+                "failed": True,
+                "latency_ms": 0,
+                "degraded_to": "text_only",
+            }
         async with self._lock:
             current_speech = self.snapshot.get("current_speech") or {}
             phase_id = current_speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
@@ -4044,15 +4926,30 @@ class MatchStore:
                     "speaker_id": speaker["id"],
                     "text": content,
                     "text_length": len(content),
+                    "provider": selection.provider,
+                    "voice_preset_id": (selection.preset or {}).get("id"),
                 },
                 started_at=iso_now(),
             )
+            speech = self.snapshot.get("current_speech")
+            if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id:
+                speech["tts_last_progress_at"] = iso_now()
+                self.snapshot["speech_service"]["tts"].update(
+                    {
+                        "status": "synthesizing",
+                        "queue_size": max(1, int(speech.get("tts_created_sentences") or sentence_idx + 1) - int(speech.get("tts_ready_sentences") or 0)),
+                        "speaker_id": speaker_id,
+                        "detail": f"synthesizing segment {sentence_idx + 1}",
+                        "last_progress_at": speech["tts_last_progress_at"],
+                    }
+                )
+                self._persist_snapshot()
             self.snapshot["speech_service"]["tts"] = {
                 "status": "synthesizing",
                 "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
                 "queue_size": 1,
                 "speaker_id": speaker["id"],
-                "detail": "Xunfei TTS synthesizing official AI speech",
+                "detail": f"{selection.provider} TTS synthesizing official AI speech",
             }
             self._persist_snapshot()
 
@@ -4063,16 +4960,17 @@ class MatchStore:
             speaker["id"],
         )
 
-        gateway = XfyunTTSGateway(url=os.getenv("XFYUN_TTS_URL", "").strip())
         try:
-            result = await gateway.synthesize(content)
-        except XfyunGatewayError as exc:
+            result = await selection.gateway.synthesize(content, **selection.options)
+        except SpeechProviderError as exc:
+            message = _speech_error_message(exc)
+            code = _speech_error_code(exc, "tts_error")
             payload = {
                 "task_id": task_id,
                 "speech_id": speech_id,
                 "speaker_id": speaker["id"],
-                "reason": exc.message,
-                "code": exc.code,
+                "reason": message,
+                "code": code,
                 "failed": True,
                 "latency_ms": 0,
                 "degraded_to": "text_only",
@@ -4083,7 +4981,7 @@ class MatchStore:
                     "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
                     "queue_size": 0,
                     "speaker_id": speaker["id"],
-                    "detail": exc.message,
+                    "detail": message,
                     "degraded_to": "text_only",
                 }
                 self.repo.finish_speech_service_request(
@@ -4091,8 +4989,8 @@ class MatchStore:
                     request_id=request_id,
                     status="failed",
                     response={"degraded_to": "text_only"},
-                    error_code=str(exc.code) if exc.code is not None else "xfyun_tts_error",
-                    error_message=exc.message,
+                    error_code=code,
+                    error_message=message,
                     latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
                     completed_at=iso_now(),
                 )
@@ -4139,6 +5037,8 @@ class MatchStore:
                 "chunk_count": result.chunk_count,
                 "latency_ms": result.latency_ms,
                 "file_path": str(file_path),
+                "provider": selection.provider,
+                "voice_preset_id": (selection.preset or {}).get("id"),
             }
             self.repo.finish_speech_service_request(
                 match_id=match_id,
@@ -4150,8 +5050,355 @@ class MatchStore:
             )
             self._persist_snapshot()
 
-        await self.emit("tts.audio_archived", payload, "system", speaker["id"])
+        # Compute a browser-accessible URL for this audio file
+        try:
+            audio_root = project_root() / "apps" / "backend" / "storage" / "audio"
+            rel = file_path.relative_to(audio_root)
+            parts = rel.parts
+            if parts:
+                audio_url = "/api/audio/" + "/".join(parts)
+            else:
+                audio_url = None
+        except ValueError:
+            audio_url = None
+
+        if audio_url:
+            payload["audio_url"] = audio_url
+
+        await self.emit("tts.audio_archived", payload, "screen", speaker["id"])
         return payload
+
+    # --- streaming sentence TTS helpers ---
+
+    _SENTENCE_END_RE = re.compile(r"[。！？!?]+")
+    _TTS_SOFT_BREAK_RE = re.compile(r"[，,；;：:]")
+
+    def _next_tts_sentence(self, full_text: str, sent_chars: int, allow_soft_break: bool = True) -> tuple:
+        """Return (segment, new_sent_chars) for the next TTS-ready text after sent_chars.
+
+        Full sentences are preferred. When ``allow_soft_break`` is true, a long
+        streaming prefix without a sentence end may be cut at a comma/semicolon/colon
+        so the very first audio can start before the agent finishes a paragraph.
+        Once playback is under way (``allow_soft_break`` false) we only ever cut at a
+        real sentence end, so two words inside the same sentence are never synthesized
+        as separate, audibly disjoint segments.
+        """
+        tail = full_text[sent_chars:]
+        early_chars = self._tts_early_segment_chars()
+        min_sentence_chars = self._tts_min_sentence_chars()
+        first_min = self._tts_first_segment_chars()
+        stripped_tail = tail.strip()
+        m = self._SENTENCE_END_RE.search(tail)
+        if m:
+            end = m.end()
+            sentence = tail[:end].strip()
+            new_pos = sent_chars + end
+            if len(sentence) < 4:
+                return "", new_pos  # advance past short sentence
+            if len(sentence) < min_sentence_chars and not allow_soft_break:
+                # 播放已开始（非首段）：完整但短的句子整段发出，绝不在句中切。
+                return sentence, new_pos
+            # 首段（allow_soft_break）：完整句即便短也立刻发声——尽快开口，且是自然句末，不割裂。
+            return sentence, new_pos
+
+        # No sentence end yet. Without soft breaks we wait for a full sentence rather
+        # than cutting the paragraph mid-way.
+        if not allow_soft_break:
+            return "", sent_chars
+
+        # 首段尽快出声：在第一个位置 >= first_min 的软停顿（逗号/分号/冒号）处即切出第一声；
+        # 都还没有则等满 early_chars 再兜底硬切（极少发生）。切点都在标点处，自然停顿、不割裂。
+        window = tail[: min(len(tail), early_chars + 12)]
+        first_break = 0
+        for match in self._TTS_SOFT_BREAK_RE.finditer(window):
+            if match.end() >= first_min:
+                first_break = match.end()
+                break
+        if first_break:
+            sentence = tail[:first_break].strip()
+            new_pos = sent_chars + first_break
+            if len(sentence) < 4:
+                return "", new_pos
+            return sentence, new_pos
+
+        if len(stripped_tail) < early_chars:
+            return "", sent_chars
+
+        hard_end = min(len(tail), early_chars + 12)
+        sentence = tail[:hard_end].strip()
+        new_pos = sent_chars + hard_end
+        if len(sentence) < 4:
+            return "", new_pos
+        return sentence, new_pos
+
+    async def _synthesize_sentence_tts(
+        self,
+        text: str,
+        sentence_idx: int,
+        task_id: str,
+        speech_id: str,
+        speaker: Dict[str, Any],
+    ) -> bool:
+        """Synthesize a single sentence's TTS and emit tts.sentence_ready for screen playback.
+
+        Returns True on success, False on failure. Every created sentence index MUST emit
+        exactly one tts.sentence_ready event so the screen's ordered audio queue never stalls
+        waiting for a missing index. On synthesis/archive failure we still emit the event with
+        an empty audio_url plus skipped=True, so the screen advances past it instead of hanging."""
+        speaker_id = speaker["id"]
+        request_id = f"tts_{task_id}_s{sentence_idx}"
+
+        async def _emit_skip(reason: str) -> None:
+            # Record the skipped index on the speech so the screen can fill the ordered
+            # gap deterministically from the snapshot — the realtime layer can drop this
+            # event, and a missing index would otherwise stall ordered playback forever.
+            # 记录绝不能因为快照写入异常或 speech 已切换而失败——所以包 try/except，并在
+            # finally 里始终 emit。完成时的对账（_reconcile_tts_gaps）会再兜底补齐遗漏的 idx。
+            try:
+                async with self._lock:
+                    speech = self.snapshot.get("current_speech")
+                    if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id:
+                        skipped = speech.setdefault("tts_skipped_sentences", [])
+                        if int(sentence_idx) not in skipped:
+                            skipped.append(int(sentence_idx))
+                        self._persist_snapshot(sync_structured=False)
+            except Exception:  # noqa: BLE001 — 记录失败也必须把事件发出去，绝不吞掉跳过
+                pass
+            finally:
+                await self.emit(
+                    "tts.sentence_ready",
+                    {
+                        "task_id": task_id,
+                        "speech_id": speech_id,
+                        "speaker_id": speaker_id,
+                        "sentence_idx": sentence_idx,
+                        "audio_url": "",
+                        "skipped": True,
+                        "reason": reason,
+                    },
+                    "screen",
+                    speaker_id,
+                    sync_structured=False,
+                )
+
+        normalized_text = normalize_tts_text(text)
+        if not normalized_text:
+            await _emit_skip("empty_sentence")
+            return False
+        try:
+            selection = select_tts_gateway(speaker=speaker)
+        except SpeechProviderError:
+            await _emit_skip("tts_config_failed")
+            return False
+        async with self._lock:
+            match_id = self.snapshot["match"]["id"]
+            phase_id = (self.snapshot.get("current_speech") or {}).get("phase_id") or self.snapshot["match"]["current_phase_id"]
+            phase_key = self._phase_key_or_default(phase_id)
+            self.repo.save_speech_service_request_started(
+                match_id=match_id,
+                request_id=request_id,
+                service="tts",
+                operation="agent_synthesis",
+                speech_id=speech_id,
+                speaker_id=speaker_id,
+                origin="live",
+                **self._log_context(),
+                request={
+                    "task_id": task_id,
+                    "speech_id": speech_id,
+                    "speaker_id": speaker_id,
+                    "sentence_idx": sentence_idx,
+                    "text": text,
+                    "text_length": len(text),
+                    "normalized_text_length": len(normalized_text),
+                    "normalized_text_preview": normalized_text[:80],
+                    "provider": selection.provider,
+                    "voice_preset_id": (selection.preset or {}).get("id"),
+                },
+                started_at=iso_now(),
+            )
+
+        request_started_time = time.perf_counter()
+        try:
+            live_key = (match_id, speech_id, task_id, sentence_idx)
+            live_mime_type = self._tts_live_mime_type(selection)
+            if live_mime_type:
+                await tts_live_manager.start(
+                    live_key,
+                    {
+                        "match_id": match_id,
+                        "task_id": task_id,
+                        "speech_id": speech_id,
+                        "speaker_id": speaker_id,
+                        "sentence_idx": sentence_idx,
+                        "mime_type": live_mime_type,
+                    },
+                )
+                async with self._lock:
+                    speech = self.snapshot.get("current_speech")
+                    if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id:
+                        speech["tts_streaming_sentences"] = max(int(speech.get("tts_streaming_sentences") or 0), sentence_idx + 1)
+                        self._persist_snapshot()
+                await self.emit(
+                    "tts.sentence_stream_started",
+                    {
+                        "task_id": task_id,
+                        "speech_id": speech_id,
+                        "speaker_id": speaker_id,
+                        "sentence_idx": sentence_idx,
+                        "mime_type": live_mime_type,
+                    },
+                    "screen",
+                    speaker_id,
+                )
+                audio_parts: List[bytes] = []
+                chunk_count = 0
+                latency_ms = 0
+                result_mime_type = live_mime_type
+                async for event in selection.gateway.synthesize_stream(normalized_text, **selection.options):
+                    if event["type"] == "chunk":
+                        chunk = bytes(event["audio"])
+                        chunk_count += 1
+                        audio_parts.append(chunk)
+                        await tts_live_manager.publish_chunk(live_key, chunk, int(event.get("index") or chunk_count))
+                    elif event["type"] == "done":
+                        result_mime_type = event["mime_type"]
+                        latency_ms = event["latency_ms"]
+                        chunk_count = event["chunk_count"]
+                result = TTSResult(
+                    audio=b"".join(audio_parts),
+                    mime_type=result_mime_type,
+                    latency_ms=latency_ms,
+                    chunk_count=chunk_count,
+                )
+                await tts_live_manager.finish(live_key, {"mime_type": result.mime_type, "latency_ms": result.latency_ms, "chunk_count": result.chunk_count})
+            else:
+                result = await selection.gateway.synthesize(normalized_text, **selection.options)
+        except SpeechProviderError as exc:
+            try:
+                await tts_live_manager.fail((match_id, speech_id, task_id, sentence_idx), _speech_error_message(exc))
+            except Exception:
+                pass
+            message = _speech_error_message(exc)
+            code = _speech_error_code(exc, "tts_error")
+            async with self._lock:
+                self.repo.finish_speech_service_request(
+                    match_id=match_id,
+                    request_id=request_id,
+                    status="failed",
+                    response={"degraded_to": "text_only"},
+                    error_code=code,
+                    error_message=message,
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
+            await _emit_skip("tts_synthesize_failed")
+            return False
+
+        try:
+            archive_dir = self._audio_archive_dir(match_id, phase_key, speech_id)
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            ext = self._audio_extension(result.mime_type)
+            file_path = archive_dir / f"tts_{self._safe_path_part(task_id)}_s{sentence_idx}.{ext}"
+            file_path.write_bytes(result.audio)
+            audio_root = self.audio_root_path()
+            rel = file_path.relative_to(audio_root)
+            audio_url = "/api/audio/" + "/".join(rel.parts)
+        except (OSError, ValueError):
+            async with self._lock:
+                self.repo.finish_speech_service_request(
+                    match_id=match_id,
+                    request_id=request_id,
+                    status="failed",
+                    response={"degraded_to": "text_only"},
+                    error_code="archive_error",
+                    error_message="Failed to write TTS audio file",
+                    latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                    completed_at=iso_now(),
+                )
+            await _emit_skip("tts_archive_failed")
+            return False
+
+        latency_ms = result.latency_ms
+        async with self._lock:
+            asset = self._upsert_audio_asset(
+                speech_id=speech_id,
+                speaker_id=speaker_id,
+                phase_id=phase_id,
+                mime_type=result.mime_type,
+                archive_dir=archive_dir,
+                chunk_path=file_path,
+                chunk_index=sentence_idx,
+                size_bytes=len(result.audio),
+                duration_ms=None,
+            )
+            now = iso_now()
+            asset.update(
+                {
+                    "status": "completed",
+                    "completed_at": now,
+                    "updated_at": now,
+                    "source": "agent_tts",
+                    "tts_task_id": task_id,
+                    "text_length": len(text),
+                }
+            )
+            self.snapshot["speech_service"]["tts"]["latency_ms"] = latency_ms
+            speech = self.snapshot.get("current_speech")
+            if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id:
+                speech["tts_ready_sentences"] = max(int(speech.get("tts_ready_sentences") or 0), sentence_idx + 1)
+                created = int(speech.get("tts_created_sentences") or sentence_idx + 1)
+                ready = int(speech.get("tts_ready_sentences") or 0)
+                self.snapshot["speech_service"]["tts"].update(
+                    {
+                        "status": "playing" if int(speech.get("tts_played_sentences") or 0) > 0 else "synthesizing",
+                        "queue_size": max(0, created - ready),
+                        "speaker_id": speaker_id,
+                        "detail": f"TTS archived segment {sentence_idx + 1}/{created or '?'}",
+                        "last_progress_at": iso_now(),
+                    }
+                )
+            self.repo.finish_speech_service_request(
+                match_id=match_id,
+                request_id=request_id,
+                status="completed",
+                response={
+                    "task_id": task_id,
+                    "speech_id": speech_id,
+                    "speaker_id": speaker_id,
+                    "sentence_idx": sentence_idx,
+                    "audio_asset_id": asset["id"],
+                    "mime_type": result.mime_type,
+                    "size_bytes": len(result.audio),
+                    "chunk_count": result.chunk_count,
+                    "latency_ms": latency_ms,
+                    "file_path": str(file_path),
+                    "provider": selection.provider,
+                    "voice_preset_id": (selection.preset or {}).get("id"),
+                },
+                latency_ms=latency_ms,
+                completed_at=iso_now(),
+            )
+            # 热点：跳过昂贵的结构化镜像同步（只写实时快照），让 sentence_ready 尽快广播去出声；
+            # 结构化表在发言结束/阶段切换等节点统一同步。
+            self._persist_snapshot(sync_structured=False)
+
+        await self.emit(
+            "tts.sentence_ready",
+            {
+                "task_id": task_id,
+                "speech_id": speech_id,
+                "speaker_id": speaker_id,
+                "sentence_idx": sentence_idx,
+                "audio_url": audio_url,
+                "mime_type": result.mime_type,
+                "size_bytes": len(result.audio),
+            },
+            "screen",
+            speaker_id,
+            sync_structured=False,
+        )
+        return True
 
     def _tts_formal_enabled(self) -> bool:
         raw = os.getenv("PHDEBATE_TTS_FORMAL", "").strip().lower()
@@ -4159,13 +5406,167 @@ class MatchStore:
             return False
         if raw in {"1", "true", "yes", "on"}:
             return True
-        required = ["XFYUN_APP_ID", "XFYUN_API_KEY", "XFYUN_API_SECRET", "XFYUN_TTS_URL"]
-        return all(os.getenv(name, "").strip() for name in required)
+        return self._speech_section_ready("tts")
+
+    def _tts_sentence_concurrency(self) -> int:
+        # Synthesize several sentences in parallel so the next archived file is ready
+        # before playback reaches it (keeps the archived-file path from sounding slow).
+        raw = os.getenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "4").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 4
+        return max(1, min(8, value))
+
+    def _tts_ready_indices(self, speech_id: str) -> set:
+        """已成功归档（有可播 url）的分段序号集合。"""
+        asset = self._audio_asset_for_speech(speech_id)
+        ready = set()
+        for chunk in (asset or {}).get("chunks", []) if asset else []:
+            try:
+                idx = int(chunk.get("chunk_index", -1))
+            except (TypeError, ValueError):
+                continue
+            if idx >= 0 and str(chunk.get("audio_url") or ""):
+                ready.add(idx)
+        return ready
+
+    def _reconcile_tts_gaps(self, speech: Dict[str, Any], expected: int) -> None:
+        """保证 [0,expected) 中每个分段要么 ready、要么 skipped。
+
+        合成任务即便因异常逃逸了 _emit_skip、或 skip 记录丢失，这里也会把遗漏的 idx 补进
+        tts_skipped_sentences，使不变量 expected == |ready| + |skipped| 成立——大屏的纯函数
+        对账只看快照即可推进到结束，绝不会等一个永远不来的分段而永久卡死。
+        """
+        if expected <= 0:
+            return
+        speech_id = speech.get("id")
+        ready = self._tts_ready_indices(speech_id) if speech_id else set()
+        skipped = speech.setdefault("tts_skipped_sentences", [])
+        skipped_set = set(int(i) for i in skipped)
+        for idx in range(expected):
+            if idx not in ready and idx not in skipped_set:
+                skipped.append(idx)
+                skipped_set.add(idx)
+        skipped.sort()
+
+    def _tts_live_mime_type(self, selection: Any) -> str:
+        # 默认关闭 live MSE 流式：投影机浏览器上它会"解码成静音/超慢"，且一旦首块不可解码，
+        # 大屏严格队列会卡在该分段永不前进。归档文件路径才是可靠的唯一真相。要试验可在进程
+        # 环境设 PHDEBATE_TTS_LIVE_STREAM=1 并重启后端（不需要改码）。
+        raw = os.getenv("PHDEBATE_TTS_LIVE_STREAM", "0").strip().lower()
+        if raw in {"0", "false", "no", "off"}:
+            return ""
+        if getattr(selection, "provider", "") != "alicloud":
+            return ""
+        gateway = getattr(selection, "gateway", None)
+        if not hasattr(gateway, "synthesize_stream") or not hasattr(gateway, "stream_mime_type"):
+            return ""
+        try:
+            mime_type = str(gateway.stream_mime_type(**getattr(selection, "options", {}))).strip()
+        except Exception:
+            return ""
+        # MediaSource support for mp3 is mature in the browsers used for the
+        # projection screen; PCM/Opus keep using the archived-file fallback.
+        return mime_type if mime_type == "audio/mpeg" else ""
+
+    def _tts_early_segment_chars(self) -> int:
+        raw = os.getenv("PHDEBATE_TTS_EARLY_SEGMENT_CHARS", "40").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 40
+        return max(24, min(110, value))
+
+    def _tts_min_sentence_chars(self) -> int:
+        raw = os.getenv("PHDEBATE_TTS_MIN_SENTENCE_CHARS", "18").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 18
+        return max(8, min(32, value))
+
+    def _tts_first_segment_chars(self) -> int:
+        """首段（idx 0）尽快出声的最小字数：在第一个 >= 该值的自然停顿（句末或逗号）处即切出，
+        而不是像后续段那样等满 early_segment_chars。这样首句更早开始合成、且更短=合成更快，
+        把"开口很慢"压下来；切点都在标点处（自然停顿，不会把词切断）。"""
+        raw = os.getenv("PHDEBATE_TTS_FIRST_SEGMENT_CHARS", "8").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 8
+        return max(4, min(40, value))
 
     def _tts_completion_detail(self, tts_result: Optional[Dict[str, Any]]) -> str:
         if not tts_result or tts_result.get("failed"):
             return ""
         return f"TTS archived · {tts_result.get('size_bytes', 0)} bytes · {tts_result.get('file_path', '')}"
+
+    # --- agent output budget (deterministic max_token from the speech time limit) ---
+
+    def _tts_speaking_cps(self) -> float:
+        """Spoken Chinese characters per second at speech_rate=1 (debate pace)."""
+        raw = os.getenv("PHDEBATE_TTS_SPEAKING_CPS", "4.5").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 4.5
+        return max(2.0, min(8.0, value))
+
+    def _agent_tokens_per_char(self) -> float:
+        """Tokens per Chinese character for the agent model's tokenizer.
+
+        Qwen-family tokenizers average ~1.5 Chinese chars per token; 0.75 keeps a
+        safety margin so the spoken duration stays within the limit.
+        """
+        raw = os.getenv("PHDEBATE_AGENT_TOKENS_PER_CHAR", "0.75").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.75
+        return max(0.4, min(2.0, value))
+
+    def _agent_max_token_margin(self) -> float:
+        """Headroom so the model finishes a sentence naturally instead of being
+        hard-truncated exactly at the time budget."""
+        raw = os.getenv("PHDEBATE_AGENT_MAX_TOKEN_MARGIN", "1.15").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 1.15
+        return max(1.0, min(2.0, value))
+
+    def _speaker_speech_rate(self, speaker: Dict[str, Any]) -> float:
+        """Resolve the TTS speech rate for a speaker (its preset, else provider default)."""
+        provider = str((integration_config.active_section("tts") or {}).get("provider") or "alicloud")
+        preset_id = str(speaker.get("tts_voice_preset_id") or "").strip()
+        preset = integration_config.voice_preset(preset_id) if preset_id else None
+        if not preset:
+            preset = integration_config.default_voice_preset(provider)
+        try:
+            rate = float((preset or {}).get("speech_rate") or 1.0)
+        except (TypeError, ValueError):
+            rate = 1.0
+        return max(0.5, min(2.0, rate))
+
+    def _agent_output_budget(self, time_limit_seconds: int, speech_rate: float) -> Dict[str, Any]:
+        """Deterministically derive the char/token budget for one speech.
+
+        char_budget = time_limit × spoken_chars_per_sec × speech_rate
+        max_token   = round(char_budget × tokens_per_char × margin), clamped to [64, 4096]
+        """
+        cps = self._tts_speaking_cps() * speech_rate
+        char_budget = max(1.0, float(time_limit_seconds) * cps)
+        target_chars = max(40, int(char_budget))
+        raw_tokens = char_budget * self._agent_tokens_per_char() * self._agent_max_token_margin()
+        max_token = max(64, min(4096, int(round(raw_tokens))))
+        return {
+            "speech_rate": round(speech_rate, 3),
+            "chars_per_second": round(cps, 3),
+            "char_budget": target_chars,
+            "target_chars": target_chars,
+            "max_token": max_token,
+        }
 
     async def _fail_agent_task(self, task_id: str, speaker_id: str, exc: AgentGatewayError) -> None:
         async with self._lock:
@@ -4450,6 +5851,25 @@ class MatchStore:
         url = f"/api/files/speaker-images/{filename}?v={self.seq + 1}"
         return await self.update_speaker(speaker_id, {"image_url": url})
 
+    async def save_match_image(self, kind: str, content: bytes, mime_type: str) -> Dict[str, Any]:
+        """Store a 比赛名称/主办机构 image and switch that slot to image display mode."""
+        if kind not in {"title", "organizer"}:
+            raise MatchStateError("invalid_image_kind", "图片类型必须是 title 或 organizer。", {"kind": kind})
+        ext = self._image_extension(mime_type)
+        match_id = str(self.snapshot["match"]["id"])
+        root = self.image_root_path() / "match"
+        root.mkdir(parents=True, exist_ok=True)
+        filename = f"{match_id}_{kind}.{ext}"
+        for old in root.glob(f"{match_id}_{kind}.*"):
+            if old.name != filename:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        (root / filename).write_bytes(content)
+        url = f"/api/files/match-images/{filename}?v={self.seq + 1}"
+        return await self.update_match({f"{kind}_image_url": url, f"{kind}_display": "image"})
+
     def _audio_extension(self, mime_type: str) -> str:
         value = (mime_type or "").lower()
         if "l16" in value or "pcm" in value or "audio/raw" in value or value == "application/octet-stream":
@@ -4474,8 +5894,7 @@ class MatchStore:
             return False
         if raw in {"1", "true", "yes", "on"}:
             return True
-        required = ["XFYUN_APP_ID", "XFYUN_API_KEY", "XFYUN_API_SECRET", "XFYUN_ASR_URL"]
-        return all(os.getenv(name, "").strip() for name in required)
+        return self._speech_section_ready("asr")
 
     def _asr_realtime_enabled(self) -> bool:
         raw = os.getenv("PHDEBATE_ASR_REALTIME", "").strip().lower()
@@ -4483,8 +5902,25 @@ class MatchStore:
             return False
         if raw in {"1", "true", "yes", "on"}:
             return True
-        required = ["XFYUN_APP_ID", "XFYUN_API_KEY", "XFYUN_API_SECRET", "XFYUN_ASR_URL"]
-        return all(os.getenv(name, "").strip() for name in required)
+        return self._speech_section_ready("asr")
+
+    def _speech_section_ready(self, kind: str) -> bool:
+        section = integration_config.active_section(kind)
+        if not section.get("enabled"):
+            return False
+        provider = str(section.get("provider") or "alicloud")
+        if provider == "xfyun":
+            secrets = section.get("secrets") or {}
+            return bool(
+                str(section.get("endpoint") or "").strip()
+                and str(secrets.get("app_id") or "").strip()
+                and str(secrets.get("api_key") or "").strip()
+                and str(secrets.get("api_secret") or "").strip()
+            )
+        if provider == "alicloud":
+            secrets = (section.get("secrets") or {}).get("alicloud") or {}
+            return bool(str(secrets.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")).strip())
+        return False
 
     def _safe_path_part(self, value: str) -> str:
         cleaned = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in str(value))
@@ -4531,10 +5967,18 @@ class MatchStore:
             self.snapshot.setdefault("audio_assets", []).insert(0, asset)
 
         chunks = [chunk for chunk in asset.setdefault("chunks", []) if int(chunk.get("chunk_index", -1)) != chunk_index]
+        audio_url = ""
+        try:
+            audio_root = self.audio_root_path()
+            rel = chunk_path.relative_to(audio_root)
+            audio_url = "/api/audio/" + "/".join(rel.parts)
+        except ValueError:
+            audio_url = ""
         chunks.append(
             {
                 "chunk_index": chunk_index,
                 "file_path": str(chunk_path),
+                "audio_url": audio_url,
                 "size_bytes": size_bytes,
                 "mime_type": mime_type,
                 "duration_ms": duration_ms,
@@ -4613,7 +6057,11 @@ class MatchStore:
                 "updated_at": iso_now(),
             }
         )
-        self.snapshot["recent_transcript"] = [segment, *next_segments][:12]
+        # Keep the full debate (newest first). The cap is a safety bound, not a display
+        # window — a previous value of 12 dropped earlier speeches from the 实时辩论过程
+        # view AND from debate_history sent to agents. One in-progress speech updates a
+        # single segment in place, so this counts distinct speeches, not stream deltas.
+        self.snapshot["recent_transcript"] = [segment, *next_segments][:_RECENT_TRANSCRIPT_LIMIT]
         return segment
 
     def _apply_archived_asr_text(self, speech_id: str, text: str) -> None:
@@ -4769,6 +6217,37 @@ class MatchStore:
                 "speaker_id": speaker_id,
                 "expired_clocks": expired_clock_names,
                 "created_at": to_iso(now),
+            }
+        )
+        self.snapshot["flow"] = flow
+        return deepcopy(flow)
+
+    def _set_flow_waiting_after_speech_end(self, speech: Dict[str, Any], speaker: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        phase = self._current_phase()
+        if phase.get("phase_type") == "free_debate":
+            next_action = "free_turn_next"
+            next_side = self.snapshot.get("free_debate", {}).get("current_turn_side", "neutral")
+            next_side_label = {"affirmative": "正方", "negative": "反方"}.get(str(next_side), "下一方")
+            message = f"{self.speaker_label(speaker['id'])} 发言完毕，等待主持确认{next_side_label}下一轮。"
+        elif self._next_phase(phase):
+            next_action = "phase_next"
+            message = f"{self.speaker_label(speaker['id'])} 发言完毕，等待主持确认进入下一环节。"
+        else:
+            next_action = "judge_commentary"
+            message = f"{self.speaker_label(speaker['id'])} 发言完毕，等待主持进入评委点评。"
+
+        flow = self._fresh_flow_state()
+        flow.update(
+            {
+                "awaiting_host_confirm": True,
+                "reason": reason,
+                "message": message,
+                "next_action": next_action,
+                "phase_id": speech.get("phase_id") or phase.get("id"),
+                "speech_id": speech.get("id"),
+                "speaker_id": speaker.get("id"),
+                "expired_clocks": [],
+                "created_at": iso_now(),
             }
         )
         self.snapshot["flow"] = flow

@@ -2,7 +2,7 @@ import * as React from "react";
 import {
   Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles, MessageSquare,
   Award, UserCircle2, HelpCircle, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
-  ArrowRight, Monitor, Vote, ChevronRight,
+  ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Badge, Select, Textarea, Input, Separator, Spinner } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
@@ -158,22 +158,26 @@ export function Control() {
           {/* 下一步骤：最高亮度、最显眼；需要操作时闪烁，否则灰色不可点 */}
           <div className="flex flex-wrap items-stretch gap-2">
             <button
-              disabled={!next.enabled}
+              disabled={!next.enabled || pending}
               onClick={() => {
                 if (next.run) void run(() => next.run!(base), { success: "已执行下一步" });
               }}
               className={[
-                "flex flex-1 items-center justify-center gap-2 rounded-lg px-5 py-3 text-base font-semibold transition-all",
-                next.enabled
-                  ? "bg-primary text-primary-foreground shadow-lg hover:bg-primary/90"
+                "flex flex-1 items-center justify-center gap-2 rounded-lg px-5 py-3 text-base font-semibold",
+                next.enabled && !pending
+                  ? "control-next-step bg-primary text-primary-foreground shadow-lg hover:bg-primary hover:text-primary-foreground hover:brightness-110 hover:shadow-xl active:brightness-95"
                   : "cursor-not-allowed bg-muted text-muted-foreground",
-                next.urgent ? "next-step-blink" : "",
+                next.urgent && !pending ? "next-step-blink" : "",
               ].join(" ")}
             >
-              <ArrowRight className="size-5" />
+              {pending ? (
+                <svg className="size-5 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 100 16v-4l-3 3 3 3v-4a8 8 0 01-8-8z" /></svg>
+              ) : (
+                <ArrowRight className="size-5" />
+              )}
               <span className="flex flex-col items-start leading-tight">
                 <span className="text-[11px] font-normal opacity-80">下一步骤</span>
-                <span>{next.label}</span>
+                <span>{pending ? "执行中…" : next.label}</span>
               </span>
             </button>
 
@@ -247,6 +251,7 @@ export function Control() {
       {(tab === "pre" || tab === "live") && (
         <div className="space-y-4">
           {tab === "pre" && <PreScreenControl />}
+          {tab === "live" && <TTSRealtimeModule />}
           <AgentControlPanel />
         </div>
       )}
@@ -266,12 +271,30 @@ export function Control() {
 /* ----------------------------- 2 · 比赛实况状态栏 ----------------------------- */
 function LiveStatusBar() {
   const { snapshot } = useAdminData();
+  const [now, setNow] = React.useState(Date.now());
+
+  // Tick every 500ms so the countdown updates smoothly without server pushes
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, []);
+
   if (!snapshot) return null;
   const m = snapshot.match;
   const phase = snapshot.phases.find((p) => p.id === m.current_phase_id);
   const clock = snapshot.clocks[0];
   const speaker = snapshot.speakers.find((s) => s.id === snapshot.current_speech?.speaker_id);
   const speechState = snapshot.current_speech?.state;
+
+  // Compute remaining seconds from deadline_at so it counts down without server pushes
+  const remainingSec = React.useMemo(() => {
+    if (!clock) return null;
+    if (clock.state === "running" && clock.deadline_at) {
+      return Math.max(0, Math.round((new Date(clock.deadline_at as string).getTime() - now) / 1000));
+    }
+    return Math.max(0, Math.round((clock.remaining_ms ?? 0) / 1000));
+  }, [clock, now]);
+
   return (
     <Card>
       <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 p-3">
@@ -283,10 +306,10 @@ function LiveStatusBar() {
           label="发言状态"
           value={<span className="text-sm text-muted-foreground">{speechState === "speaking" ? "发言中" : speechState === "paused" ? "已暂停" : "—"}</span>}
         />
-        {clock && (
+        {clock && remainingSec !== null && (
           <div className="ml-auto flex items-center gap-1.5 rounded-md bg-muted px-3 py-1.5">
             <Clock className="size-4 text-primary" />
-            <span className="font-mono text-sm font-semibold">{Math.max(0, Math.round((clock.remaining_ms ?? 0) / 1000))}s</span>
+            <span className={`font-mono text-sm font-semibold ${remainingSec <= 10 && clock.state === "running" ? "text-destructive" : ""}`}>{remainingSec}s</span>
           </div>
         )}
       </CardContent>
@@ -352,6 +375,188 @@ function ScreenSceneRow({
   );
 }
 
+/* ----------------------------- TTS 实时模块 ----------------------------- */
+type TtsStats = {
+  created: number; streaming: number; ready: number; played: number;
+  playingIdx: number; expectedRaw: number; label: string; ended: boolean;
+};
+
+function TTSRealtimeModule() {
+  const { snapshot, matchId, lastEvent } = useAdminData();
+  const { run, pending } = useAction();
+  // Keep the last speech's stats so the bar shows the finished state instead of
+  // blanking to 0 the instant current_speech clears.
+  const lastStatsRef = React.useRef<TtsStats | null>(null);
+  if (!snapshot) return null;
+
+  const speech = snapshot.current_speech;
+  const speaker = snapshot.speakers.find((item) => item.id === speech?.speaker_id);
+  const asset = speech ? snapshot.audio_assets.find((item) => item.speech_id === speech.id) : undefined;
+  const chunks = [...(asset?.chunks ?? [])];
+  const isLive = Boolean(speech && (speech.source === "agent_text" || speech.tts_task_id));
+
+  let stats: TtsStats;
+  if (isLive && speech) {
+    stats = {
+      created: Number(speech.tts_created_sentences ?? 0),
+      streaming: Number(speech.tts_streaming_sentences ?? 0),
+      // Archived count: take the larger of materialized chunks and the counter so
+      // an early/lagging snapshot never under-reports progress.
+      ready: Math.max(chunks.length, Number(speech.tts_ready_sentences ?? 0)),
+      played: Number(speech.tts_played_sentences ?? 0),
+      playingIdx: Number(speech.tts_playing_sentence_idx ?? -1),
+      expectedRaw: Number(speech.tts_expected_sentences ?? 0),
+      label: speaker ? `${sideLabel(speaker.side)}${seatLabel(speaker.seat)} · ${speaker.name}` : "—",
+      ended: false,
+    };
+    lastStatsRef.current = { ...stats, ended: true };
+  } else {
+    stats = lastStatsRef.current ?? {
+      created: 0, streaming: 0, ready: 0, played: 0, playingIdx: -1, expectedRaw: 0, label: "—", ended: true,
+    };
+  }
+
+  const { created, streaming, ready, played, playingIdx, expectedRaw } = stats;
+  // Prefer the final sentence count once known; before then use the largest counter
+  // so fills stay within the bar.
+  const expected = Math.max(expectedRaw > 0 ? expectedRaw : 0, created, streaming, ready, played, 1);
+  // 归档(ready) and 播放(played) are independent tracks in live streaming (playback can
+  // run ahead of archival), so they are drawn as overlapping fills, not nested.
+  const createdPercent = percent(Math.max(created, streaming), expected);
+  const generationPercent = percent(ready, expected);
+  const playbackPercent = percent(played, expected);
+  const currentTaskId = String(speech?.tts_task_id ?? "");
+  const currentSpeechId = String(speech?.id ?? "");
+  const canControl = Boolean(speech && currentTaskId && speech.state !== "ended");
+  // 救援控制（重合成 / 强制跳过）独立于"音频控制"：只要有当前 AI 发言即可用，即便卡顿/状态异常。
+  const canRescue = Boolean(speech && currentSpeechId && (speech.source === "agent_text" || currentTaskId));
+  // 强制跳过的目标：从"下一句"起第一个既无音频也未跳过的缺口（最可能卡住的那一段）。
+  const readySet = new Set(chunks.map((item) => Number(item.chunk_index)));
+  const skippedSet = new Set((speech?.tts_skipped_sentences ?? []).map((value) => Number(value)));
+  let forceSkipIdx = -1;
+  for (let i = Math.max(0, played); i < expected; i += 1) {
+    if (!readySet.has(i) && !skippedSet.has(i)) { forceSkipIdx = i; break; }
+  }
+  const base = `/api/matches/${matchId}`;
+  const lastType = lastEvent?.type ?? "—";
+  const lastAt = lastEvent ? `#${lastEvent.seq}` : "—";
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><Activity className="size-4" /> TTS 实时模块</CardTitle>
+        <CardDescription>AI 发言的生成、归档与大屏播放进度。“停止/继续播放”只控制大屏音频，不会结束发言或推进流程。</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-2 md:grid-cols-4">
+          <TTSMetric label={stats.ended && !isLive ? "上次发言" : "当前发言"} value={stats.label} />
+          <TTSMetric label="TTS 状态" value={serviceStatusText(snapshot.speech_service.tts.status)} detail={snapshot.speech_service.tts.detail || "—"} />
+          <TTSMetric label="分段" value={`${ready}/${expectedRaw || created || "?"}`} detail={`创建 ${created || 0} · 流式 ${streaming || 0}`} />
+          <TTSMetric label="大屏播放" value={played ? `${played}/${expected}` : "未开始"} detail={playingIdx >= 0 ? `当前第 ${playingIdx + 1} 段` : "等待播放"} />
+        </div>
+
+        <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="relative h-3 rounded-full bg-background">
+            <div className="absolute left-0 top-0 h-3 rounded-full bg-primary/20" style={{ width: `${createdPercent}%` }} />
+            <div className="absolute left-0 top-0 h-3 rounded-full bg-primary/55" style={{ width: `${generationPercent}%` }} />
+            <div className="absolute left-0 top-0 h-3 rounded-full bg-success" style={{ width: `${playbackPercent}%` }} />
+            <ProgressPin value={createdPercent} tone="created" title="句段已创建" />
+            <ProgressPin value={generationPercent} tone="ready" title="TTS 已归档" />
+            <ProgressPin value={playbackPercent} tone="played" title="大屏已播放" />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-primary/30" />句段创建</span>
+            <span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-primary/70" />TTS 归档</span>
+            <span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-success" />大屏播放</span>
+            <span className="ml-auto inline-flex items-center gap-1"><Radio className="size-3" />{lastType} · {lastAt}</span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canControl || pending}
+            onClick={() => run(() => post(`${base}/speeches/${currentSpeechId}/tts/playback-resume`, { task_id: currentTaskId }), { success: "已请求大屏继续播放" })}
+          >
+            <Play /> 继续播放
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canControl || pending}
+            onClick={() => run(() => post(`${base}/speeches/${currentSpeechId}/tts/playback-complete`, { task_id: currentTaskId, reason: "host_force_playback_complete" }), { success: "已标记播放完成" })}
+          >
+            <SkipForward /> 标记完成
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canControl || pending}
+            onClick={() => run(() => post(`${base}/speeches/${currentSpeechId}/tts/playback-stop`, { task_id: currentTaskId, reason: "host_stop_tts_audio" }), { success: "已截断大屏音频" })}
+          >
+            <VolumeX /> 停止播放
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canRescue || pending}
+            title="用已生成的文本对当前发言重跑 TTS 合成，并让大屏从头重播"
+            onClick={() => run(() => post(`${base}/speeches/${currentSpeechId}/tts/resynthesize`, { reason: "host_resynthesize" }), { success: "已重新合成当前发言的语音" })}
+          >
+            <RefreshCw /> 重新合成
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canRescue || forceSkipIdx < 0 || pending}
+            title={forceSkipIdx >= 0 ? `强制跳过卡住的第 ${forceSkipIdx + 1} 段` : "当前没有卡住的缺口分段"}
+            onClick={() => run(() => post(`${base}/speeches/${currentSpeechId}/tts/skip-sentence`, { sentence_idx: forceSkipIdx, reason: "host_force_skip" }), { success: `已强制跳过第 ${forceSkipIdx + 1} 段` })}
+          >
+            <ChevronRight /> 强制跳过{forceSkipIdx >= 0 ? `第${forceSkipIdx + 1}段` : ""}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!speaker || speaker.speaker_type !== "agent" || pending}
+            onClick={() => speaker && run(() => post(`${base}/speakers/${speaker.id}/tts/fail`, { reason: "host_tts_degrade", text_only: true }), { success: "已将当前 TTS 降级为文本" })}
+          >
+            <Megaphone /> TTS 降级
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TTSMetric({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-md border border-border bg-card px-3 py-2">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="truncate text-sm font-semibold text-foreground">{value}</p>
+      {detail && <p className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</p>}
+    </div>
+  );
+}
+
+function ProgressPin({ value, tone, title }: { value: number; tone: "created" | "ready" | "played"; title: string }) {
+  const color = tone === "played" ? "bg-success" : tone === "ready" ? "bg-primary" : "bg-primary/50";
+  return <span title={title} className={`absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-card ${color}`} style={{ left: `${value}%` }} />;
+}
+
+function percent(value: number, total: number) {
+  if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((value / total) * 100)));
+}
+
+function serviceStatusText(status: string) {
+  if (status === "playing") return "播放中";
+  if (status === "synthesizing") return "合成中";
+  if (status === "failed") return "失败";
+  if (status === "idle") return "空闲";
+  return status || "—";
+}
+
 /* ----------------------------- AI 辩手控制（重新设计，紧凑） ----------------------------- */
 function AgentControlPanel() {
   const { snapshot, matchId } = useAdminData();
@@ -385,6 +590,9 @@ function AgentControlPanel() {
                   </div>
                   <p className="truncate text-xs text-muted-foreground">{a.model_name || "未绑定"}{st ? ` · ${st.status}` : ""}</p>
                   <div className="mt-1.5 flex flex-wrap gap-1">
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => run(() => post(`${base}/speakers/${a.id}/self-introduction`), { success: `${a.name} 开始自我介绍` })} title="赛前自我介绍：会朗读并展示，但不计入后续辩论历史">
+                      <Sparkles className="size-3" /> 自我介绍
+                    </Button>
                     <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => run(() => post(`${base}/speakers/${a.id}/start-agent-speaking`), { success: `${a.name} 开始发言` })}>
                       <UserCircle2 className="size-3" /> 发言
                     </Button>

@@ -39,7 +39,9 @@ from app.auth import (
 )
 from app.services.match_store import MatchStateError, store
 from app.services.preflight_report import build_preflight_report
+from app.services.speech_gateway import select_asr_gateway, select_tts_gateway
 from app.services.speech_diagnostics import build_speech_diagnostics
+from app.services.tts_live import tts_live_manager
 from app.services.ruleset_store import ruleset_store, generate_flow, FLOW_TEMPLATE
 from app.services.xiaoqi_store import xiaoqi_store, COMMANDS as XIAOQI_COMMANDS
 
@@ -383,8 +385,17 @@ async def update_team(match_id: str, team_id: str, body: Dict[str, Any], _princi
 @app.patch("/api/matches/{match_id}/speakers/{speaker_id}")
 async def update_speaker(match_id: str, speaker_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
+    before = await store.get_snapshot()
+    was_type = next((s for s in before["speakers"] if s["id"] == speaker_id), {}).get("speaker_type")
     await store.update_speaker(speaker_id, body)
-    return {"ok": True, "data": await store.get_snapshot()}
+    snapshot = await store.get_snapshot()
+    updated = next((s for s in snapshot["speakers"] if s["id"] == speaker_id), None)
+    # If a human was just converted to the AI whose turn it currently is, auto-start
+    # their speech (the phase-transition auto-trigger already fired while they were human).
+    phase = _conversion_autostart_phase(was_type, updated, snapshot)
+    if phase:
+        _auto_trigger_agent_speech_for_phase(phase, snapshot["speakers"])
+    return {"ok": True, "data": snapshot}
 
 
 @app.patch("/api/matches/{match_id}/speakers/{speaker_id}/profile")
@@ -423,6 +434,47 @@ async def serve_speaker_image(filename: str) -> FileResponse:
     return FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
 
 
+@app.post("/api/matches/{match_id}/image/{kind}")
+async def upload_match_image(
+    match_id: str,
+    kind: str,
+    file: UploadFile = File(...),
+    _principal: Principal = Depends(require_admin),
+) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    if kind not in {"title", "organizer"}:
+        raise HTTPException(status_code=400, detail="kind must be 'title' or 'organizer'")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty image upload")
+    await store.save_match_image(kind, content, file.content_type or "image/png")
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
+@app.get("/api/files/match-images/{filename}")
+async def serve_match_image(filename: str) -> FileResponse:
+    safe = Path(filename).name
+    path = store.image_root_path() / "match" / safe
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="match image not found")
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/audio/{match_id}/{path:path}")
+async def serve_tts_audio(match_id: str, path: str) -> FileResponse:
+    """Serve archived TTS audio files for browser playback on the screen."""
+    from app.services.sqlite_repo import project_root
+    audio_root = (project_root() / "apps" / "backend" / "storage" / "audio").resolve()
+    target = (audio_root / match_id / path).resolve()
+    if not str(target).startswith(str(audio_root)):
+        raise HTTPException(status_code=404, detail="not found")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="audio file not found")
+    suffix = target.suffix.lower()
+    media_type = {"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "pcm": "audio/pcm"}.get(suffix.lstrip("."), "audio/mpeg")
+    return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-cache"})
+
+
 @app.patch("/api/matches/{match_id}/phases/{phase_id}")
 async def update_phase(match_id: str, phase_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -434,14 +486,21 @@ async def update_phase(match_id: str, phase_id: str, body: Dict[str, Any], _prin
 async def start_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.set_match_status("running")
-    return {"ok": True, "data": await store.get_snapshot()}
+    snapshot = await store.get_snapshot()
+    # 点击「开始比赛」后，若首环节由 AI 担纲（如正方一辩立论），立即自动发言。
+    phase = next((p for p in snapshot["phases"] if p["id"] == snapshot["match"]["current_phase_id"]), None)
+    _auto_trigger_agent_speech_for_phase(phase, snapshot["speakers"])
+    return {"ok": True, "data": snapshot}
 
 
 @app.post("/api/matches/{match_id}/begin")
 async def begin_match(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     await store.set_match_status("running")
-    return {"ok": True, "data": await store.get_snapshot()}
+    snapshot = await store.get_snapshot()
+    phase = next((p for p in snapshot["phases"] if p["id"] == snapshot["match"]["current_phase_id"]), None)
+    _auto_trigger_agent_speech_for_phase(phase, snapshot["speakers"])
+    return {"ok": True, "data": snapshot}
 
 
 @app.post("/api/matches/{match_id}/pause")
@@ -592,6 +651,14 @@ async def start_agent_speaking(match_id: str, speaker_id: str, _principal: Princ
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.post("/api/matches/{match_id}/speakers/{speaker_id}/self-introduction")
+async def start_agent_self_introduction(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    asyncio.create_task(store.run_agent_speech(speaker_id, mode="self_intro"))
+    await store.emit("agent.self_introduction.requested", {"speaker_id": speaker_id}, "host", speaker_id)
+    return {"ok": True, "data": await store.get_snapshot()}
+
+
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/free-debate-skip")
 async def free_debate_skip(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -702,6 +769,86 @@ async def tts_fail(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]
     return {"ok": True, "data": await store.get_snapshot()}
 
 
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/playback-complete")
+async def complete_tts_playback(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    data = await store.complete_agent_playback(
+        speech_id,
+        str(payload.get("task_id") or ""),
+        str(payload.get("reason") or "screen_playback_complete"),
+    )
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/playback-started")
+async def start_tts_playback(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    data = await store.start_agent_playback(
+        speech_id,
+        str(payload.get("task_id") or ""),
+        str(payload.get("reason") or "screen_playback_started"),
+    )
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/playback-progress")
+async def tts_playback_progress(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    data = await store.record_tts_playback_progress(
+        speech_id,
+        str(payload.get("task_id") or ""),
+        int(payload.get("sentence_idx") or 0),
+        str(payload.get("status") or "playing"),
+    )
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/playback-resume")
+async def request_tts_playback_resume(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    data = await store.request_tts_playback_resume(
+        speech_id,
+        str(payload.get("task_id") or ""),
+        str(payload.get("reason") or "host_resume_tts"),
+    )
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/playback-stop")
+async def request_tts_playback_stop(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    data = await store.request_tts_playback_stop(
+        speech_id,
+        str(payload.get("task_id") or ""),
+        str(payload.get("reason") or "host_stop_tts_audio"),
+    )
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/resynthesize")
+async def resynthesize_speech_tts(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    data = await store.resynthesize_speech_tts(speech_id, str(payload.get("reason") or "host_resynthesize"))
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/tts/skip-sentence")
+async def force_skip_sentence(match_id: str, speech_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    payload = body or {}
+    sentence_idx = payload.get("sentence_idx")
+    if sentence_idx is None:
+        raise HTTPException(status_code=422, detail="sentence_idx is required")
+    data = await store.force_skip_sentence(speech_id, int(sentence_idx), str(payload.get("reason") or "host_force_skip"))
+    return {"ok": True, "data": data}
+
+
 @app.get("/api/matches/{match_id}/integration-config")
 async def get_integration_config(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -723,7 +870,8 @@ async def speech_diagnostics(match_id: str, _principal: Principal = Depends(requ
 @app.post("/api/matches/{match_id}/speech/tts/probe")
 async def probe_tts(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
-    return {"ok": True, "data": await store.probe_tts((body or {}).get("text", ""))}
+    payload = body or {}
+    return {"ok": True, "data": await store.probe_tts(payload.get("text", ""), str(payload.get("voice_preset_id") or ""))}
 
 
 @app.post("/api/matches/{match_id}/speech/asr/probe")
@@ -955,11 +1103,38 @@ async def match_ws(
     await store.websocket(websocket, last_seq=last_seq, channel=channel, speaker_id=speaker_id)
 
 
+@app.websocket("/ws/tts-live/{match_id}/{speech_id}/{task_id}/{sentence_idx}")
+async def tts_live_ws(
+    websocket: WebSocket,
+    match_id: str,
+    speech_id: str,
+    task_id: str,
+    sentence_idx: int,
+) -> None:
+    snapshot = await store.get_snapshot()
+    if match_id not in {"current", snapshot["match"]["id"]}:
+        await websocket.close(code=1008)
+        return
+    if authorize_websocket(websocket, "screen", None) is None:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    resolved_match_id = snapshot["match"]["id"] if match_id == "current" else match_id
+    try:
+        async for message in tts_live_manager.subscribe((resolved_match_id, speech_id, task_id, sentence_idx)):
+            await websocket.send_json(message)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.websocket("/ws/asr-test/{match_id}")
 async def asr_test_ws(websocket: WebSocket, match_id: str) -> None:
-    """流式 ASR 自检：浏览器持续推送 16k PCM 帧，服务端转发讯飞实时听写并回传 partial/final。"""
-    import os as _os
-    from app.services.xfyun_rtasr import select_asr_gateway
+    """流式 ASR 自检：浏览器持续推送 16k PCM 帧，服务端按当前 provider 回传 partial/final。"""
 
     await websocket.accept()
 
@@ -969,25 +1144,20 @@ async def asr_test_ws(websocket: WebSocket, match_id: str) -> None:
         except Exception:
             pass
 
-    url = _os.getenv("XFYUN_ASR_URL", "").strip()
-    if not url:
-        await emit("error", message="未配置 ASR 地址（XFYUN_ASR_URL），无法进行流式测试。")
-        await websocket.close()
-        return
-
-    gateway = select_asr_gateway(url)
     try:
-        session = await gateway.open_stream(
+        selection = select_asr_gateway()
+        session = await selection.gateway.open_stream(
             on_partial=lambda text, latency=None, count=None: emit("partial", text=text, latency_ms=latency, chunk_count=count),
             on_final=lambda text, latency=None, count=None: emit("final", text=text, latency_ms=latency, chunk_count=count),
             on_error=lambda err: emit("error", message=str(err)),
+            **selection.options,
         )
     except Exception as exc:  # noqa: BLE001
         await emit("error", message=f"无法建立 ASR 流：{exc}")
         await websocket.close()
         return
 
-    await emit("ready")
+    await emit("ready", provider=selection.provider)
     try:
         while True:
             msg = await websocket.receive()
@@ -1014,9 +1184,6 @@ async def asr_test_ws(websocket: WebSocket, match_id: str) -> None:
 @app.websocket("/ws/tts-test/{match_id}")
 async def tts_test_ws(websocket: WebSocket, match_id: str) -> None:
     """流式 TTS 自检：合成时逐段把音频回传浏览器，便于边收边播。"""
-    import os as _os
-    from app.services.xfyun_gateway import XfyunTTSGateway
-
     await websocket.accept()
     try:
         req = await websocket.receive_json()
@@ -1025,15 +1192,10 @@ async def tts_test_ws(websocket: WebSocket, match_id: str) -> None:
         return
 
     text = str((req or {}).get("text") or "").strip()
-    url = _os.getenv("XFYUN_TTS_URL", "").strip()
-    if not url:
-        await websocket.send_json({"type": "error", "message": "未配置 TTS 地址（XFYUN_TTS_URL）。"})
-        await websocket.close()
-        return
-
-    gateway = XfyunTTSGateway(url=url)
     try:
-        async for ev in gateway.synthesize_stream(text):
+        selection = select_tts_gateway(voice_preset_id=str((req or {}).get("voice_preset_id") or ""))
+        await websocket.send_json({"type": "ready", "provider": selection.provider, "voice_preset_id": (selection.preset or {}).get("id")})
+        async for ev in selection.gateway.synthesize_stream(text, **selection.options):
             if ev["type"] == "chunk":
                 await websocket.send_json(
                     {"type": "chunk", "index": ev["index"], "audio_base64": base64.b64encode(ev["audio"]).decode("ascii")}
@@ -1086,6 +1248,25 @@ def _token_hashes_from_security_body(body: Dict[str, Any]) -> Optional[Dict[str,
             result["speaker_hashes"] = speakers
     return result
 
+
+
+def _conversion_autostart_phase(
+    was_type: Optional[str], updated: Optional[Dict[str, Any]], snapshot: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Return the current single-speaker phase iff `updated` was just converted from
+    human to the AI whose turn it currently is (so we should auto-start their speech)."""
+    if not updated or updated.get("speaker_type") != "agent" or was_type == "agent":
+        return None
+    if snapshot["match"].get("status") != "running":
+        return None
+    if snapshot.get("current_speech") or (snapshot.get("flow") or {}).get("awaiting_host_confirm"):
+        return None
+    phase = next((p for p in snapshot["phases"] if p["id"] == snapshot["match"]["current_phase_id"]), None)
+    if not phase or phase.get("phase_type") == "free_debate":
+        return None
+    if updated.get("side") == phase.get("side") and updated.get("seat") == phase.get("speaker_seat"):
+        return phase
+    return None
 
 
 def _auto_trigger_agent_speech_for_phase(phase: Dict[str, Any], speakers: list) -> None:

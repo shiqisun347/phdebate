@@ -369,7 +369,13 @@ class SQLiteRepository:
             return None
         return json.loads(row["value_json"])
 
-    def save_snapshot(self, snapshot: Dict[str, Any], updated_at: str, key: str = "demo_snapshot") -> None:
+    def save_snapshot(
+        self, snapshot: Dict[str, Any], updated_at: str, key: str = "demo_snapshot", *, sync_structured: bool = True
+    ) -> None:
+        # app_state（实时唯一真相，崩溃恢复依据）始终写入——很便宜。结构化镜像表（仅供导出/数据视图）
+        # 每次都整段 DELETE+INSERT 本场所有 transcript/audio_chunk，是 O(本场累计) 的开销，放在每个
+        # tts.sentence_ready 的落盘里会拖慢首句出声与连贯播放。高频热点用 sync_structured=False 跳过，
+        # 在发言结束/阶段切换等关键节点再整体同步——导出仍正确，只是发言进行中略有滞后。
         with self.connect() as conn:
             conn.execute(
                 """
@@ -381,7 +387,8 @@ class SQLiteRepository:
                 """,
                 (key, json.dumps(snapshot, ensure_ascii=False), updated_at),
             )
-            self._sync_structured_snapshot(conn, snapshot, updated_at)
+            if sync_structured:
+                self._sync_structured_snapshot(conn, snapshot, updated_at)
 
     def get_app_state(self, key: str) -> Optional[Dict[str, Any]]:
         """Raw app_state read (no structured mirroring) — used for the multi-match registry

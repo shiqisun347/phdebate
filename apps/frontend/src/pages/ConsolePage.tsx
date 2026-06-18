@@ -74,9 +74,11 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   const [apiTestStatus, setApiTestStatus] = useState<CheckStatus>("idle");
   const [micTestStatus, setMicTestStatus] = useState<CheckStatus>("idle");
   const [audioStatus, setAudioStatus] = useState("待命");
+  const [confirmStopOpen, setConfirmStopOpen] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunkIndexRef = useRef(0);
+  const activeAudioChunkCountRef = useRef(0);
   const pendingUploadsRef = useRef<Promise<unknown>[]>([]);
   const identityInitializedRef = useRef(false);
   const { busyProps, notify, runAction } = useActionFeedback();
@@ -89,6 +91,11 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   const activeSpeechId = active ? snapshot?.current_speech?.id ?? null : null;
   const activeSpeakerId = speaker?.id ?? null;
   const speakerType = speaker?.speaker_type;
+  const activeAudioAsset = snapshot?.audio_assets.find((item) => item.speech_id === activeSpeechId);
+
+  useEffect(() => {
+    activeAudioChunkCountRef.current = activeAudioAsset?.chunk_count ?? 0;
+  }, [activeAudioAsset?.chunk_count]);
 
   useEffect(() => {
     setDraftSpeakerId(selectedSpeakerId);
@@ -121,7 +128,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   }, [snapshot, entryStep, draftSpeakerId]);
 
   useEffect(() => {
-    if (!activeSpeechId || !activeSpeakerId || speakerType !== "human" || entryStep !== "ready") {
+    if (!activeSpeechId || !activeSpeakerId || speakerType !== "human" || entryStep !== "ready" || speechPaused) {
       setAudioStatus("待命");
       return;
     }
@@ -244,7 +251,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
           return;
         }
         streamRef.current = localStream;
-        chunkIndexRef.current = 0;
+        chunkIndexRef.current = activeAudioChunkCountRef.current;
         pendingUploadsRef.current = [];
         try {
           stopPcmArchive = startPcmArchive(localStream);
@@ -286,7 +293,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       recorderRef.current = null;
       streamRef.current = null;
     };
-  }, [activeSpeechId, activeSpeakerId, entryStep, matchId, speakerType]);
+  }, [activeSpeechId, activeSpeakerId, entryStep, matchId, speakerType, speechPaused]);
 
   async function action(path: string, body: Record<string, unknown> = {}) {
     try {
@@ -610,6 +617,8 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
           socketStatus={socketStatus}
           busyProps={busyProps}
           action={action}
+          confirmStopOpen={confirmStopOpen}
+          setConfirmStopOpen={setConfirmStopOpen}
         />
       )}
     </main>
@@ -632,7 +641,9 @@ function HumanConsoleView({
   currentSpeechText,
   socketStatus,
   busyProps,
-  action
+  action,
+  confirmStopOpen,
+  setConfirmStopOpen
 }: {
   matchId: string;
   snapshot: MatchSnapshot;
@@ -650,7 +661,14 @@ function HumanConsoleView({
   socketStatus: string;
   busyProps: (key: string) => ButtonHTMLAttributes<HTMLButtonElement>;
   action: (path: string, body?: Record<string, unknown>) => Promise<void>;
+  confirmStopOpen: boolean;
+  setConfirmStopOpen: (open: boolean) => void;
 }) {
+  async function confirmStopSpeaking() {
+    await action(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`, { reason: "speaker_confirm_stop" });
+    setConfirmStopOpen(false);
+  }
+
   return (
     <>
       <section className="console-main-grid human-view">
@@ -691,7 +709,7 @@ function HumanConsoleView({
                   <Pause size={20} />暂停发言
                 </button>
               )}
-              <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`))} className="mic-button stop" onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`)}>
+              <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`, { reason: "speaker_confirm_stop" }))} className="mic-button stop" onClick={() => setConfirmStopOpen(true)}>
                 <Square size={28} />结束发言
               </button>
             </div>
@@ -709,6 +727,27 @@ function HumanConsoleView({
           )}
         </div>
       </section>
+
+      {confirmStopOpen && (
+        <div className="console-confirm-backdrop" role="presentation">
+          <section className="console-confirm" role="dialog" aria-modal="true" aria-labelledby="stop-speaking-title">
+            <Square size={28} />
+            <h2 id="stop-speaking-title">确认结束发言？</h2>
+            <p>结束后本次发言会被锁定并保存，不能再继续发言。</p>
+            <div className="console-confirm-actions">
+              <button type="button" onClick={() => setConfirmStopOpen(false)}>取消</button>
+              <button
+                {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/stop-speaking`, { reason: "speaker_confirm_stop" }))}
+                type="button"
+                className="danger"
+                onClick={confirmStopSpeaking}
+              >
+                确认结束
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       <section className="console-secondary">
         {snapshot.next_speaker && (
