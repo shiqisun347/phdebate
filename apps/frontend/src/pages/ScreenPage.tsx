@@ -521,11 +521,15 @@ function SingleMode({ snapshot, currentSpeaker, phaseName, phaseSide }: { snapsh
 
 function FreeMode({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; currentSpeaker?: Speaker }) {
   const thinking = Boolean(currentSpeaker && snapshot.current_speech?.state === "thinking");
-  // 阶段内某辩手刚发言完毕、等待主持确认下一轮：用刚结束发言的那位（flow.speaker_id）显示一个小的
-  // "xxx 发言结束"，并保留自由辩论的双方计时与轮次信息（阶段仍在继续）。
-  const handoff = !currentSpeaker && snapshot.flow.awaiting_host_confirm && snapshot.flow.next_action === "free_turn_next";
-  const finishedSpeaker = handoff
-    ? snapshot.speakers.find((item) => item.id === snapshot.flow.speaker_id) ?? lastCompletedSpeaker(snapshot)
+  // 轮间空档（无人发言、2 秒窗口/等待对方开始）：显示上一位刚说完的小「xxx 发言结束」，保留双方计时
+  // 与轮次信息（阶段仍在继续）。自由辩论轮内已全自动、不再 awaiting_host_confirm，故改用「本阶段
+  // 最近一段定稿」来判断刚结束的发言人；本阶段还没人说过则显示「等待开始」（不串到上一环节）。
+  const freePhaseId = snapshot.match.current_phase_id;
+  const lastFreeFinal = !currentSpeaker
+    ? snapshot.recent_transcript.find((seg) => seg.is_final && seg.phase_id === freePhaseId)
+    : undefined;
+  const finishedSpeaker = lastFreeFinal
+    ? snapshot.speakers.find((item) => item.id === lastFreeFinal.speaker_id)
     : undefined;
   return (
     <div className="mode-panel free-mode">

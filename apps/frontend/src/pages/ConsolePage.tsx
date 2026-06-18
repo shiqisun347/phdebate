@@ -669,6 +669,22 @@ function HumanConsoleView({
     setConfirmStopOpen(false);
   }
 
+  // 需求 5.md：自由辩论"预点跳过"。本方相关轮 = 本方就是当前轮(当前 idx) / 本方是下一方(当前+1)。
+  // 可点窗口：对方发言期间（你是下一方）到对方说完后 2s（你方决定窗口、还没人开始）。已投/已被 AI 接管→不可点。
+  const isCurrentTurnSide = !isFree || snapshot.free_debate.current_turn_side === speaker.side;
+  const fd = snapshot.free_debate;
+  const myUpcomingTurnIdx = isCurrentTurnSide ? fd.turn_index : fd.turn_index + 1;
+  const myTurnKey = `${speaker.side}_${myUpcomingTurnIdx}`;
+  const alreadySkipped = (fd.skip_votes?.[myTurnKey] ?? []).includes(speaker.id);
+  const myTurnAutoHandled = Boolean(fd.auto_handled?.[myTurnKey]);
+  const canPreSkip =
+    isFree &&
+    snapshot.match.status === "running" &&
+    !active &&
+    !alreadySkipped &&
+    !myTurnAutoHandled &&
+    (!isCurrentTurnSide || !snapshot.current_speech);
+
   return (
     <>
       <section className="console-main-grid human-view">
@@ -718,11 +734,15 @@ function HumanConsoleView({
               <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`))} className={`mic-button ${canSpeak ? "start" : "disabled"}`} disabled={!canSpeak} onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/start-speaking`)}>
                 <Play size={28} />开始发言
               </button>
-              {isFree && canSpeak && (
-                <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/free-debate-skip`))} className="mic-button skip" onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/free-debate-skip`)}>
-                  <SkipForward size={20} />跳过本轮
+              {isFree && alreadySkipped ? (
+                <button className="mic-button skip" disabled>
+                  <SkipForward size={20} />已跳过 ✓
                 </button>
-              )}
+              ) : isFree && canPreSkip ? (
+                <button {...busyProps(actionKey(`/api/matches/${matchId}/speakers/${speaker.id}/free-debate-skip`))} className="mic-button skip" onClick={() => action(`/api/matches/${matchId}/speakers/${speaker.id}/free-debate-skip`)}>
+                  <SkipForward size={20} />{isCurrentTurnSide ? "跳过本轮" : "跳过下一轮"}
+                </button>
+              ) : null}
             </div>
           )}
         </div>
@@ -964,8 +984,8 @@ function phaseHelpText(phase: Phase | undefined, speaker: Speaker, freeTurnSide:
   if (!phase) return "请等待主持人开始比赛。";
   if (phase.phase_type === "free_debate") {
     return freeTurnSide === speaker.side
-      ? "当前轮到本方。主持人示意后，你可以点击开始发言。"
-      : `当前轮到${sideLabel(freeTurnSide)}。轮到${sideLabel(speaker.side)}时再发言。`;
+      ? "轮到本方：2 秒内点「开始发言」即由你发言；不点或本方全部跳过，则由 AI 接管。"
+      : `当前轮到${sideLabel(freeTurnSide)}发言。本方下一轮——可现在就点「跳过下一轮」预跳过；否则待对方说完后 2 秒内点「开始发言」。`;
   }
   if (phase.side === speaker.side && phase.speaker_seat === speaker.seat) {
     return "本环节指定你发言。主持人示意后，点击开始发言。";

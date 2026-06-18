@@ -1421,8 +1421,12 @@ class MatchStore:
         )
 
     async def record_free_debate_skip(self, speaker_id: str) -> Dict[str, Any]:
-        """Human debater skips their turn in free debate; if all humans on side skip, auto-trigger agent."""
-        import random
+        """人类辩手在自由辩论里（预）跳过自己的发言轮。
+
+        需求 5.md：跳过是"预点"——对方发言期间（直到对方说完后 2s 内）本方就能点，预告本方下一轮跳过。
+        - 本方就是当前轮 → 跳过当前轮（target=当前 idx）；本方是下一方（对方在发言）→ 预跳过 idx+1。
+        - 若本方人类全部投了跳过：当前轮→立即随机 AI 接管；预跳过下一轮→由翻面逻辑在轮到本方时立即接管。
+        """
         speaker = self._find_speaker(speaker_id)
         if speaker["speaker_type"] != "human":
             raise MatchStateError("not_human_speaker", "只有人类辩手可以跳过发言。", {"speaker_id": speaker_id})
@@ -1431,36 +1435,32 @@ class MatchStore:
             raise MatchStateError("not_free_debate", "跳过功能仅在自由辩论阶段可用。", {"phase_type": phase["phase_type"]})
         self._ensure_match_allows_control("record_free_debate_skip")
         side = speaker["side"]
-        current_side = self.snapshot["free_debate"]["current_turn_side"]
-        if side != current_side:
-            raise MatchStateError("wrong_side", "当前不是你方的发言轮次。", {"expected": current_side, "got": side})
-        turn_index = int(self.snapshot["free_debate"]["turn_index"])
-        turn_key = f"{side}_{turn_index}"
+        fd = self.snapshot["free_debate"]
+        current_side = fd["current_turn_side"]
+        current_idx = int(fd["turn_index"])
+        # 目标轮：本方=当前轮→当前 idx；本方是下一方（对方在发言）→预跳过 idx+1。
+        is_current_turn = side == current_side
+        target_idx = current_idx if is_current_turn else current_idx + 1
+        turn_key = f"{side}_{target_idx}"
         async with self._lock:
-            skip_votes = self.snapshot["free_debate"].setdefault("skip_votes", {})
+            # 该目标轮已被 AI 接管 → 幂等返回（跳过已无意义）。
+            if fd.setdefault("auto_handled", {}).get(turn_key):
+                return await self.get_snapshot()
+            skip_votes = fd.setdefault("skip_votes", {})
             turn_votes: list = skip_votes.setdefault(turn_key, [])
             if speaker_id not in turn_votes:
                 turn_votes.append(speaker_id)
             all_humans_on_side = [s["id"] for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "human"]
-            skipped_all = all(uid in turn_votes for uid in all_humans_on_side)
+            skipped_all = bool(all_humans_on_side) and all(uid in turn_votes for uid in all_humans_on_side)
             self._persist_snapshot()
-        await self.emit("free_debate.skip_voted", {"speaker_id": speaker_id, "side": side, "turn_key": turn_key, "skip_count": len(turn_votes), "total_humans": len(all_humans_on_side)}, "system")
-        if skipped_all:
-            agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
-            if agents_on_side:
-                async with self._lock:
-                    auto_handled = self.snapshot["free_debate"].setdefault("auto_handled", {})
-                    if auto_handled.get(turn_key):
-                        return await self.get_snapshot()
-                    chosen = random.choice(agents_on_side)
-                    auto_handled[turn_key] = chosen["id"]
-                    self._persist_snapshot()
-                await self.emit("free_debate.auto_agent", {"side": side, "turn_index": turn_index, "speaker_id": chosen["id"], "reason": "all_skipped"}, "system")
-                try:
-                    self.ensure_agent_speaker_for_current_phase(chosen["id"])
-                    asyncio.create_task(self.run_agent_speech(chosen["id"]))
-                except Exception:
-                    pass
+        await self.emit(
+            "free_debate.skip_voted",
+            {"speaker_id": speaker_id, "side": side, "turn_key": turn_key, "skip_count": len(turn_votes), "total_humans": len(all_humans_on_side)},
+            "system",
+        )
+        # 全跳过：当前轮→立即 AI 接管；预跳过下一轮→只记录，轮到本方时由 _advance_free_debate_turn_if_needed 立即接管。
+        if skipped_all and is_current_turn:
+            await self._trigger_free_debate_auto_agent(side, target_idx, reason="all_skipped")
         return await self.get_snapshot()
 
     async def run_agent_speech(self, speaker_id: str, mode: str = "speech") -> None:
@@ -3083,7 +3083,7 @@ class MatchStore:
                         },
                     )
                 )
-            if flow_payload:
+            if flow_payload and flow_payload.get("awaiting_host_confirm"):
                 events.append(("flow.awaiting_host_confirm", flow_payload))
 
         emitted = []
@@ -6132,8 +6132,53 @@ class MatchStore:
             turn_clock["state"] = "paused"
             turn_clock["deadline_at"] = None
             turn_clock.pop("expired_notified_at", None)
-        # 需求 2.md：新一轮开始后给本方 5s 决定窗口，超时则随机 AI 接管。
-        self._arm_free_debate_auto_agent(next_side, new_turn_index)
+        # 需求 5.md：新一轮本方人类有 2s 决定窗口。但若本方人类在对方发言期间已"全部预跳过"，
+        # 则翻面后立即随机 AI 接管（不等 2s）；否则照常给 2s 窗口（超时/全跳过→AI）。
+        # 注意：本方预跳过票记在 new_turn_key 下，与刚清掉的 old_turn_key（对方）不同，得以保留。
+        new_turn_key = f"{next_side}_{new_turn_index}"
+        all_humans = [s["id"] for s in self.snapshot["speakers"] if s["side"] == next_side and s["speaker_type"] == "human"]
+        pre_votes = skip_votes.get(new_turn_key, [])
+        all_pre_skipped = bool(all_humans) and all(uid in pre_votes for uid in all_humans)
+        if all_pre_skipped:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(self._trigger_free_debate_auto_agent(next_side, new_turn_index, "all_pre_skipped"))
+            except RuntimeError:
+                pass
+        else:
+            self._arm_free_debate_auto_agent(next_side, new_turn_index)
+
+    async def _trigger_free_debate_auto_agent(self, side: str, turn_index: int, reason: str) -> None:
+        """让某一方的一位随机 AI 立即接管当前自由辩论轮（用于"全跳过/全预跳过"立即接管）。
+        幂等：通过 auto_handled[turn_key] 防重；仅当该轮确实是当前轮时才接管。"""
+        import random
+
+        turn_key = f"{side}_{turn_index}"
+        async with self._lock:
+            fd = self.snapshot["free_debate"]
+            if fd.get("current_turn_side") != side or int(fd.get("turn_index", -1)) != turn_index:
+                return
+            if self.snapshot.get("current_speech"):
+                return
+            auto_handled = fd.setdefault("auto_handled", {})
+            if auto_handled.get(turn_key):
+                return
+            agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
+            if not agents_on_side:
+                return
+            chosen = random.choice(agents_on_side)
+            auto_handled[turn_key] = chosen["id"]
+            self._persist_snapshot()
+        await self.emit(
+            "free_debate.auto_agent",
+            {"side": side, "turn_index": turn_index, "speaker_id": chosen["id"], "reason": reason},
+            "system",
+        )
+        try:
+            self.ensure_agent_speaker_for_current_phase(chosen["id"])
+            asyncio.create_task(self.run_agent_speech(chosen["id"]))
+        except Exception:
+            pass
 
     def _arm_free_debate_auto_agent(self, side: str, turn_index: int) -> None:
         """Schedule a background task: if the side has not started speaking within the
@@ -6196,9 +6241,11 @@ class MatchStore:
     ) -> Dict[str, Any]:
         total_expired = any(name in {"affirmative_total", "negative_total", "main"} for name in expired_clock_names)
         if phase.get("phase_type") == "free_debate" and not total_expired:
-            next_action = "free_turn_next"
-            message = "单次发言时间到，等待主持确认下一轮。"
-        elif self._next_phase(phase):
+            # 自由辩论单轮钟到点也属于"轮内切换"，全自动进入对方 2s 窗口，不需主持确认。
+            # 只有某方 total 钟归零（total_expired）才是阶段结束，走下面的 phase_next + 主持确认。
+            self._clear_flow_state()
+            return deepcopy(self.snapshot["flow"])
+        if self._next_phase(phase):
             next_action = "phase_next"
             message = "本环节时间到，等待主持确认进入下一环节。"
         else:
@@ -6225,11 +6272,12 @@ class MatchStore:
     def _set_flow_waiting_after_speech_end(self, speech: Dict[str, Any], speaker: Dict[str, Any], reason: str) -> Dict[str, Any]:
         phase = self._current_phase()
         if phase.get("phase_type") == "free_debate":
-            next_action = "free_turn_next"
-            next_side = self.snapshot.get("free_debate", {}).get("current_turn_side", "neutral")
-            next_side_label = {"affirmative": "正方", "negative": "反方"}.get(str(next_side), "下一方")
-            message = f"{self.speaker_label(speaker['id'])} 发言完毕，等待主持确认{next_side_label}下一轮。"
-        elif self._next_phase(phase):
+            # 需求 5.md：自由辩论轮内切换全自动——一方说完即进入对方 2s 窗口（人点开始 / 全预跳过 / 超时→AI），
+            # 不再 awaiting_host_confirm。轮转与 2s 计时已由 _advance_free_debate_turn_if_needed 安排。
+            # 阶段结束（某方 total 钟归零）走另一条 _set_flow_waiting_for_timeout(phase_next)，仍需主持确认。
+            self._clear_flow_state()
+            return deepcopy(self.snapshot["flow"])
+        if self._next_phase(phase):
             next_action = "phase_next"
             message = f"{self.speaker_label(speaker['id'])} 发言完毕，等待主持确认进入下一环节。"
         else:
@@ -6423,7 +6471,7 @@ class MatchStore:
         return int(phase.get("turn_seconds") or 30)
 
     def _free_debate_decision_seconds(self, phase: Optional[Dict[str, Any]] = None) -> float:
-        # 需求 2.md：人类辩手在本轮有 5s 决定窗口；超时（或全部跳过）则随机 AI 接管。
+        # 需求 5.md：一方说完后，本方人类有 2s 决定窗口（点开始发言），超时（或全部预跳过）则随机 AI 接管。
         # 可用 PHDEBATE_FREE_DEBATE_DECISION_SECONDS 覆盖（测试/现场调参）。
         env_value = os.getenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "").strip()
         if env_value:
@@ -6433,9 +6481,9 @@ class MatchStore:
                 pass
         phase = phase or self._current_phase()
         try:
-            return max(0.0, float(phase.get("decision_seconds") or 5))
+            return max(0.0, float(phase.get("decision_seconds") or 2))
         except (TypeError, ValueError):
-            return 5.0
+            return 2.0
 
     def _validated_seconds(self, value: Any, field: str, minimum: int, maximum: int) -> int:
         try:

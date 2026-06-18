@@ -1832,6 +1832,10 @@ def test_free_debate_all_skip_triggers_random_agent(monkeypatch) -> None:
     _use_embedded_mock_agent("spk_aff_4")
 
     async def scenario():
+        # 处于本方决定窗口（无人在发言）：本方两位人类都跳过 → 立即随机 AI 接管。
+        async with store._lock:
+            store.snapshot["current_speech"] = None
+            store._persist_snapshot()
         await store.record_free_debate_skip("spk_aff_1")
         return await store.record_free_debate_skip("spk_aff_3")
 
@@ -1854,6 +1858,84 @@ def test_free_debate_decision_timeout_triggers_agent(monkeypatch) -> None:
     asyncio.run(scenario())
     summary = client.get("/api/matches/match_001/data-summary").json()["data"]
     assert summary["event_type_counts"].get("free_debate.auto_agent", 0) >= 1
+
+
+def test_free_debate_decision_window_defaults_to_two_seconds(monkeypatch) -> None:
+    monkeypatch.delenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", raising=False)
+    asyncio.run(store.start_phase("phase_free_debate"))
+    assert store._free_debate_decision_seconds() == 2.0
+
+
+def test_free_debate_speech_end_auto_advances_without_host_confirm(monkeypatch) -> None:
+    # 决定窗口设大，隔离掉 auto-agent，专测"轮内结束=全自动、不 awaiting_host_confirm"。
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")  # 正方 turn 1
+        await store.start_speaking("spk_aff_1")
+        await store.stop_speaking("spk_aff_1")
+
+    asyncio.run(scenario())
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["free_debate"]["current_turn_side"] == "negative"  # 自动翻面
+    assert data["free_debate"]["turn_index"] == 2
+    assert data["flow"]["awaiting_host_confirm"] is False  # 不需主持确认
+
+
+def test_free_debate_pre_skip_records_for_next_turn(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")  # 正方 turn 1（对方正在/即将发言）
+        # 反方（下一方）在对方轮预点跳过 → 记到 negative_2
+        await store.record_free_debate_skip("spk_neg_2")
+
+    asyncio.run(scenario())
+    fd = client.get("/api/matches/match_001").json()["data"]["free_debate"]
+    assert "spk_neg_2" in fd.get("skip_votes", {}).get("negative_2", [])
+    assert "negative_1" not in fd.get("skip_votes", {})  # 没有错记到当前轮
+
+
+def test_free_debate_all_pre_skip_triggers_ai_immediately(monkeypatch) -> None:
+    # 决定窗口设大：若仅靠 2s 计时则永不触发；本测只能由"全预跳过→翻面立即接管"使其发生。
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    _use_embedded_mock_agent("spk_neg_1")
+    _use_embedded_mock_agent("spk_neg_3")
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")  # 正方 turn 1
+        # 对方发言期间，反方两位人类都预点跳过 turn 2
+        await store.record_free_debate_skip("spk_neg_2")
+        await store.record_free_debate_skip("spk_neg_4")
+        # 正方人类发言并结束 → 翻面到反方 turn 2 → 全预跳过 → 立即 AI（不等 2s）
+        await store.start_speaking("spk_aff_1")
+        await store.stop_speaking("spk_aff_1")
+        await asyncio.sleep(0.4)  # 放行"立即接管"的后台任务
+
+    asyncio.run(scenario())
+    fd = client.get("/api/matches/match_001").json()["data"]["free_debate"]
+    assert fd["current_turn_side"] == "negative"
+    assert fd["turn_index"] == 2
+    assert fd.get("auto_handled", {}).get("negative_2") in {"spk_neg_1", "spk_neg_3"}
+
+
+def test_free_debate_human_start_cancels_auto_agent(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "0.1")
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    _use_embedded_mock_agent("spk_aff_2")
+    _use_embedded_mock_agent("spk_aff_4")
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")  # 正方 turn 1，0.1s 决定窗口
+        await store.start_speaking("spk_aff_1")  # 人类在窗口内开始发言
+        await asyncio.sleep(0.5)  # 让 0.1s 决定计时到点
+
+    asyncio.run(scenario())
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"]["speaker_id"] == "spk_aff_1"  # 人类在说，AI 未接管
+    assert "affirmative_1" not in data["free_debate"].get("auto_handled", {})
 
 
 def test_agent_retry_rejects_invalid_phase_speaker() -> None:
@@ -2015,26 +2097,18 @@ def test_timer_tick_emits_expiry_and_auto_ends_current_speech() -> None:
     assert adjusted.status_code == 200
 
     emitted = asyncio.run(store.tick_timers())
+    # 需求 5.md：自由辩论单轮钟到点属于"轮内切换"，全自动翻面进入对方 2s 窗口——不再等主持确认。
     assert [event["type"] for event in emitted] == [
         "clock.expired",
         "speech.timeout",
         "speech.ended",
-        "flow.awaiting_host_confirm",
     ]
 
     data = client.get("/api/matches/match_001").json()["data"]
     assert data["current_speech"] is None
     assert data["recent_transcript"][0]["speech_id"] == speech_id
     assert data["free_debate"]["current_turn_side"] == "negative"
-    assert data["flow"]["awaiting_host_confirm"] is True
-    assert data["flow"]["next_action"] == "free_turn_next"
-    assert data["flow"]["expired_clocks"] == ["turn"]
-
-    confirmed = client.post("/api/matches/match_001/flow/confirm", json={"reason": "unit_confirm_next_turn"})
-    assert confirmed.status_code == 200
-    confirmed_data = confirmed.json()["data"]
-    assert confirmed_data["flow"]["awaiting_host_confirm"] is False
-    assert next(item for item in confirmed_data["clocks"] if item["name"] == "turn")["state"] == "paused"
+    assert data["flow"]["awaiting_host_confirm"] is False  # 自动，无需主持确认
 
     emitted_again = asyncio.run(store.tick_timers())
     assert emitted_again == []
@@ -2071,7 +2145,8 @@ def test_timer_tick_cuts_off_agent_tts_playback_at_timeout() -> None:
     assert adjusted.status_code == 200
 
     emitted = asyncio.run(store.tick_timers())
-    assert [event["type"] for event in emitted] == ["clock.expired", "speech.timeout", "speech.ended", "flow.awaiting_host_confirm"]
+    # 自由辩论单轮钟到点：自动翻面，不再追加 flow.awaiting_host_confirm 事件。
+    assert [event["type"] for event in emitted] == ["clock.expired", "speech.timeout", "speech.ended"]
     assert emitted[1]["payload"]["task_id"] == "task_agent_tts"
     assert emitted[2]["payload"]["reason"] == "timeout"
     assert emitted[2]["payload"]["task_id"] == "task_agent_tts"
@@ -2081,7 +2156,7 @@ def test_timer_tick_cuts_off_agent_tts_playback_at_timeout() -> None:
     assert data["recent_transcript"][0]["speech_id"] == "speech_agent_tts"
     assert data["speech_service"]["tts"]["status"] == "idle"
     assert data["speech_service"]["tts"]["detail"] == "timeout"
-    assert data["flow"]["awaiting_host_confirm"] is True
+    assert data["flow"]["awaiting_host_confirm"] is False  # 自由辩论轮内自动，无需主持确认
 
 
 def test_tts_playback_progress_updates_current_speech() -> None:
