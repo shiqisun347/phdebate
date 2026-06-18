@@ -5,7 +5,7 @@ import { ClockTile } from "../components/ClockTile";
 import { AuthPrompt } from "../components/AuthPrompt";
 import { clockByName, seatLabel, sideClass, sideLabel, speakerLabel } from "../state/format";
 import { resolveAvatar, defaultAvatarDataUri } from "../state/avatar";
-import type { MatchSnapshot, ScreenScene, Side, Speaker } from "../types/contracts";
+import type { MatchInfo, MatchSnapshot, ScreenScene, Side, Speaker } from "../types/contracts";
 import { useMatch } from "../realtime/useMatch";
 import { usePlayback } from "../screen/usePlayback";
 import { playBellCue } from "../utils/audioCue";
@@ -86,11 +86,25 @@ function ScreenView({ snapshot, audioEnabled, onToggleAudio }: { snapshot: Match
   );
 }
 
-function ScreenChrome() {
+function ScreenChrome({ match }: { match: MatchInfo }) {
+  // 左上角=比赛名称（图片/文本，来自比赛管理，实时同步）；右上角=主办机构（图片/文本），
+  // 主办机构未设置时回退为主办方 logo。
+  const titleImage = match.title_display === "image" && match.title_image_url ? match.title_image_url : "";
+  const organizerImage = match.organizer_display === "image" && match.organizer_image_url ? match.organizer_image_url : "";
   return (
     <header className="screen-top">
-      <div className="screen-event-wordmark">第一届人机辩论赛</div>
-      <img src="/assets/logo-full-white.png" alt="中国科学院计算技术研究所" />
+      {titleImage ? (
+        <img className="screen-event-logo" src={titleImage} alt={match.title || "比赛名称"} />
+      ) : (
+        <div className="screen-event-wordmark">{match.title || "人机辩论赛"}</div>
+      )}
+      {organizerImage ? (
+        <img className="screen-event-logo" src={organizerImage} alt={match.organizer || "主办机构"} />
+      ) : match.organizer ? (
+        <div className="screen-event-organizer">{match.organizer}</div>
+      ) : (
+        <img src="/assets/logo-full-white.png" alt="中国科学院计算技术研究所" />
+      )}
     </header>
   );
 }
@@ -141,7 +155,7 @@ function xiaoqiAvatar(snapshot: MatchSnapshot): string {
 function IdleScene({ snapshot }: { snapshot: MatchSnapshot }) {
   return (
     <section className="screen-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
       <div className="live-grid">
         <RosterPanel snapshot={snapshot} side="affirmative" />
@@ -161,7 +175,7 @@ function IdleScene({ snapshot }: { snapshot: MatchSnapshot }) {
 function OpeningScene({ snapshot }: { snapshot: MatchSnapshot }) {
   return (
     <section className="screen-scene opening-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <div className="opening-center">
         <span className="opening-kicker">本场辩题</span>
         <h1 className="opening-topic">{snapshot.match.topic}</h1>
@@ -187,7 +201,7 @@ function TeamsScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const speaking = isSpeakingNow(snapshot);
   return (
     <section className="screen-scene teams-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
       <div className="live-grid">
         <RosterPanel snapshot={snapshot} side="affirmative" activeSpeaker={currentSpeaker} />
@@ -233,7 +247,7 @@ function LiveScene({ snapshot }: { snapshot: MatchSnapshot }) {
 
   return (
     <section className="screen-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
       <div className="live-grid">
         <RosterPanel snapshot={snapshot} side="affirmative" activeSpeaker={currentSpeaker} />
@@ -258,7 +272,7 @@ function PausedScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const phase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
   return (
     <section className="screen-scene paused-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
       <div className="paused-panel">
         <span>现场暂停</span>
@@ -273,7 +287,7 @@ function PausedScene({ snapshot }: { snapshot: MatchSnapshot }) {
 function XiaoqiSpeakingScene({ snapshot, kicker, title }: { snapshot: MatchSnapshot; kicker: string; title: string }) {
   return (
     <section className="screen-scene xiaoqi-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
       <div className="xiaoqi-center">
         <SpeakingAvatar
@@ -300,7 +314,7 @@ function XiaoqiResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const best = snapshot.speakers.find((speaker) => speaker.id === vs.best_speaker_id);
   return (
     <section className="screen-scene official-result-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <div className="result-center official-result">
         <div className="xiaoqi-result-head">
           <img className="xiaoqi-result-avatar" src={xiaoqiAvatar(snapshot)} alt={snapshot.xiaoqi?.name || "小七"} />
@@ -329,7 +343,7 @@ function XiaoqiResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
 function AcknowledgmentScene({ snapshot }: { snapshot: MatchSnapshot }) {
   return (
     <section className="screen-scene thanks-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <div className="thanks-center">
         <span className="thanks-kicker">致谢</span>
         <h1 className="thanks-line">感谢各位的参与，我们下次再见</h1>
@@ -343,7 +357,7 @@ function JudgeCommentaryScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const voteUrl = `${window.location.origin}/vote`;
   return (
     <section className="screen-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
       <div className="live-grid commentary-grid">
         <RosterPanel snapshot={snapshot} side="affirmative" />
@@ -370,7 +384,7 @@ function JudgeResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const judge = snapshot.vote_state.judge_summary;
   return (
     <section className="screen-scene official-result-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <div className="result-center official-result">
         <span>官方评委结果</span>
         {judgePublished ? (
@@ -406,7 +420,7 @@ function AudienceResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const winner = snapshot.teams.find((team) => team.side === winnerSide);
   return (
     <section className="screen-scene result-scene audience-result-scene">
-      <ScreenChrome />
+      <ScreenChrome match={snapshot.match} />
       <div className="result-center audience-result">
         <span>学生投票结果</span>
         <h1>{sideLabel(winnerSide)} · {winner?.name}</h1>
