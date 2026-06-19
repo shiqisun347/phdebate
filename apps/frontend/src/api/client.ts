@@ -202,6 +202,10 @@ export function sendXiaoqiCommand(body: {
   return post<XiaoqiCommandResult>("/api/admin/xiaoqi/command", body);
 }
 
+export function pushXiaoqiMatchRecord(matchId: string): Promise<XiaoqiCommandResult> {
+  return post<XiaoqiCommandResult>(`/api/matches/${matchId}/xiaoqi/match-record`, {});
+}
+
 export function getRuntimeAuthStatus(): Promise<RuntimeAuthStatus> {
   return request<RuntimeAuthStatus>("/api/admin/security/auth");
 }

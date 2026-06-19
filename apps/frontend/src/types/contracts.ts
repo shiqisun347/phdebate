@@ -626,6 +626,8 @@ export interface XiaoqiConfig {
   name: string;
   image_url: string;
   endpoint: string;
+  match_record_endpoint: string;
+  session_id: string;
   request_method: string;
   api_key_env: string;
   timeout_ms: number;

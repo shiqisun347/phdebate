@@ -2,7 +2,7 @@ import * as React from "react";
 import {
   Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles, MessageSquare,
   Award, UserCircle2, HelpCircle, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
-  ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX,
+  ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX, Upload,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Badge, Select, Textarea, Input, Separator, Spinner } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
@@ -11,7 +11,7 @@ import { Tabs } from "../ui/Tabs";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
 import { useAction } from "../lib/actions";
-import { post, sendXiaoqiCommand } from "../../api/client";
+import { post, sendXiaoqiCommand, pushXiaoqiMatchRecord } from "../../api/client";
 import { SCENE_LABELS, STATUS_LABELS, sideLabel } from "../lib/labels";
 import { resolveAvatar } from "../../state/avatar";
 import type { MatchSnapshot, Speaker, XiaoqiCommand } from "../../types/contracts";
@@ -655,8 +655,24 @@ function XiaoqiControlPanel() {
   const { run } = useAction();
   const toast = useToast();
   const [busy, setBusy] = React.useState<XiaoqiCommand | null>(null);
+  const [pushingRecord, setPushingRecord] = React.useState(false);
   const [customQ, setCustomQ] = React.useState("");
   const base = `/api/matches/${matchId}`;
+
+  async function pushRecord() {
+    setPushingRecord(true);
+    try {
+      const r = await pushXiaoqiMatchRecord(matchId);
+      toast(
+        r.sent ? `已推送比赛记录到小七（${(r.payload as { match_record?: unknown[] }).match_record?.length ?? 0} 个环节）` : `未推送：${r.reason}`,
+        r.sent ? "success" : "info"
+      );
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "推送失败", "error");
+    } finally {
+      setPushingRecord(false);
+    }
+  }
 
   async function send(command: XiaoqiCommand, scene?: string) {
     if (scene) await run(() => post(`${base}/screen/scene`, { scene }), { success: `大屏：${scene === "xiaoqi_result" ? "小七评判" : "小七点评"}`, refresh: true });
@@ -679,6 +695,11 @@ function XiaoqiControlPanel() {
         <CardDescription>大屏切到小七形象，并向小七下发命令（发音由小七自身完成）。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        <Button variant="outline" className="w-full justify-start" loading={pushingRecord} onClick={pushRecord}>
+          <Upload /> 推送比赛记录到小七<ChevronRight className="ml-auto size-4 opacity-50" />
+        </Button>
+        <p className="-mt-1 text-xs text-muted-foreground">小七点评/评判前，先把本场完整辩论记录同步给它。</p>
+        <Separator />
         <div className="grid grid-cols-1 gap-2">
           <Button variant="outline" className="justify-start" loading={busy === "intro"} onClick={() => send("intro", "xiaoqi_commentary")}>
             <UserCircle2 /> 小七自我介绍<ChevronRight className="ml-auto size-4 opacity-50" />

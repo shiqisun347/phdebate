@@ -63,6 +63,8 @@ class XiaoqiStore:
             "name": "小七",
             "image_url": "",
             "endpoint": "",
+            "match_record_endpoint": "",
+            "session_id": "default",
             "request_method": "POST",
             "api_key_env": "",
             "timeout_ms": 30000,
@@ -107,7 +109,7 @@ class XiaoqiStore:
 
     def update(self, body: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
-            for key in ("enabled", "name", "image_url", "endpoint", "request_method", "api_key_env", "timeout_ms"):
+            for key in ("enabled", "name", "image_url", "endpoint", "match_record_endpoint", "session_id", "request_method", "api_key_env", "timeout_ms"):
                 if key in body and body[key] is not None:
                     self.config[key] = body[key]
             if isinstance(body.get("prompts"), dict):
@@ -164,6 +166,40 @@ class XiaoqiStore:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.request(method, endpoint, json=payload, headers=headers)
+            body: Any
+            try:
+                body = resp.json()
+            except ValueError:
+                body = resp.text[:2000]
+            return {"sent": True, "status_code": resp.status_code, "response": body, "payload": payload}
+        except Exception as exc:  # noqa: BLE001
+            return {"sent": False, "reason": str(exc), "payload": payload}
+
+    async def push_match_record(
+        self, match_record: list, *, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """向小七推送本场完整比赛记录（celebration-api `match_record/update` 接口）。
+
+        payload 形如 ``{"session_id": "default", "match_record": [...]}``；
+        match_record 与 Agent 的 debate_history 同构
+        （``[{"stage", "message": [{"speaker", "content"}]}]``）。
+        仅手动触发（管理端/控制台按钮），不在发言流程里自动调用，
+        与 `send()`（命令下发）相互独立，互不影响。
+        """
+        cfg = self.public()
+        endpoint = (cfg.get("match_record_endpoint") or "").strip()
+        sid = (session_id or cfg.get("session_id") or "default").strip() or "default"
+        payload = {"session_id": sid, "match_record": match_record}
+        if not endpoint:
+            return {"sent": False, "reason": "未配置小七比赛记录接口地址", "payload": payload}
+        headers = {"Content-Type": "application/json"}
+        env = cfg.get("api_key_env")
+        if env and os.getenv(env):
+            headers["Authorization"] = f"Bearer {os.getenv(env)}"
+        timeout = max(1.0, float(cfg.get("timeout_ms", 30000)) / 1000.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(endpoint, json=payload, headers=headers)
             body: Any
             try:
                 body = resp.json()

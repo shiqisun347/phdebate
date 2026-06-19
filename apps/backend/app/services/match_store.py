@@ -4581,6 +4581,14 @@ class MatchStore:
             if pid in groups
         ]
 
+    def build_match_record(self) -> list:
+        """Public accessor for the 小七 `match_record/update` payload.
+
+        Identical shape to the agent's ``debate_history`` (grouped by stage). Pushed
+        to 小七 on manual request so it can comment/judge/vote against the full
+        transcript of the active match."""
+        return self._build_debate_history()
+
     def _build_agent_payload(self, task_id: str, speech_id: str, speaker: Dict[str, Any]) -> Dict[str, Any]:
         phase = self._current_phase()
         match = self.snapshot["match"]

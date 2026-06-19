@@ -1392,6 +1392,71 @@ def test_mock_agent_speech_records_final_transcript(monkeypatch) -> None:
     assert data["free_debate"]["current_turn_side"] == "negative"
 
 
+def test_xiaoqi_match_record_push(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    _use_embedded_mock_agent("spk_aff_2")
+    asyncio.run(store.run_agent_speech("spk_aff_2"))
+    mid = client.get("/api/matches/match_001").json()["data"]
+    if mid["current_speech"]:
+        asyncio.run(
+            store.complete_agent_playback(mid["current_speech"]["id"], mid["current_speech"].get("tts_task_id") or "")
+        )
+
+    # match_record == debate_history shape: [{stage, message:[{speaker, content}]}]
+    record = store.build_match_record()
+    assert isinstance(record, list) and record, "finalized speech should appear in match_record"
+    assert all(set(stage) == {"stage", "message"} for stage in record)
+    first = record[0]
+    assert isinstance(first["message"], list) and first["message"]
+    assert set(first["message"][0]) == {"speaker", "content"}
+
+    from app.services.xiaoqi_store import xiaoqi_store
+
+    saved = {k: xiaoqi_store.config.get(k) for k in ("match_record_endpoint", "session_id")}
+    try:
+        # 1) no endpoint configured → not sent, but the full payload is built (default session)
+        data = client.post("/api/matches/match_001/xiaoqi/match-record").json()["data"]
+        assert data["sent"] is False
+        assert data["payload"]["session_id"] == "default"
+        assert data["payload"]["match_record"] == record
+
+        # 2) config round-trips through PUT/GET; session_id flows into the payload
+        put = client.put(
+            "/api/admin/xiaoqi",
+            json={
+                "match_record_endpoint": "https://aitoys.example/celebration-api/v1/match_record/update",
+                "session_id": "evt_demo",
+            },
+        )
+        assert put.status_code == 200
+        cfg = client.get("/api/admin/xiaoqi").json()["data"]
+        assert cfg["match_record_endpoint"].endswith("/match_record/update")
+        assert cfg["session_id"] == "evt_demo"
+
+        # 3) with endpoint configured, the exact wire format is POSTed to 小七
+        captured: dict = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"code": 0, "message": "ok"})
+
+        real_async_client = httpx.AsyncClient
+
+        def fake_async_client(*_args, **kwargs):
+            return real_async_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+        monkeypatch.setattr("app.services.xiaoqi_store.httpx.AsyncClient", fake_async_client)
+
+        sent = client.post("/api/matches/match_001/xiaoqi/match-record").json()["data"]
+        assert sent["sent"] is True
+        assert sent["status_code"] == 200
+        assert captured["url"].endswith("/celebration-api/v1/match_record/update")
+        assert captured["body"] == {"session_id": "evt_demo", "match_record": record}
+    finally:
+        xiaoqi_store.config.update(saved)
+
+
 def test_agent_gateway_parses_sse_delta_and_final() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/speech"

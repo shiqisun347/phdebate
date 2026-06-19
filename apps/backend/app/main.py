@@ -356,6 +356,23 @@ async def send_xiaoqi_command(body: Dict[str, Any], _principal: Principal = Depe
     return {"ok": True, "data": result}
 
 
+@app.post("/api/matches/{match_id}/xiaoqi/match-record")
+async def push_xiaoqi_match_record(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    """手动把当前比赛的完整记录（按阶段聚合）推送到小七 match_record/update 接口。"""
+    await _ensure_match(match_id)
+    record = store.build_match_record()
+    result = await xiaoqi_store.push_match_record(record)
+    session_id = result.get("payload", {}).get("session_id", "")
+    store.log_xiaoqi_command("match_record", {"session_id": session_id, "stages": len(record)}, result)
+    await store.emit(
+        "xiaoqi.match_record_pushed",
+        {"sent": result.get("sent", False), "stages": len(record)},
+        _principal.actor_type,
+        _principal.actor_id,
+    )
+    return {"ok": True, "data": result}
+
+
 @app.post("/api/matches/{match_id}/exports")
 async def create_export(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)

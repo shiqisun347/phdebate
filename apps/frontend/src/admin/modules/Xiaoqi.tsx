@@ -1,8 +1,9 @@
 import * as React from "react";
-import { Sparkles, Save, Send, ImageIcon, MessageSquare, Award, HelpCircle, UserCircle2 } from "lucide-react";
+import { Sparkles, Save, Send, ImageIcon, MessageSquare, Award, HelpCircle, UserCircle2, Upload } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Input, Label, Textarea, Switch, Select, Badge, Spinner, Separator } from "../ui/primitives";
 import { useToast } from "../lib/toast";
-import { getXiaoqi, updateXiaoqi, sendXiaoqiCommand } from "../../api/client";
+import { useAdminData } from "../lib/data";
+import { getXiaoqi, updateXiaoqi, sendXiaoqiCommand, pushXiaoqiMatchRecord } from "../../api/client";
 import type { XiaoqiConfig, XiaoqiCommand } from "../../types/contracts";
 
 const COMMANDS: Array<{ key: XiaoqiCommand; label: string; icon: typeof MessageSquare }> = [
@@ -14,13 +15,16 @@ const COMMANDS: Array<{ key: XiaoqiCommand; label: string; icon: typeof MessageS
 
 export function Xiaoqi() {
   const toast = useToast();
+  const { matchId, snapshot } = useAdminData();
   const [cfg, setCfg] = React.useState<XiaoqiConfig | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [tplText, setTplText] = React.useState("");
   const [tplError, setTplError] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<XiaoqiCommand | null>(null);
+  const [pushing, setPushing] = React.useState(false);
   const [customQ, setCustomQ] = React.useState("");
   const [result, setResult] = React.useState<string | null>(null);
+  const hasMatch = Boolean(snapshot?.match.id);
 
   const load = React.useCallback(async () => {
     try {
@@ -91,6 +95,25 @@ export function Xiaoqi() {
     }
   }
 
+  async function pushRecord() {
+    setPushing(true);
+    setResult(null);
+    try {
+      const r = await pushXiaoqiMatchRecord(matchId);
+      if (r.sent) {
+        toast("已推送比赛记录到小七", "success");
+        setResult(`HTTP ${r.status_code} · 响应：${typeof r.response === "string" ? r.response : JSON.stringify(r.response).slice(0, 600)}`);
+      } else {
+        toast(`未推送：${r.reason}`, "info");
+        setResult(`未推送（${r.reason}）。将发送的请求体：\n${JSON.stringify(r.payload, null, 2)}`);
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "推送失败", "error");
+    } finally {
+      setPushing(false);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <Card>
@@ -123,8 +146,35 @@ export function Xiaoqi() {
               </Select>
             </div>
             <div className="space-y-1.5 sm:col-span-2">
-              <Label>请求地址（小七接口）</Label>
+              <Label>请求地址（小七命令接口）</Label>
               <Input value={cfg.endpoint} onChange={(e) => set("endpoint", e.target.value)} placeholder="https://…/xiaoqi" />
+              <p className="text-xs text-muted-foreground">用于下发 自我介绍/点评/评判/自定义 命令。</p>
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label className="flex items-center gap-1.5"><Upload className="size-3.5" /> 比赛记录接口（match_record/update）</Label>
+              <Input
+                value={cfg.match_record_endpoint}
+                onChange={(e) => set("match_record_endpoint", e.target.value)}
+                placeholder="https://aitoys.seawayos.com/celebration-api/v1/match_record/update"
+              />
+              <p className="text-xs text-muted-foreground">把本场完整辩论记录（按阶段聚合）推送给小七，供其点评/评判/现场投票。</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>会话 ID（session_id）</Label>
+              <Input value={cfg.session_id} onChange={(e) => set("session_id", e.target.value)} placeholder="default" />
+            </div>
+            <div className="space-y-1.5">
+              <Label>推送比赛记录</Label>
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                loading={pushing}
+                disabled={!hasMatch}
+                onClick={pushRecord}
+              >
+                <Upload /> 立即推送到小七
+              </Button>
+              {!hasMatch && <p className="text-xs text-muted-foreground">尚无比赛，先在「比赛管理」新建。</p>}
             </div>
             <div className="space-y-1.5">
               <Label>API Key 环境变量名</Label>
