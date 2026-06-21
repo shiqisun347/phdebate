@@ -20,6 +20,7 @@ type RuntimeScreenScene =
   | "teams"
   | "live"
   | "paused"
+  | "audience_vote"
   | "xiaoqi_commentary"
   | "xiaoqi_result"
   | "judge_commentary"
@@ -88,6 +89,7 @@ function ScreenView({ snapshot, audioEnabled, onToggleAudio }: { snapshot: Match
       {scene === "opening" && <OpeningScene snapshot={snapshot} />}
       {scene === "teams" && <TeamsScene snapshot={snapshot} />}
       {scene === "paused" && <PausedScene snapshot={snapshot} />}
+      {scene === "audience_vote" && <AudienceVoteScene snapshot={snapshot} />}
       {scene === "xiaoqi_commentary" && <XiaoqiSpeakingScene snapshot={snapshot} kicker="小七点评" title="小七正在点评" />}
       {scene === "xiaoqi_result" && <XiaoqiResultScene snapshot={snapshot} />}
       {scene === "judge_commentary" && <JudgeCommentaryScene snapshot={snapshot} />}
@@ -374,7 +376,6 @@ function AcknowledgmentScene({ snapshot }: { snapshot: MatchSnapshot }) {
 }
 
 function JudgeCommentaryScene({ snapshot }: { snapshot: MatchSnapshot }) {
-  const voteUrl = `${window.location.origin}/vote`;
   return (
     <section className="screen-scene">
       <ScreenChrome match={snapshot.match} />
@@ -384,12 +385,7 @@ function JudgeCommentaryScene({ snapshot }: { snapshot: MatchSnapshot }) {
         <div className="commentary-panel">
           <span>赛后环节</span>
           <h1>评委点评</h1>
-          <p>
-            {snapshot.vote_state.window_status === "open" ? "学生扫码投票已开启" : "学生投票暂未开启"}
-            {" · 当前收到 "}{snapshot.vote_state.audience_count} 票
-          </p>
-          <VoteQr url={voteUrl} />
-          <div className="vote-url">{voteUrl}</div>
+          <p>评委正在对本场辩论进行点评与合议。</p>
         </div>
         <RosterPanel snapshot={snapshot} side="negative" />
       </div>
@@ -431,39 +427,245 @@ function JudgeResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
   );
 }
 
+function AudienceVoteScene({ snapshot }: { snapshot: MatchSnapshot }) {
+  const voteUrl = `${window.location.origin}/vote`;
+  const open = snapshot.vote_state.window_status === "open";
+  return (
+    <section className="screen-scene audience-vote-scene">
+      <ScreenChrome match={snapshot.match} />
+      <Topic snapshot={snapshot} />
+      <div className="av-body">
+        <div className="av-kicker">观众投票</div>
+        <h1 className="av-title">扫码为你心中的胜方与最佳辩手投票</h1>
+        <div className="av-qr-wrap">
+          <VoteQr url={voteUrl} size={360} />
+          <div className={`av-status ${open ? "open" : "closed"}`}>{open ? "投票进行中" : "投票即将开启"}</div>
+        </div>
+        <div className="av-url">{voteUrl}</div>
+        <div className="av-count">
+          已收到 <strong>{snapshot.vote_state.audience_count}</strong> 票
+        </div>
+        {!open && <div className="av-hint">请等待主持人点击「开始观众投票」后即可提交</div>}
+      </div>
+    </section>
+  );
+}
+
+function VsGloves() {
+  // 两只带角度对撞的拳击手套（蓝=正方 / 紫=反方）+ 金色冲击星芒，替代 "VS"。
+  const glove = (grad: string) => (
+    <g stroke="rgba(255,255,255,0.85)" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round">
+      {/* 护腕 */}
+      <rect x="2" y="24" width="15" height="26" rx="7" fill={`url(#${grad})`} />
+      <line x1="3" y1="37" x2="16" y2="37" stroke="rgba(255,255,255,0.4)" strokeWidth="2.4" />
+      {/* 拳套主体（含拇指） */}
+      <path
+        d="M14 18 C 31 9 53 14 55 33 C 56 49 43 55 31 53 C 25 52 22 48 23 43 C 16 48 8 44 9 35 C 10 28 18 28 23 34 C 18 26 12 22 14 18 Z"
+        fill={`url(#${grad})`}
+      />
+      {/* 指节棱线（拳击手套标志） */}
+      <path d="M45 21 q6 11 -2 23" fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth="1.8" />
+      <path d="M38 20 q6 12 -2 24" fill="none" stroke="rgba(255,255,255,0.32)" strokeWidth="1.6" />
+      {/* 拇指折痕 */}
+      <path d="M24 35 q-4 4 -1 9" fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.6" />
+    </g>
+  );
+  return (
+    <svg className="ar-vs-gloves-svg" viewBox="0 0 156 84" width="150" height="80" aria-label="对决">
+      <defs>
+        <linearGradient id="ar-glove-aff" x1="0" y1="0" x2="0.7" y2="1">
+          <stop offset="0" stopColor="#9bd6ff" />
+          <stop offset="1" stopColor="#2f7fd6" />
+        </linearGradient>
+        <linearGradient id="ar-glove-neg" x1="0" y1="0" x2="0.7" y2="1">
+          <stop offset="0" stopColor="#dcc0ff" />
+          <stop offset="1" stopColor="#7a4fd0" />
+        </linearGradient>
+        <radialGradient id="ar-spark" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stopColor="#fff7d6" />
+          <stop offset="0.5" stopColor="#ffd45e" />
+          <stop offset="1" stopColor="#ffd45e" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      {/* 冲击星芒 */}
+      <g transform="translate(78,46)">
+        <path d="M0 -22 L6 -7 L22 -10 L10 2 L16 19 L0 7 L-16 19 L-10 2 L-22 -10 L-6 -7 Z" fill="url(#ar-spark)" />
+        <circle r="7" fill="#fff" opacity="0.92" />
+      </g>
+      {/* 左拳（正方），向右下倾斜对撞 */}
+      <g transform="translate(8,12) rotate(14 32 36)">{glove("ar-glove-aff")}</g>
+      {/* 右拳（反方），镜像后向左下倾斜对撞 */}
+      <g transform="translate(148,12) scale(-1,1) rotate(14 32 36)">{glove("ar-glove-neg")}</g>
+    </svg>
+  );
+}
+
+function SideEmblem({ side }: { side: Side }) {
+  const aff = side === "affirmative";
+  const gid = `ar-emblem-${side}`;
+  return (
+    <svg className="ar-emblem" viewBox="0 0 48 56" width="52" height="60" aria-hidden="true">
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor={aff ? "#7fc8ff" : "#cfa6ff"} />
+          <stop offset="1" stopColor={aff ? "#2f7fd6" : "#7a4fd0"} />
+        </linearGradient>
+      </defs>
+      <path
+        d="M24 2 L44 10 V27 C44 41 35 50 24 54 C13 50 4 41 4 27 V10 Z"
+        fill={`url(#${gid})`}
+        stroke="rgba(255,255,255,0.55)"
+        strokeWidth="1.6"
+      />
+      <text x="24" y="34" textAnchor="middle" fontSize="22" fontWeight="900" fill="#fff" fontFamily="'Noto Serif SC',serif">
+        {aff ? "正" : "反"}
+      </text>
+    </svg>
+  );
+}
+
+function ArAvatar({ speaker, className }: { speaker: Speaker; className: string }) {
+  return (
+    <span className={className}>
+      {speaker.image_url ? <img src={speaker.image_url} alt={speaker.name} /> : <span>{speaker.name.slice(0, 1)}</span>}
+    </span>
+  );
+}
+
+function CrownIcon() {
+  return (
+    <svg className="ar-crown" viewBox="0 0 64 50" width="50" height="39" aria-hidden="true">
+      <defs>
+        <linearGradient id="ar-crown-g" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffefb8" />
+          <stop offset="0.5" stopColor="#ffce53" />
+          <stop offset="1" stopColor="#f0a01e" />
+        </linearGradient>
+      </defs>
+      <path d="M6 41 L10 16 L23 29 L32 7 L41 29 L54 16 L58 41 Z" fill="url(#ar-crown-g)" stroke="#b9791a" strokeWidth="1.6" strokeLinejoin="round" />
+      <rect x="6" y="40" width="52" height="8" rx="2.5" fill="url(#ar-crown-g)" stroke="#b9791a" strokeWidth="1.6" />
+      <circle cx="10" cy="14" r="3.4" fill="#fff4d2" stroke="#b9791a" strokeWidth="1" />
+      <circle cx="32" cy="5" r="3.8" fill="#fff4d2" stroke="#b9791a" strokeWidth="1" />
+      <circle cx="54" cy="14" r="3.4" fill="#fff4d2" stroke="#b9791a" strokeWidth="1" />
+      <circle cx="20" cy="44" r="2" fill="#fff" opacity="0.85" />
+      <circle cx="32" cy="44" r="2" fill="#fff" opacity="0.85" />
+      <circle cx="44" cy="44" r="2" fill="#fff" opacity="0.85" />
+    </svg>
+  );
+}
+
+function TrophyIcon({ flip }: { flip?: boolean }) {
+  return (
+    <svg className={`ar-winner-trophy ${flip ? "ar-flip" : ""}`} viewBox="0 0 48 48" width="36" height="36" aria-hidden="true">
+      <defs>
+        <linearGradient id="ar-trophy-g" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffefb8" />
+          <stop offset="1" stopColor="#f0a01e" />
+        </linearGradient>
+      </defs>
+      <path d="M15 6 H33 V17 A9 9 0 0 1 15 17 Z" fill="url(#ar-trophy-g)" stroke="#b9791a" strokeWidth="1.6" strokeLinejoin="round" />
+      <path d="M15 9 H8 V13 A7 7 0 0 0 15 19" fill="none" stroke="#b9791a" strokeWidth="2.2" />
+      <path d="M33 9 H40 V13 A7 7 0 0 1 33 19" fill="none" stroke="#b9791a" strokeWidth="2.2" />
+      <rect x="22" y="25" width="4" height="6" fill="#cf9320" />
+      <rect x="15" y="31" width="18" height="5" rx="2" fill="url(#ar-trophy-g)" stroke="#b9791a" strokeWidth="1.2" />
+      <rect x="12" y="37" width="24" height="6" rx="2.5" fill="url(#ar-trophy-g)" stroke="#b9791a" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+type ArRankItem = { speaker_id: string; count: number; speaker: Speaker };
+
+function DebaterRow({ item, rank, champion }: { item: ArRankItem; rank: number; champion: boolean }) {
+  const sp = item.speaker;
+  return (
+    <div className={`ar-row ${champion ? "ar-row-champ" : ""} ar-${sp.side}`}>
+      {champion ? <span className="ar-best-ribbon"><b>最佳</b><b>辩手</b></span> : <span className="ar-rank-no">{rank}</span>}
+      <span className="ar-avatar-wrap">
+        {champion && <CrownIcon />}
+        <ArAvatar speaker={sp} className="ar-avatar" />
+      </span>
+      <div className="ar-card-info">
+        <span className="ar-name">{sp.name}</span>
+        <span className={`ar-seat ar-seat-${sp.side}`}>{sideLabel(sp.side)}{seatLabel(sp.seat)}</span>
+      </div>
+      <span className="ar-votes">{item.count} 票</span>
+    </div>
+  );
+}
+
 function AudienceResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const audience = snapshot.vote_state.audience_summary;
-  const total = Math.max(1, audience.total);
-  const affPercent = Math.round((audience.winner.affirmative / total) * 100);
-  const negPercent = Math.round((audience.winner.negative / total) * 100);
-  const winnerSide: Side = audience.winner.negative > audience.winner.affirmative ? "negative" : "affirmative";
-  const winner = snapshot.teams.find((team) => team.side === winnerSide);
+  const aff = audience.winner.affirmative;
+  const neg = audience.winner.negative;
+  const total = Math.max(1, aff + neg);
+  const affPercent = Math.round((aff / total) * 100);
+  const negPercent = 100 - affPercent;
+  const hasVotes = aff + neg > 0;
+  // 拳套对撞徽标定位到双方分界处；为可读性夹在 [14%, 86%]，随占比动态滑动。
+  const vsPos = !hasVotes ? 50 : Math.min(86, Math.max(14, affPercent));
+  const leading = aff === neg ? "" : aff > neg ? "aff" : "neg";
+  const winnerSide: Side | null = !hasVotes || aff === neg ? null : aff > neg ? "affirmative" : "negative";
+  const affTeam = snapshot.teams.find((t) => t.side === "affirmative");
+  const negTeam = snapshot.teams.find((t) => t.side === "negative");
+  const winnerTeam = winnerSide === "affirmative" ? affTeam : winnerSide === "negative" ? negTeam : undefined;
+  const ranked = [...audience.best_speaker]
+    .map((item) => ({ ...item, speaker: snapshot.speakers.find((s) => s.id === item.speaker_id) }))
+    .filter((item): item is typeof item & { speaker: Speaker } => Boolean(item.speaker))
+    .slice(0, 8);
+  const champion = ranked[0];
+  const rest = ranked.slice(1);
   return (
-    <section className="screen-scene result-scene audience-result-scene">
+    <section className="screen-scene audience-result-scene">
       <ScreenChrome match={snapshot.match} />
-      <div className="result-center audience-result">
-        <span>学生投票结果</span>
-        <h1>{sideLabel(winnerSide)} · {winner?.name}</h1>
-        <p>共收到 <strong>{audience.total}</strong> 票</p>
-        <div className="audience-bars">
-          <AudienceBar side="affirmative" label="正方" count={audience.winner.affirmative} percent={affPercent} />
-          <AudienceBar side="negative" label="反方" count={audience.winner.negative} percent={negPercent} />
+      <div className="ar-headline">
+        <div className="ar-head-row">
+          <div className="ar-head">观众投票结果</div>
+          <span className="ar-total-badge">总投票数 <strong>{aff + neg}</strong> 票</span>
         </div>
-        <div className="audience-ranking">
-          <h2>最佳辩手排行</h2>
-          {audience.best_speaker.slice(0, 4).map((item, index) => {
-            const speaker = snapshot.speakers.find((candidate) => candidate.id === item.speaker_id);
-            return (
-              <div className="audience-rank-row" key={`${item.speaker_id}-${index}`}>
-                <span>{index + 1}</span>
-                <strong>{speakerLabel(speaker)}</strong>
-                <em>{item.count} 票</em>
-              </div>
-            );
-          })}
-          {!audience.best_speaker.length && <p>等待学生投票统计。</p>}
+        {winnerTeam && (
+          <div className={`ar-winner ar-winner-${winnerSide}`}>
+            <TrophyIcon />
+            <span className="ar-winner-label">获胜方</span>
+            <strong>{sideLabel(winnerSide!)} · {winnerTeam.name}</strong>
+            <TrophyIcon flip />
+          </div>
+        )}
+      </div>
+
+      <div className="ar-vs">
+        <div className={`ar-vs-side ar-aff ${leading === "aff" ? "lead" : ""}`}>
+          <SideEmblem side="affirmative" />
+          <span className="ar-vs-text">
+            <span className="ar-vs-name">正方</span>
+            <span className="ar-vs-team">{affTeam?.name ?? "正方"}</span>
+          </span>
+        </div>
+
+        <div className="ar-vs-bar-wrap" role="img" aria-label={`正方 ${aff} 票，反方 ${neg} 票`}>
+          <div className="ar-vs-track">
+            <i className="ar-bar-aff" style={{ width: `${hasVotes ? affPercent : 50}%` }}><b>{aff} 票</b></i>
+            <i className="ar-bar-neg" style={{ width: `${hasVotes ? negPercent : 50}%` }}><b>{neg} 票</b></i>
+          </div>
+          <span className="ar-vs-badge" style={{ left: `${vsPos}%` }}><VsGloves /></span>
+        </div>
+
+        <div className={`ar-vs-side ar-neg ${leading === "neg" ? "lead" : ""}`}>
+          <span className="ar-vs-text">
+            <span className="ar-vs-name">反方</span>
+            <span className="ar-vs-team">{negTeam?.name ?? "反方"}</span>
+          </span>
+          <SideEmblem side="negative" />
         </div>
       </div>
+
+      <div className="ar-rank-title">辩手投票排行</div>
+      {champion && <DebaterRow item={champion} rank={1} champion />}
+      <div className="ar-rank-grid">
+        {rest.map((item, index) => (
+          <DebaterRow key={item.speaker_id} item={item} rank={index + 2} champion={false} />
+        ))}
+      </div>
+      {!ranked.length && <p className="ar-empty">等待观众投票统计。</p>}
     </section>
   );
 }
@@ -658,7 +860,7 @@ function AudienceBar({ side, label, count, percent }: { side: "affirmative" | "n
   );
 }
 
-function VoteQr({ url }: { url: string }) {
+function VoteQr({ url, size = 260 }: { url: string; size?: number }) {
   const [dataUrl, setDataUrl] = useState("");
 
   useEffect(() => {
@@ -666,7 +868,7 @@ function VoteQr({ url }: { url: string }) {
     QRCode.toDataURL(url, {
       errorCorrectionLevel: "M",
       margin: 1,
-      width: 260,
+      width: size,
       color: {
         dark: "#11151b",
         light: "#ffffff"
@@ -677,11 +879,11 @@ function VoteQr({ url }: { url: string }) {
     return () => {
       cancelled = true;
     };
-  }, [url]);
+  }, [url, size]);
 
   return (
     <div className="qr-placeholder">
-      {dataUrl ? <img src={dataUrl} alt="学生投票二维码" /> : "生成二维码中"}
+      {dataUrl ? <img src={dataUrl} alt="观众投票二维码" /> : "生成二维码中"}
     </div>
   );
 }
@@ -696,6 +898,8 @@ function normalizeScreenScene(scene: ScreenScene): RuntimeScreenScene {
       return "idle";
     case "paused":
       return "paused";
+    case "audience_vote":
+      return "audience_vote";
     case "xiaoqi_commentary":
       return "xiaoqi_commentary";
     case "xiaoqi_result":

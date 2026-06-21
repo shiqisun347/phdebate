@@ -1,7 +1,7 @@
 import * as React from "react";
 import {
-  Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles, MessageSquare,
-  Award, UserCircle2, HelpCircle, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
+  Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles,
+  UserCircle2, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
   ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX, Upload,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Badge, Select, Textarea, Input, Separator, Spinner } from "../ui/primitives";
@@ -11,29 +11,33 @@ import { Tabs } from "../ui/Tabs";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
 import { useAction } from "../lib/actions";
-import { post, sendXiaoqiCommand, pushXiaoqiMatchRecord } from "../../api/client";
+import { post, pushXiaoqiMatchRecord } from "../../api/client";
 import { SCENE_LABELS, STATUS_LABELS, sideLabel } from "../lib/labels";
 import { resolveAvatar } from "../../state/avatar";
-import type { MatchSnapshot, Speaker, XiaoqiCommand } from "../../types/contracts";
+import type { MatchSnapshot, Speaker } from "../../types/contracts";
 
 const SEAT_LABELS = ["", "一辩", "二辩", "三辩", "四辩"];
 const seatLabel = (seat: number) => SEAT_LABELS[seat] ?? `${seat}号位`;
 
-/* 阶段导航条：4 个页内选项 */
-type StageTab = "pre" | "live" | "xiaoqi" | "review";
+/* 阶段导航条：6 个页内选项（赛前→比赛过程→观众投票→小七评价→评委点评→结果展示） */
+type StageTab = "pre" | "live" | "audience" | "xiaoqi" | "judge" | "result";
 const STAGE_TABS: Array<{ value: StageTab; label: string }> = [
   { value: "pre", label: "赛前阶段" },
   { value: "live", label: "比赛过程" },
-  { value: "xiaoqi", label: "小七点评" },
-  { value: "review", label: "评委与学生点评" },
+  { value: "audience", label: "观众投票" },
+  { value: "xiaoqi", label: "小七评价" },
+  { value: "judge", label: "评委点评" },
+  { value: "result", label: "结果展示" },
 ];
 
 /** 根据当前比赛阶段/场景推导应聚焦的页内选项。 */
 function tabForState(s: MatchSnapshot): StageTab {
   const scene = s.match.screen_scene;
   const status = s.match.status;
+  if (scene === "audience_vote") return "audience";
   if (scene === "xiaoqi_commentary" || scene === "xiaoqi_result") return "xiaoqi";
-  if (["judge_commentary", "judge_result", "audience_result", "acknowledgment"].includes(scene)) return "review";
+  if (scene === "judge_commentary") return "judge";
+  if (["judge_result", "audience_result", "acknowledgment"].includes(scene)) return "result";
   if (status === "running" || scene === "live") return "live";
   return "pre";
 }
@@ -57,6 +61,33 @@ function computeNextStep(s: MatchSnapshot): NextStep {
   if (status === "paused") {
     return { label: "比赛已暂停（点继续恢复）", enabled: false, urgent: false };
   }
+
+  // 赛后流程链：进入观众投票后，"下一步骤"依次推进 观众投票→小七评价→评委点评→结果展示→致谢。
+  const scene = s.match.screen_scene;
+  if (scene === "audience_vote") {
+    return {
+      label: "进入小七评价",
+      enabled: true,
+      urgent: false,
+      run: async (base) => {
+        await post(`${base}/audience-votes/close`).catch(() => undefined); // 收口投票窗口
+        await post(`${base}/screen/scene`, { scene: "xiaoqi_commentary" });
+      },
+    };
+  }
+  if (scene === "xiaoqi_commentary" || scene === "xiaoqi_result") {
+    return { label: "进入评委点评", enabled: true, urgent: false, run: (base) => post(`${base}/screen/scene`, { scene: "judge_commentary" }) };
+  }
+  if (scene === "judge_commentary" || scene === "judge_result") {
+    return { label: "进入结果展示", enabled: true, urgent: false, run: (base) => post(`${base}/screen/scene`, { scene: "audience_result" }) };
+  }
+  if (scene === "audience_result") {
+    return { label: "进入致谢环节", enabled: true, urgent: false, run: (base) => post(`${base}/screen/scene`, { scene: "acknowledgment" }) };
+  }
+  if (scene === "acknowledgment") {
+    return { label: "比赛流程已完成", enabled: false, urgent: false };
+  }
+
   const flow = s.flow;
   const ordered = [...s.phases].sort((a, b) => a.display_order - b.display_order);
   const idx = ordered.findIndex((p) => p.id === s.match.current_phase_id);
@@ -73,12 +104,14 @@ function computeNextStep(s: MatchSnapshot): NextStep {
     }
     if (flow.next_action === "judge_commentary") {
       return {
-        label: "进入评委点评",
+        label: "比赛结束 · 进入观众投票",
         enabled: true,
         urgent: true,
         run: async (base) => {
           await post(`${base}/flow/confirm`, { reason: "host_confirm" });
-          await post(`${base}/screen/scene`, { scene: "judge_commentary" });
+          await post(`${base}/speeches/current/stop`).catch(() => undefined); // 切断当前阶段进行中的请求
+          await post(`${base}/audience-votes/open`).catch(() => undefined);
+          await post(`${base}/screen/scene`, { scene: "audience_vote" });
         },
       };
     }
@@ -103,10 +136,14 @@ function computeNextStep(s: MatchSnapshot): NextStep {
     };
   }
   return {
-    label: "全部环节完成 · 进入小七点评",
+    label: "全部环节完成 · 进入观众投票",
     enabled: true,
     urgent: true,
-    run: (base) => post(`${base}/screen/scene`, { scene: "xiaoqi_commentary" }),
+    run: async (base) => {
+      await post(`${base}/speeches/current/stop`).catch(() => undefined); // 切断当前阶段进行中的请求
+      await post(`${base}/audience-votes/open`).catch(() => undefined);
+      await post(`${base}/screen/scene`, { scene: "audience_vote" });
+    },
   };
 }
 
@@ -255,13 +292,10 @@ export function Control() {
           <AgentControlPanel />
         </div>
       )}
-      {tab === "xiaoqi" && (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <XiaoqiControlPanel />
-          <XiaoqiResultEntry />
-        </div>
-      )}
-      {tab === "review" && <ReviewPanels />}
+      {tab === "audience" && <AudienceVoteStage />}
+      {tab === "xiaoqi" && <XiaoqiStage />}
+      {tab === "judge" && <JudgeStage />}
+      {tab === "result" && <ResultStage />}
 
       {dialog}
     </div>
@@ -344,11 +378,14 @@ function ScreenSceneRow({
   scenes,
   base,
   run,
+  disabledScenes,
 }: {
   title: string;
   scenes: Array<{ scene: string; label: string }>;
   base: string;
   run: ReturnType<typeof useAction>["run"];
+  /** 场景 → 禁用原因；命中时该场景按钮禁用并提示原因。 */
+  disabledScenes?: Record<string, string>;
 }) {
   const { snapshot } = useAdminData();
   const current = snapshot?.match.screen_scene;
@@ -358,17 +395,25 @@ function ScreenSceneRow({
         <CardTitle className="flex items-center gap-2 text-sm"><Monitor className="size-4" /> {title}</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="flex flex-wrap gap-2">
-          {scenes.map((s) => (
-            <Button
-              key={s.scene}
-              size="sm"
-              variant={current === s.scene ? "default" : "outline"}
-              onClick={() => run(() => post(`${base}/screen/scene`, { scene: s.scene }), { success: `已切换：${s.label}` })}
-            >
-              {s.label}
-            </Button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          {scenes.map((s) => {
+            const reason = disabledScenes?.[s.scene];
+            return (
+              <Button
+                key={s.scene}
+                size="sm"
+                variant={current === s.scene ? "default" : "outline"}
+                disabled={!!reason}
+                title={reason}
+                onClick={() => run(() => post(`${base}/screen/scene`, { scene: s.scene }), { success: `已切换：${s.label}` })}
+              >
+                {s.label}
+              </Button>
+            );
+          })}
+          {disabledScenes && Object.values(disabledScenes)[0] && (
+            <span className="text-xs text-muted-foreground">{Object.values(disabledScenes)[0]}</span>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -649,42 +694,53 @@ function FallbackDialog({ speaker, onClose }: { speaker: Speaker; onClose: () =>
   );
 }
 
-/* ----------------------------- 小七控制（重新设计） ----------------------------- */
-function XiaoqiControlPanel() {
-  const { snapshot, matchId } = useAdminData();
+/* ----------------------------- 小七评价阶段 ----------------------------- */
+function XiaoqiStage() {
+  const { matchId, snapshot } = useAdminData();
   const { run } = useAction();
-  const toast = useToast();
-  const [busy, setBusy] = React.useState<XiaoqiCommand | null>(null);
-  const [pushingRecord, setPushingRecord] = React.useState(false);
-  const [customQ, setCustomQ] = React.useState("");
   const base = `/api/matches/${matchId}`;
+  const recorded = snapshot?.vote_state?.xiaoqi_recorded;
+  return (
+    <div className="space-y-4">
+      <ScreenSceneRow
+        title="小七大屏"
+        scenes={[{ scene: "xiaoqi_commentary", label: "小七点评" }, { scene: "xiaoqi_result", label: "小七评判" }]}
+        base={base}
+        run={run}
+        disabledScenes={recorded ? undefined : { xiaoqi_result: "请先完成「小七结果录入」后再切换到小七评判" }}
+      />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <XiaoqiControlPanel />
+        <XiaoqiResultEntry />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- 小七控制（给小七推送记录 + 返回结果框） ----------------------------- */
+function XiaoqiControlPanel() {
+  const { matchId } = useAdminData();
+  const toast = useToast();
+  const [pushing, setPushing] = React.useState(false);
+  const [result, setResult] = React.useState<string | null>(null);
 
   async function pushRecord() {
-    setPushingRecord(true);
+    setPushing(true);
+    setResult(null);
     try {
       const r = await pushXiaoqiMatchRecord(matchId);
-      toast(
-        r.sent ? `已推送比赛记录到小七（${(r.payload as { match_record?: unknown[] }).match_record?.length ?? 0} 个环节）` : `未推送：${r.reason}`,
-        r.sent ? "success" : "info"
-      );
+      const stages = (r.payload as { match_record?: unknown[] }).match_record?.length ?? 0;
+      if (r.sent) {
+        toast(`已给小七推送记录（${stages} 个环节）`, "success");
+        setResult(`HTTP ${r.status_code} · 响应：${typeof r.response === "string" ? r.response : JSON.stringify(r.response)}`);
+      } else {
+        toast(`未推送：${r.reason}`, "info");
+        setResult(`未推送（${r.reason}）。将发送的请求体：\n${JSON.stringify(r.payload, null, 2)}`);
+      }
     } catch (err) {
       toast(err instanceof Error ? err.message : "推送失败", "error");
     } finally {
-      setPushingRecord(false);
-    }
-  }
-
-  async function send(command: XiaoqiCommand, scene?: string) {
-    if (scene) await run(() => post(`${base}/screen/scene`, { scene }), { success: `大屏：${scene === "xiaoqi_result" ? "小七评判" : "小七点评"}`, refresh: true });
-    setBusy(command);
-    try {
-      const ctx = snapshot ? { debate_topic: snapshot.match.topic } : undefined;
-      const r = await sendXiaoqiCommand({ command, question: command === "custom" ? customQ : undefined, context: ctx });
-      toast(r.sent ? `已发送小七「${command}」命令` : `未发送：${r.reason}`, r.sent ? "success" : "info");
-    } catch (err) {
-      toast(err instanceof Error ? err.message : "发送失败", "error");
-    } finally {
-      setBusy(null);
+      setPushing(false);
     }
   }
 
@@ -692,32 +748,14 @@ function XiaoqiControlPanel() {
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm"><Sparkles className="size-4" /> 小七控制</CardTitle>
-        <CardDescription>大屏切到小七形象，并向小七下发命令（发音由小七自身完成）。</CardDescription>
+        <CardDescription>把本场辩论记录推送给小七（点评 / 评判 / 结果显示均由小七自身完成）。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <Button variant="outline" className="w-full justify-start" loading={pushingRecord} onClick={pushRecord}>
-          <Upload /> 推送比赛记录到小七<ChevronRight className="ml-auto size-4 opacity-50" />
+        <Button variant="outline" className="w-full justify-start" loading={pushing} onClick={pushRecord}>
+          <Upload /> 给小七推送记录<ChevronRight className="ml-auto size-4 opacity-50" />
         </Button>
-        <p className="-mt-1 text-xs text-muted-foreground">小七点评/评判前，先把本场完整辩论记录同步给它。</p>
-        <Separator />
-        <div className="grid grid-cols-1 gap-2">
-          <Button variant="outline" className="justify-start" loading={busy === "intro"} onClick={() => send("intro", "xiaoqi_commentary")}>
-            <UserCircle2 /> 小七自我介绍<ChevronRight className="ml-auto size-4 opacity-50" />
-          </Button>
-          <Button variant="outline" className="justify-start" loading={busy === "commentary"} onClick={() => send("commentary", "xiaoqi_commentary")}>
-            <MessageSquare /> 小七辩论点评<ChevronRight className="ml-auto size-4 opacity-50" />
-          </Button>
-          <Button variant="outline" className="justify-start" loading={busy === "result"} onClick={() => send("result", "xiaoqi_result")}>
-            <Award /> 小七公布评判<ChevronRight className="ml-auto size-4 opacity-50" />
-          </Button>
-        </div>
-        <Separator />
-        <div className="flex gap-2">
-          <Input value={customQ} onChange={(e) => setCustomQ(e.target.value)} placeholder="向小七提自定义问题…" />
-          <Button variant="outline" loading={busy === "custom"} disabled={!customQ.trim()} onClick={() => send("custom")}>
-            <HelpCircle /> 发送
-          </Button>
-        </div>
+        <p className="-mt-1 text-xs text-muted-foreground">取当前辩论实况组装比赛记录，推送到「给小七推送接口」。</p>
+        {result && <Textarea readOnly rows={5} value={result} className="text-xs font-mono" />}
       </CardContent>
     </Card>
   );
@@ -738,7 +776,7 @@ function XiaoqiResultEntry() {
     if (!best) return toast("请选择最佳辩手", "error");
     setSaving(true);
     try {
-      await post(`${base}/votes`, { winner_side: winner, best_speaker_id: best });
+      await post(`${base}/votes`, { winner_side: winner, best_speaker_id: best, scope: "xiaoqi" });
       await refresh();
       toast("已录入小七评判（获胜方 + 最佳辩手）", "success");
     } catch (err) {
@@ -793,20 +831,57 @@ function WinnerBestFields({
   );
 }
 
-/* ----------------------------- 评委与学生点评 ----------------------------- */
-function ReviewPanels() {
+/* ----------------------------- 观众投票阶段 ----------------------------- */
+function AudienceVoteStage() {
   const { matchId } = useAdminData();
   const { run } = useAction();
   const base = `/api/matches/${matchId}`;
-  const scenes: Array<{ scene: string; label: string }> = [
-    { scene: "judge_commentary", label: "评委点评" },
-    { scene: "judge_result", label: "评委结果" },
-    { scene: "audience_result", label: "学生结果" },
-    { scene: "acknowledgment", label: "致谢环节" },
-  ];
   return (
     <div className="space-y-4">
-      <ScreenSceneRow title="赛后大屏画面" scenes={scenes} base={base} run={run} />
+      <ScreenSceneRow title="观众投票大屏" scenes={[{ scene: "audience_vote", label: "投票二维码大屏" }]} base={base} run={run} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <AudienceVoteControl />
+        <AudienceStats />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- 评委点评阶段 ----------------------------- */
+function JudgeStage() {
+  const { matchId } = useAdminData();
+  const { run } = useAction();
+  const base = `/api/matches/${matchId}`;
+  return (
+    <div className="space-y-4">
+      <ScreenSceneRow
+        title="评委点评大屏"
+        scenes={[{ scene: "judge_commentary", label: "评委点评" }, { scene: "judge_result", label: "评委结果" }]}
+        base={base}
+        run={run}
+      />
+      <JudgeResultEntry />
+    </div>
+  );
+}
+
+/* ----------------------------- 结果展示阶段（含评委结果 + 观众投票结果） ----------------------------- */
+function ResultStage() {
+  const { matchId } = useAdminData();
+  const { run } = useAction();
+  const base = `/api/matches/${matchId}`;
+  return (
+    <div className="space-y-4">
+      <ScreenSceneRow
+        title="结果展示大屏"
+        scenes={[
+          { scene: "judge_result", label: "评委结果" },
+          { scene: "audience_result", label: "观众投票结果" },
+          { scene: "acknowledgment", label: "致谢环节" },
+        ]}
+        base={base}
+        run={run}
+      />
       <div className="grid gap-4 lg:grid-cols-2">
         <JudgeResultEntry />
         <AudienceStats />
@@ -816,15 +891,39 @@ function ReviewPanels() {
   );
 }
 
+const JUDGE_ASPECTS: Array<{ key: "constructive" | "process" | "conclusion"; label: string }> = [
+  { key: "constructive", label: "立论" },
+  { key: "process", label: "过程" },
+  { key: "conclusion", label: "结辩" },
+];
+
+type AspectScores = Record<"constructive" | "process" | "conclusion", { affirmative: number; negative: number }>;
+
 function JudgeResultEntry() {
   const { snapshot, matchId, refresh } = useAdminData();
   const toast = useToast();
   const vs = snapshot?.vote_state;
-  const [winner, setWinner] = React.useState<"affirmative" | "negative">((vs?.winner_side as "affirmative" | "negative") || "affirmative");
+  const js = vs?.judge_summary;
+  const [scores, setScores] = React.useState<AspectScores>(() => ({
+    constructive: { affirmative: js?.constructive.affirmative ?? 0, negative: js?.constructive.negative ?? 0 },
+    process: { affirmative: js?.process.affirmative ?? 0, negative: js?.process.negative ?? 0 },
+    conclusion: { affirmative: js?.conclusion.affirmative ?? 0, negative: js?.conclusion.negative ?? 0 },
+  }));
+  const [winnerMode, setWinnerMode] = React.useState<"auto" | "affirmative" | "negative">("auto");
   const [best, setBest] = React.useState(vs?.best_speaker_id || "");
   const [saving, setSaving] = React.useState(false);
   if (!snapshot) return null;
   const base = `/api/matches/${matchId}`;
+
+  const totalAff = JUDGE_ASPECTS.reduce((sum, a) => sum + scores[a.key].affirmative, 0);
+  const totalNeg = JUDGE_ASPECTS.reduce((sum, a) => sum + scores[a.key].negative, 0);
+  const computedWinner: "affirmative" | "negative" = totalAff >= totalNeg ? "affirmative" : "negative";
+  const winner = winnerMode === "auto" ? computedWinner : winnerMode;
+
+  function setScore(key: "constructive" | "process" | "conclusion", side: "affirmative" | "negative", value: string) {
+    const n = Math.max(0, Math.floor(Number(value) || 0));
+    setScores((prev) => ({ ...prev, [key]: { ...prev[key], [side]: n } }));
+  }
 
   async function act(fn: () => Promise<unknown>, msg: string) {
     setSaving(true);
@@ -837,12 +936,72 @@ function JudgeResultEntry() {
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm"><Trophy className="size-4" /> 评委结果录入</CardTitle>
-        <CardDescription>录入获胜方与最佳辩手，再按流程公布。</CardDescription>
+        <CardDescription>按「立论 / 过程 / 结辩」三个环节录入各方票数，胜方默认按总票数自动判定。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <WinnerBestFields winner={winner} setWinner={setWinner} best={best} setBest={setBest} speakers={snapshot.speakers} />
+        <div className="space-y-2 rounded-md border border-border p-3">
+          <div className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2 text-xs font-medium text-muted-foreground">
+            <span>环节</span>
+            <span className="text-center text-sky-400">正方</span>
+            <span className="text-center text-rose-400">反方</span>
+          </div>
+          {JUDGE_ASPECTS.map((a) => (
+            <div key={a.key} className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2">
+              <span className="text-sm font-medium text-foreground">{a.label}</span>
+              <Input
+                type="number" min={0} inputMode="numeric" className="h-8 text-center"
+                value={scores[a.key].affirmative}
+                onChange={(e) => setScore(a.key, "affirmative", e.target.value)}
+              />
+              <Input
+                type="number" min={0} inputMode="numeric" className="h-8 text-center"
+                value={scores[a.key].negative}
+                onChange={(e) => setScore(a.key, "negative", e.target.value)}
+              />
+            </div>
+          ))}
+          <Separator />
+          <div className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">合计</span>
+            <span className="text-center text-sm font-semibold text-sky-400">{totalAff}</span>
+            <span className="text-center text-sm font-semibold text-rose-400">{totalNeg}</span>
+          </div>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <p className="text-xs text-muted-foreground">获胜方</p>
+            <Select value={winnerMode} onChange={(e) => setWinnerMode(e.target.value as "auto" | "affirmative" | "negative")}>
+              <option value="auto">自动判定（{sideLabel(computedWinner)}）</option>
+              <option value="affirmative">正方</option>
+              <option value="negative">反方</option>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-xs text-muted-foreground">最佳辩手</p>
+            <Select value={best} onChange={(e) => setBest(e.target.value)}>
+              <option value="">请选择…</option>
+              {snapshot.speakers.map((s) => (
+                <option key={s.id} value={s.id}>{sideLabel(s.side)}{seatLabel(s.seat)} · {s.name}</option>
+              ))}
+            </Select>
+          </div>
+        </div>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => { if (!best) return toast("请选择最佳辩手", "error"); act(() => post(`${base}/votes`, { winner_side: winner, best_speaker_id: best }), "已保存评委结果"); }} loading={saving}>
+          <Button
+            onClick={() => {
+              if (!best) return toast("请选择最佳辩手", "error");
+              act(() => post(`${base}/votes`, {
+                judge_summary: {
+                  constructive: scores.constructive,
+                  process: scores.process,
+                  conclusion: scores.conclusion,
+                  winner_side: winner,
+                  best_speaker_id: best,
+                },
+              }), "已保存评委结果");
+            }}
+            loading={saving}
+          >
             保存结果
           </Button>
           <Button variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "judge" }), "已公布评委结果")}>
@@ -865,8 +1024,8 @@ function AudienceStats() {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 学生结果实时统计</CardTitle>
-        <CardDescription>学生扫码投票实时汇总。</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 观众投票实时统计</CardTitle>
+        <CardDescription>观众扫码投票实时汇总。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
         <div className="flex items-center justify-between text-sm">
@@ -909,20 +1068,20 @@ function AudienceVoteControl() {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 学生投票管理</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 观众投票管理</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} disabled={vs?.window_status === "open"} onClick={() => act(() => post(`${base}/audience-votes/open`), "已开启学生投票")}>
-          开启学生投票
+        <Button size="sm" variant={vs?.window_status === "open" ? "outline" : "success"} loading={busy} disabled={vs?.window_status === "open"} onClick={() => act(() => post(`${base}/audience-votes/open`), "已开始观众投票")}>
+          <Vote /> 开始观众投票
         </Button>
-        <Button size="sm" variant="outline" loading={busy} disabled={vs?.window_status !== "open"} onClick={() => act(() => post(`${base}/audience-votes/close`), "已关闭学生投票")}>
-          关闭学生投票
+        <Button size="sm" variant="outline" loading={busy} disabled={vs?.window_status !== "open"} onClick={() => act(() => post(`${base}/audience-votes/close`), "已结束观众投票")}>
+          结束观众投票
         </Button>
-        <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "audience" }), "已公布学生结果")}>
-          <Megaphone /> 公布学生结果
+        <Button size="sm" variant="outline" onClick={() => act(() => post(`${base}/votes/publish`, { scope: "audience" }), "已公布观众投票结果")}>
+          <Megaphone /> 公布观众投票结果
         </Button>
         <Badge variant={vs?.window_status === "open" ? "success" : "muted"} className="ml-auto">
-          {vs?.window_status === "open" ? "投票进行中" : "投票已关闭"} · {vs?.audience_count ?? 0} 票
+          {vs?.window_status === "open" ? "投票进行中" : "投票未开启"} · {vs?.audience_count ?? 0} 票
         </Badge>
       </CardContent>
     </Card>

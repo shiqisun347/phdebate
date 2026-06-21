@@ -791,6 +791,31 @@ def test_pause_locks_vote_controls_until_match_resumes() -> None:
     assert accepted.status_code == 200
 
 
+def test_judge_summary_three_aspect_votes_persist() -> None:
+    response = client.post(
+        "/api/matches/match_001/votes",
+        json={
+            "judge_summary": {
+                "constructive": {"affirmative": 3, "negative": 2},
+                "process": {"affirmative": 1, "negative": 4},
+                "conclusion": {"affirmative": 2, "negative": 2},
+                "winner_side": "negative",
+                "best_speaker_id": "spk_aff_3",
+            }
+        },
+    )
+    assert response.status_code == 200
+    summary = response.json()["data"]["vote_state"]["judge_summary"]
+    assert summary["constructive"] == {"affirmative": 3, "negative": 2}
+    assert summary["process"] == {"affirmative": 1, "negative": 4}
+    assert summary["conclusion"] == {"affirmative": 2, "negative": 2}
+    # 三环节合计 正 6 / 反 8 → 自动判定本应反方；显式 winner_side 也为反方。
+    assert summary["computed_winner_side"] == "negative"
+    assert summary["winner_side"] == "negative"
+    assert response.json()["data"]["vote_state"]["winner_side"] == "negative"
+    assert response.json()["data"]["vote_state"]["best_speaker_id"] == "spk_aff_3"
+
+
 def test_screen_scene_control_updates_snapshot() -> None:
     response = client.post(
         "/api/matches/match_001/screen/scene",
@@ -810,6 +835,35 @@ def test_screen_scene_control_updates_snapshot() -> None:
     assert data["match"]["screen_scene"] == "live"
     assert data["match"]["live_mode"] == "free"
     assert data["system"]["persistence"]["driver"] == "sqlite"
+
+
+def test_xiaoqi_result_scene_requires_recorded_entry() -> None:
+    # 起始：清除小七录入标记 → 切「小七评判」应被拦截。
+    store.snapshot["vote_state"]["xiaoqi_recorded"] = False
+    blocked = client.post("/api/matches/match_001/screen/scene", json={"scene": "xiaoqi_result"})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "xiaoqi_result_not_recorded"
+
+    # 小七点评（commentary）不受限制。
+    ok = client.post("/api/matches/match_001/screen/scene", json={"scene": "xiaoqi_commentary"})
+    assert ok.status_code == 200
+
+    # 完成小七结果录入（scope=xiaoqi）后即可切换。
+    recorded = client.post(
+        "/api/matches/match_001/votes",
+        json={"winner_side": "affirmative", "best_speaker_id": "spk_aff_3", "scope": "xiaoqi"},
+    )
+    assert recorded.status_code == 200
+    assert recorded.json()["data"]["vote_state"]["xiaoqi_recorded"] is True
+
+    allowed = client.post("/api/matches/match_001/screen/scene", json={"scene": "xiaoqi_result"})
+    assert allowed.status_code == 200
+    assert allowed.json()["data"]["match"]["screen_scene"] == "xiaoqi_result"
+
+    # 普通评委录入（无 scope）不应置位标记。
+    store.snapshot["vote_state"]["xiaoqi_recorded"] = False
+    client.post("/api/matches/match_001/votes", json={"winner_side": "negative", "best_speaker_id": "spk_neg_1"})
+    assert store.snapshot["vote_state"]["xiaoqi_recorded"] is False
 
 
 def test_match_settings_patch_updates_basic_fields() -> None:
@@ -1455,6 +1509,34 @@ def test_xiaoqi_match_record_push(monkeypatch) -> None:
         assert captured["body"] == {"session_id": "evt_demo", "match_record": record}
     finally:
         xiaoqi_store.config.update(saved)
+
+
+def test_xiaoqi_store_prunes_deprecated_keys(tmp_path, monkeypatch) -> None:
+    import app.services.xiaoqi_store as xs
+
+    # 模拟旧版持久化文件：含已废弃的 result_endpoint / result_template。
+    f = tmp_path / "xiaoqi.json"
+    f.write_text(
+        json.dumps(
+            {
+                "match_record_endpoint": "https://aitoys.example/celebration-api/v1/match_record/update",
+                "session_id": "evt_old",
+                "result_endpoint": "https://old/result",
+                "result_template": {"winner": "{winner}"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(xs, "_under_pytest", lambda: False)
+    store_obj = xs.XiaoqiStore(path=f)
+    cfg = store_obj.public()
+    assert "result_endpoint" not in cfg and "result_template" not in cfg
+    assert cfg["match_record_endpoint"].endswith("/match_record/update")
+    assert cfg["session_id"] == "evt_old"
+    # 持久化文件已被回写清理。
+    on_disk = json.loads(f.read_text(encoding="utf-8"))
+    assert "result_endpoint" not in on_disk and "result_template" not in on_disk
 
 
 def test_agent_gateway_parses_sse_delta_and_final() -> None:
@@ -2969,6 +3051,33 @@ def test_audience_votes_require_open_window() -> None:
     assert snapshot["vote_state"]["audience_summary"]["winner"]["negative"] == 55
     assert "used_audience_tokens" not in snapshot["vote_state"]
     assert "audience_votes" not in snapshot["vote_state"]
+
+
+def test_audience_ranking_borda_aggregation() -> None:
+    """观众投票排序按 Borda 计分聚合：一票里排第 1 名得 N 分、依次递减；跨票累加、降序排列。"""
+    store.snapshot["vote_state"]["audience_summary"] = store._empty_audience_summary()
+    store.snapshot["vote_state"]["audience_count"] = 0
+    speakers = [s["id"] for s in store.snapshot["speakers"] if s["side"] in {"affirmative", "negative"}]
+    n = len(speakers)
+    assert n >= 4
+
+    # 票1：完整排序 speakers[0] > … > speakers[-1]
+    store._append_audience_summary({"winner_side": "affirmative", "ranking": speakers})
+    # 票2：把最后一名提到第一，其余顺延
+    rotated = [speakers[-1]] + speakers[:-1]
+    store._append_audience_summary({"winner_side": "negative", "ranking": rotated})
+
+    summary = store.snapshot["vote_state"]["audience_summary"]
+    assert summary["total"] == 2
+    assert summary["winner"]["affirmative"] == 1
+    assert summary["winner"]["negative"] == 1
+
+    pts = {item["speaker_id"]: item["count"] for item in summary["best_speaker"]}
+    assert pts[speakers[0]] == n + (n - 1)   # 票1第1名(N) + 票2第2名(N-1)
+    assert pts[speakers[-1]] == 1 + n        # 票1最后(1) + 票2第1名(N)
+    counts = [item["count"] for item in summary["best_speaker"]]
+    assert counts == sorted(counts, reverse=True)
+    assert len({item["speaker_id"] for item in summary["best_speaker"]}) == len(summary["best_speaker"])
 
 
 def test_audience_vote_rejects_duplicate_token() -> None:

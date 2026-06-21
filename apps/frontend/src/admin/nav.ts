@@ -57,7 +57,7 @@ export const NAV: NavZone[] = [
       { id: "rulesets", label: "赛制规则", icon: ListChecks, desc: "预设赛制规则库" },
       { id: "agents", label: "Agent 管理", icon: Bot, desc: "AI 辩手接入配置" },
       { id: "speech", label: "语音引擎", icon: AudioLines, desc: "TTS / ASR 设置与自检" },
-      { id: "xiaoqi", label: "小七管理", icon: Sparkles, desc: "自研智能体 prompt 与形象" },
+      { id: "xiaoqi", label: "小七管理", icon: Sparkles, desc: "接口信息 / 请求体 / 请求测试" },
       { id: "data", label: "数据管理", icon: Database, desc: "历史比赛数据与导出" },
       { id: "logs", label: "日志查看", icon: ScrollText, desc: "完整输入输出 · 多级分类" },
       { id: "security", label: "安全管理", icon: ShieldCheck, desc: "登录密码与访问控制" },

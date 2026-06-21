@@ -7334,3 +7334,222 @@ textarea {
   border-color: rgba(133, 202, 255, 0.4);
   color: #85caff;
 }
+
+/* ===================== 观众投票：移动端投票页（点选排序，参考 image.png 深色科技风） ===================== */
+.vote-shell--rank {
+  display: block;
+  align-items: start;
+  padding: 0 0 100px;
+  background: radial-gradient(125% 80% at 50% 0%, #1a2a6b 0%, #0b1230 55%, #070b1f 100%);
+  color: #eaf0ff;
+}
+.vote-card--rank {
+  width: min(560px, 100%);
+  margin: 0 auto;
+  padding: 18px 16px 0;
+  gap: 14px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.vote-card--rank .vote-event-mark {
+  background: linear-gradient(135deg, rgba(74, 163, 255, 0.18), rgba(168, 107, 255, 0.18));
+  border-color: rgba(120, 160, 255, 0.3);
+  box-shadow: none;
+}
+.vote-card--rank .vote-event-mark span { color: #bcd2ff; }
+.vote-card--rank .vote-event-mark em { color: #8fa3d6; }
+.vote-topic { margin: 0; font-size: 19px; font-weight: 800; line-height: 1.5; color: #fff; }
+
+.vote-step { display: grid; gap: 10px; }
+.vote-step-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 15px; font-weight: 800; color: #eaf0ff;
+}
+.vote-step-no {
+  width: 22px; height: 22px; border-radius: 999px; display: grid; place-items: center;
+  background: linear-gradient(135deg, #4aa3ff, #a86bff); color: #fff; font-size: 13px; font-weight: 900;
+}
+.vote-step-tip { width: 100%; font-style: normal; font-size: 12px; font-weight: 600; color: #93a4d4; }
+
+.vote-side-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.vote-side-btn {
+  display: grid; gap: 4px; justify-items: center; padding: 14px 10px; border-radius: 14px; cursor: pointer;
+  border: 2px solid rgba(140, 170, 255, 0.25); background: rgba(255, 255, 255, 0.04); color: #eaf0ff;
+  transition: all 0.15s;
+}
+.vote-side-btn .vote-side-tag { font-size: 12px; font-weight: 800; opacity: 0.8; }
+.vote-side-btn strong { font-size: 17px; }
+.vote-side-btn--affirmative.active { border-color: #4aa3ff; background: rgba(74, 163, 255, 0.18); box-shadow: 0 0 0 3px rgba(74, 163, 255, 0.18); }
+.vote-side-btn--negative.active { border-color: #a86bff; background: rgba(168, 107, 255, 0.18); box-shadow: 0 0 0 3px rgba(168, 107, 255, 0.18); }
+
+.vote-rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.vote-rank-col { display: grid; gap: 8px; align-content: start; }
+.vote-rank-col-title { padding: 4px; border-radius: 8px; text-align: center; font-size: 13px; font-weight: 800; }
+.vote-rank-col--affirmative .vote-rank-col-title { color: #bcd9ff; background: rgba(74, 163, 255, 0.12); }
+.vote-rank-col--negative .vote-rank-col-title { color: #d8c4ff; background: rgba(168, 107, 255, 0.12); }
+.vote-rank-card {
+  position: relative; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 56px;
+  padding: 8px 10px; border-radius: 14px; cursor: pointer; text-align: left; transition: all 0.12s;
+  border: 1.5px solid rgba(140, 170, 255, 0.2); background: rgba(255, 255, 255, 0.04); color: #eaf0ff;
+}
+.vote-rank-card.ranked { border-color: #ffd45e; background: rgba(255, 212, 94, 0.12); }
+.vote-rank-badge {
+  width: 26px; height: 26px; flex-shrink: 0; border-radius: 999px; display: grid; place-items: center;
+  font-size: 13px; font-weight: 900; color: #c9d6ff; border: 1.5px dashed rgba(180, 200, 255, 0.4);
+}
+.vote-rank-badge.on { color: #4a3500; border: none; background: linear-gradient(135deg, #ffe08a, #ffb43e); }
+.vote-rank-avatar {
+  width: 38px; height: 38px; flex-shrink: 0; border-radius: 10px; overflow: hidden; display: grid; place-items: center;
+  background: rgba(255, 255, 255, 0.1); font-weight: 800; color: #cfe6ff;
+}
+.vote-rank-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.vote-rank-meta { display: grid; gap: 1px; min-width: 0; }
+.vote-rank-meta strong { font-size: 14px; }
+.vote-rank-meta em { font-size: 11px; font-style: normal; color: #93a4d4; }
+.vote-rank-progress { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #bcd2ff; }
+.vote-rank-progress strong { color: #ffd45e; font-size: 16px; }
+.vote-rank-clear { margin-left: auto; background: none; border: none; color: #8fa3d6; text-decoration: underline; cursor: pointer; font-size: 12px; }
+
+.vote-submit-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; display: grid;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, rgba(7, 11, 31, 0), #070b1f 32%);
+}
+.vote-submit-btn {
+  width: min(560px, 100%); margin: 0 auto; padding: 15px; border: none; border-radius: 14px; cursor: pointer;
+  font-size: 16px; font-weight: 800; color: #07122e; background: linear-gradient(135deg, #6fc0ff, #c79bff);
+}
+.vote-submit-btn:disabled { color: #8fa3d6; background: rgba(255, 255, 255, 0.14); cursor: not-allowed; }
+
+.vote-card--rank .vote-waiting,
+.vote-card--rank .vote-done { padding: 40px 16px; text-align: center; font-size: 16px; color: #cdd9ff; }
+.vote-done-check {
+  width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 999px; display: grid; place-items: center;
+  background: linear-gradient(135deg, #4aa3ff, #a86bff); color: #fff; font-size: 30px;
+}
+
+/* ===================== 大屏：观众投票（扫码页） ===================== */
+.audience-vote-scene .av-body { display: grid; justify-items: center; gap: 18px; margin-top: 2vh; text-align: center; }
+.av-kicker { font-size: 20px; font-weight: 800; letter-spacing: 6px; color: #8fb6ff; }
+.av-title { margin: 0; font-size: 38px; font-weight: 900; color: #fff; }
+.av-qr-wrap { padding: 18px; border-radius: 22px; background: #fff; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4); }
+.av-status { margin-top: 8px; font-size: 16px; font-weight: 800; }
+.av-status.open { color: #2f9e5b; }
+.av-status.closed { color: #b07a2a; }
+.av-url { font-size: 18px; letter-spacing: 1px; color: #aebfe6; }
+.av-count { font-size: 24px; color: #eaf0ff; }
+.av-count strong { font-size: 30px; color: #ffd45e; }
+.av-hint { font-size: 16px; color: #ffd45e; }
+
+/* ===================== 大屏：观众投票结果（参考 image.png） ===================== */
+.audience-result-scene { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; justify-items: stretch; gap: 2.2vh; padding: 3vh 4vw; }
+.ar-headline { display: grid; justify-items: center; gap: 12px; }
+.ar-head-row { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 22px; }
+.ar-head { text-align: center; font-size: 30px; font-weight: 900; letter-spacing: 2px; color: #fff; }
+.ar-winner { display: inline-flex; align-items: center; gap: 16px; padding: 9px 30px; border-radius: 999px; box-shadow: 0 10px 34px rgba(0, 0, 0, 0.32); }
+.ar-winner-trophy { filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.4)); }
+.ar-winner-trophy.ar-flip { transform: scaleX(-1); }
+.ar-winner-label { padding: 5px 18px; border-radius: 999px; font-size: 19px; font-weight: 900; color: #4a3500; background: linear-gradient(135deg, #ffe08a, #ffb43e); }
+.ar-winner strong { font-size: 36px; font-weight: 900; letter-spacing: 1px; }
+.ar-winner-affirmative { background: linear-gradient(180deg, rgba(74, 163, 255, 0.24), rgba(74, 163, 255, 0.08)); border: 2px solid rgba(74, 163, 255, 0.6); }
+.ar-winner-affirmative strong { color: #aedcff; text-shadow: 0 0 20px rgba(74, 163, 255, 0.55); }
+.ar-winner-negative { background: linear-gradient(180deg, rgba(168, 107, 255, 0.24), rgba(168, 107, 255, 0.08)); border: 2px solid rgba(168, 107, 255, 0.6); }
+.ar-winner-negative strong { color: #e0c8ff; text-shadow: 0 0 20px rgba(168, 107, 255, 0.55); }
+
+.ar-vs { display: grid; grid-template-columns: minmax(230px, 1.1fr) 2.4fr minmax(230px, 1.1fr); align-items: center; gap: 28px; width: 100%; max-width: 1500px; margin: 0 auto; }
+.ar-vs-side { display: flex; align-items: center; gap: 14px; }
+.ar-aff { justify-content: flex-start; }
+.ar-neg { justify-content: flex-end; }
+.ar-vs-text { display: grid; gap: 4px; }
+.ar-aff .ar-vs-text { text-align: left; }
+.ar-neg .ar-vs-text { text-align: right; }
+.ar-vs-name { font-size: 20px; font-weight: 800; letter-spacing: 3px; }
+.ar-vs-team { font-size: 40px; font-weight: 900; line-height: 1.12; text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45); }
+.ar-aff .ar-vs-name { color: #8cbef0; }
+.ar-aff .ar-vs-team { color: #aedcff; }
+.ar-neg .ar-vs-name { color: #c4a9f0; }
+.ar-neg .ar-vs-team { color: #e0c8ff; }
+.ar-emblem { filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.5)); transition: transform 0.3s, filter 0.3s; }
+.ar-vs-side.lead .ar-emblem { transform: scale(1.14); }
+.ar-aff.lead .ar-emblem { filter: drop-shadow(0 0 18px rgba(93, 180, 255, 0.75)); }
+.ar-neg.lead .ar-emblem { filter: drop-shadow(0 0 18px rgba(185, 139, 255, 0.75)); }
+
+.ar-vs-bar-wrap { position: relative; padding: 26px 0; }
+.ar-vs-track {
+  position: relative; display: flex; height: 50px; border-radius: 999px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.08); box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+.ar-bar-aff, .ar-bar-neg {
+  height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.42);
+  transition: width 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ar-bar-aff { border-radius: 999px 0 0 999px; background: linear-gradient(180deg, #6fc0ff, #2f7fd6); }
+.ar-bar-neg { border-radius: 0 999px 999px 0; background: linear-gradient(180deg, #cfa6ff, #7a4fd0); }
+.ar-bar-aff b, .ar-bar-neg b { font-size: 21px; font-weight: 900; color: #fff; white-space: nowrap; text-shadow: 0 1px 5px rgba(0, 0, 0, 0.5); }
+.ar-vs-badge {
+  position: absolute; top: 50%; transform: translate(-50%, -50%); z-index: 3;
+  display: grid; place-items: center;
+  filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.6));
+  transition: left 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ar-vs-gloves-svg { display: block; }
+.ar-total { text-align: center; }
+.ar-total-badge {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 7px 26px; border-radius: 999px;
+  font-size: 20px; font-weight: 800; color: #ffe9a8;
+  background: linear-gradient(180deg, rgba(255, 212, 94, 0.2), rgba(255, 212, 94, 0.06));
+  border: 1.5px solid rgba(255, 212, 94, 0.55); box-shadow: 0 6px 22px rgba(255, 190, 60, 0.22);
+}
+.ar-total-badge strong { margin: 0 3px; font-size: 32px; font-weight: 900; color: #ffd45e; }
+
+.ar-seat { width: fit-content; padding: 2px 11px; border-radius: 999px; font-size: 14px; font-weight: 800; }
+.ar-seat-affirmative { color: #bcd9ff; background: rgba(74, 163, 255, 0.18); }
+.ar-seat-negative { color: #d8c4ff; background: rgba(168, 107, 255, 0.18); }
+
+.ar-rank-title { margin-top: 0.4vh; text-align: center; font-size: 22px; font-weight: 800; color: #ffd45e; }
+
+/* 排行卡片：横向 [名次 / 最佳辩手标][头像(冠在上)][姓名 / 身份][票数] */
+.ar-row {
+  position: relative; display: flex; align-items: center; gap: 16px; min-height: 92px;
+  padding: 12px 22px 12px 14px; border-radius: 16px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(140, 170, 255, 0.18);
+}
+.ar-row.ar-affirmative { border-left: 4px solid #5db4ff; }
+.ar-row.ar-negative { border-left: 4px solid #b98bff; }
+.ar-rank-no { flex-shrink: 0; width: 34px; text-align: center; font-size: 26px; font-weight: 900; color: #7f93c4; }
+.ar-avatar-wrap { position: relative; flex-shrink: 0; display: grid; place-items: center; }
+.ar-crown { position: absolute; top: -28px; left: 50%; transform: translateX(-50%); z-index: 2; filter: drop-shadow(0 4px 7px rgba(0, 0, 0, 0.42)); }
+.ar-avatar {
+  width: 64px; height: 64px; border-radius: 50%; overflow: hidden; display: grid; place-items: center;
+  background: rgba(255, 255, 255, 0.1); font-size: 26px; font-weight: 800; color: #cfe6ff; border: 2px solid rgba(255, 255, 255, 0.2);
+}
+.ar-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.ar-card-info { flex: 1; display: grid; justify-items: start; gap: 5px; min-width: 0; }
+.ar-name { font-size: 21px; font-weight: 800; color: #fff; line-height: 1.1; }
+.ar-votes { flex-shrink: 0; margin-left: auto; font-size: 22px; font-weight: 900; color: #ffd45e; }
+
+/* 最佳辩手：同款，略大 + 金色 + 竖排「最佳辩手」标 + 皇冠 */
+.ar-row-champ {
+  width: 100%; max-width: 620px; margin: 16px auto 6px; min-height: 112px; gap: 20px;
+  padding: 16px 30px 16px 16px;
+  background: linear-gradient(120deg, rgba(255, 212, 94, 0.2), rgba(255, 255, 255, 0.04) 75%);
+  border: 2px solid rgba(255, 212, 94, 0.78);
+  box-shadow: 0 14px 42px rgba(255, 190, 60, 0.28), inset 0 0 30px rgba(255, 212, 94, 0.08);
+}
+.ar-best-ribbon {
+  flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 12px 12px; border-radius: 10px; line-height: 1.12;
+  font-size: 19px; font-weight: 900; color: #4a3500; background: linear-gradient(180deg, #ffe08a, #ffb43e);
+  box-shadow: 0 4px 14px rgba(255, 180, 60, 0.4);
+}
+.ar-best-ribbon b { display: block; letter-spacing: 2px; }
+.ar-row-champ .ar-avatar { width: 86px; height: 86px; border: 3px solid #ffd45e; box-shadow: 0 0 24px rgba(255, 212, 94, 0.55); font-size: 36px; }
+.ar-row-champ .ar-name { font-size: 30px; }
+.ar-row-champ .ar-seat { font-size: 15px; }
+.ar-row-champ .ar-votes { font-size: 32px; }
+
+/* 其余 7 名网格：每行 4 个，末行居中 */
+.ar-rank-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; width: 100%; max-width: 1500px; margin: 0 auto; }
+.ar-rank-grid .ar-row { flex: 0 0 calc(25% - 12px); }
+.ar-empty { text-align: center; color: #aebfe6; }

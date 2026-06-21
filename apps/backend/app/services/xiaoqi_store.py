@@ -63,6 +63,8 @@ class XiaoqiStore:
             "name": "小七",
             "image_url": "",
             "endpoint": "",
+            # 给小七推送接口（celebration-api match_record/update）。比赛记录无需单独接口，
+            # 取当前辩论实况组装 {session_id, match_record} 后 POST 到这里。
             "match_record_endpoint": "",
             "session_id": "default",
             "request_method": "POST",
@@ -90,7 +92,13 @@ class XiaoqiStore:
             merged.update({k: v for k, v in data.items() if k != "prompts"})
             if isinstance(data.get("prompts"), dict):
                 merged["prompts"] = {**DEFAULT_PROMPTS, **data["prompts"]}
+            # 清理已废弃字段（旧版「结果显示接口/模板」已并入单一推送接口），并回写持久化文件。
+            deprecated = [k for k in ("result_endpoint", "result_template") if k in merged]
+            for key in deprecated:
+                merged.pop(key, None)
             self.config = merged
+            if deprecated:
+                self._save()
 
     def _save(self) -> None:
         if _under_pytest():
@@ -120,6 +128,20 @@ class XiaoqiStore:
             self._save()
         return self.public()
 
+    @staticmethod
+    def _fill_template(value: Any, substitutions: Dict[str, Any]) -> Any:
+        """把模板里的整串占位符（形如 ``"{key}"``）替换为对应的值。
+
+        仅当字符串本身就是单个 ``{key}`` 时替换为实际值（可为 list/dict），
+        其它内容原样保留；dict / list 递归处理。"""
+        if isinstance(value, str) and value.startswith("{") and value.endswith("}"):
+            return substitutions.get(value[1:-1], value)
+        if isinstance(value, dict):
+            return {k: XiaoqiStore._fill_template(v, substitutions) for k, v in value.items()}
+        if isinstance(value, list):
+            return [XiaoqiStore._fill_template(v, substitutions) for v in value]
+        return value
+
     def build_payload(self, command: str, *, question: str = "", context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         cfg = self.public()
         prompts = cfg.get("prompts", {})
@@ -132,17 +154,7 @@ class XiaoqiStore:
             "debate_history": ctx.get("debate_history", []),
         }
         template = cfg.get("request_template") or {}
-
-        def fill(value: Any) -> Any:
-            if isinstance(value, str) and value.startswith("{") and value.endswith("}"):
-                return substitutions.get(value[1:-1], value)
-            if isinstance(value, dict):
-                return {k: fill(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [fill(v) for v in value]
-            return value
-
-        payload = fill(template)
+        payload = self._fill_template(template, substitutions)
         if isinstance(payload, dict):
             payload.setdefault("command", command)
             payload.setdefault("prompt", prompt)

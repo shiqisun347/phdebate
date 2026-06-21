@@ -2,7 +2,7 @@ export type MatchStatus = "draft" | "ready" | "running" | "paused" | "interventi
 export type Side = "affirmative" | "negative" | "neutral";
 export type SpeakerType = "human" | "agent";
 export type ClockState = "idle" | "running" | "paused" | "expired" | "stopped";
-export type ScreenScene = "idle" | "live" | "paused" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result" | "xiaoqi_commentary" | "xiaoqi_result" | "acknowledgment";
+export type ScreenScene = "idle" | "live" | "paused" | "audience_vote" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result" | "xiaoqi_commentary" | "xiaoqi_result" | "acknowledgment";
 export type LiveMode = "single" | "free" | "prep";
 export type AudioOutputMode = "host" | "admin" | "screen" | "off";
 
@@ -227,6 +227,8 @@ export interface VoteState {
   audience_published: boolean;
   winner_side: Side;
   best_speaker_id: string;
+  /** 小七结果录入（获胜方 + 最佳辩手）是否已完成；大屏切「小七评判」前必须为 true。 */
+  xiaoqi_recorded: boolean;
   judge_summary: {
     constructive: { affirmative: number; negative: number };
     process: { affirmative: number; negative: number };
@@ -245,14 +247,17 @@ export interface VoteState {
 export interface VoteOptions {
   match: Pick<MatchInfo, "id" | "title" | "topic" | "status">;
   teams: Array<Pick<Team, "id" | "side" | "name" | "position">>;
-  speakers: Array<Pick<Speaker, "id" | "side" | "seat" | "name" | "speaker_type">>;
+  speakers: Array<Pick<Speaker, "id" | "side" | "seat" | "name" | "speaker_type" | "image_url">>;
   vote_state: Pick<VoteState, "window_status" | "audience_count" | "judge_published" | "audience_published">;
 }
 
 export interface AudienceVotePayload {
   token?: string;
   winner_side: Side;
-  best_speaker_id: string;
+  /** 8 名辩手的完整排序，rank1 在前（后端按 Borda 计分聚合）。 */
+  ranking: string[];
+  /** 兼容字段：排名第一的辩手，由后端从 ranking[0] 推导，无需前端单独传。 */
+  best_speaker_id?: string;
   client_fingerprint?: string;
 }
 
@@ -627,6 +632,7 @@ export interface XiaoqiConfig {
   name: string;
   image_url: string;
   endpoint: string;
+  /** 给小七推送接口（celebration-api match_record/update）。比赛记录取自当前辩论实况。 */
   match_record_endpoint: string;
   session_id: string;
   request_method: string;

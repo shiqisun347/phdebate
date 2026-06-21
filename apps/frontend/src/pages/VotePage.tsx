@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getVoteOptions, submitAudienceVote } from "../api/client";
 import { useActionFeedback } from "../components/Feedback";
 import { StatusPill } from "../components/StatusPill";
@@ -9,10 +9,12 @@ interface VotePageProps {
   matchId: string;
 }
 
+type VoteSpeaker = VoteOptions["speakers"][number];
+
 export function VotePage({ matchId }: VotePageProps) {
   const [options, setOptions] = useState<VoteOptions | null>(null);
-  const [winnerSide, setWinnerSide] = useState<Side>("affirmative");
-  const [bestSpeakerId, setBestSpeakerId] = useState("");
+  const [winnerSide, setWinnerSide] = useState<Side | null>(null);
+  const [ranking, setRanking] = useState<string[]>([]); // speaker_id，rank1 在前
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -27,8 +29,6 @@ export function VotePage({ matchId }: VotePageProps) {
         setOptions(data);
         const locallySubmitted = window.localStorage.getItem(voteSubmittedKey(data.match.id)) === "1";
         setSubmitted((current) => current || locallySubmitted);
-        setWinnerSide((current) => data.teams.some((team) => team.side === current) ? current : "affirmative");
-        setBestSpeakerId((current) => current || data.speakers[0]?.id || "");
         setError(null);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "投票页加载失败");
@@ -42,6 +42,22 @@ export function VotePage({ matchId }: VotePageProps) {
     };
   }, [matchId]);
 
+  // 稳定布局：正方按座次、反方按座次，互不跳动。
+  const { affSpeakers, negSpeakers, allIds } = useMemo(() => {
+    const speakers = options?.speakers ?? [];
+    const bySeat = (a: VoteSpeaker, b: VoteSpeaker) => a.seat - b.seat;
+    const aff = speakers.filter((s) => s.side === "affirmative").sort(bySeat);
+    const neg = speakers.filter((s) => s.side === "negative").sort(bySeat);
+    return { affSpeakers: aff, negSpeakers: neg, allIds: speakers.map((s) => s.id) };
+  }, [options]);
+
+  function toggleRank(id: string) {
+    if (submitted) return;
+    setRanking((current) =>
+      current.includes(id) ? current.filter((x) => x !== id) : [...current, id]
+    );
+  }
+
   async function submit() {
     try {
       await runAction("submit-audience-vote", "提交投票", async () => {
@@ -53,15 +69,13 @@ export function VotePage({ matchId }: VotePageProps) {
         window.localStorage.setItem(tokenKey, token);
         await submitAudienceVote(matchId, {
           token,
-          winner_side: winnerSide,
-          best_speaker_id: bestSpeakerId,
-          client_fingerprint: window.navigator.userAgent
+          winner_side: winnerSide ?? "affirmative",
+          ranking,
+          client_fingerprint: window.navigator.userAgent,
         });
         window.localStorage.setItem(voteSubmittedKey(actualMatchId), "1");
         setSubmitted(true);
-      }, {
-        successText: "投票已提交"
-      });
+      }, { successText: "投票已提交" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "投票提交失败");
     } finally {
@@ -72,62 +86,143 @@ export function VotePage({ matchId }: VotePageProps) {
   if (!options) return <div className="loading">正在加载投票页...</div>;
 
   const voteUnavailableReason = audienceVoteUnavailableReason(options);
-  const canSubmit = !submitting && !voteUnavailableReason && Boolean(bestSpeakerId);
+  const fullyRanked = ranking.length === allIds.length && allIds.length > 0;
+  const canSubmit = !submitting && !voteUnavailableReason && winnerSide != null && fullyRanked;
 
   return (
-    <main className="vote-shell">
-      <section className="vote-card">
-        <div className="vote-event-mark" aria-label="第一届人机辩论赛">
-          <span>第一届</span>
-          <strong>人机辩论赛</strong>
-          <em>AI Debate</em>
+    <main className="vote-shell vote-shell--rank">
+      <section className="vote-card vote-card--rank">
+        <div className="vote-event-mark" aria-label="人机辩论赛">
+          <span>{options.match.title || "人机辩论赛"}</span>
+          <em>观众投票 · Audience Vote</em>
         </div>
-        <StatusPill tone={!voteUnavailableReason ? "green" : "gold"}>
-          {voteStatusLabel(options)}
-        </StatusPill>
-        <h1>{options.match.topic}</h1>
+        <StatusPill tone={!voteUnavailableReason ? "green" : "gold"}>{voteStatusLabel(options)}</StatusPill>
+        <h1 className="vote-topic">{options.match.topic}</h1>
+
         {submitted ? (
-          <div className="vote-done">已收到投票，谢谢参与。</div>
+          <div className="vote-done">
+            <div className="vote-done-check">✓</div>
+            已收到你的投票，谢谢参与！
+          </div>
+        ) : voteUnavailableReason && options.vote_state.window_status !== "open" ? (
+          <div className="vote-waiting">{voteUnavailableReason}</div>
         ) : (
           <>
-            <label>
-              优胜方
-              <select value={winnerSide} onChange={(event) => setWinnerSide(event.target.value as Side)}>
+            {/* 步骤一：选胜方 */}
+            <div className="vote-step">
+              <div className="vote-step-head"><span className="vote-step-no">1</span>选出你认为胜利的一方</div>
+              <div className="vote-side-picker">
                 {options.teams.map((team) => (
-                  <option key={team.id} value={team.side}>{sideLabel(team.side)} · {team.name}</option>
+                  <button
+                    key={team.id}
+                    type="button"
+                    className={`vote-side-btn vote-side-btn--${team.side} ${winnerSide === team.side ? "active" : ""}`}
+                    onClick={() => setWinnerSide(team.side)}
+                  >
+                    <span className="vote-side-tag">{sideLabel(team.side)}</span>
+                    <strong>{team.name}</strong>
+                  </button>
                 ))}
-              </select>
-            </label>
-            <label>
-              最佳辩手
-              <select value={bestSpeakerId} onChange={(event) => setBestSpeakerId(event.target.value)}>
-                {options.speakers.map((speaker) => (
-                  <option key={speaker.id} value={speaker.id}>{sideLabel(speaker.side)}{seatLabel(speaker.seat)} · {speaker.name}</option>
-                ))}
-              </select>
-            </label>
+              </div>
+            </div>
+
+            {/* 步骤二：8 人点选排序 */}
+            <div className="vote-step">
+              <div className="vote-step-head">
+                <span className="vote-step-no">2</span>给 8 位辩手排名
+                <em className="vote-step-tip">按你的喜好依次点击（先点=名次靠前），再点可取消</em>
+              </div>
+              <div className="vote-rank-grid">
+                <RankColumn title="正方" side="affirmative" speakers={affSpeakers} ranking={ranking} onTap={toggleRank} />
+                <RankColumn title="反方" side="negative" speakers={negSpeakers} ranking={ranking} onTap={toggleRank} />
+              </div>
+              <div className="vote-rank-progress">
+                已排 <strong>{ranking.length}</strong> / {allIds.length}
+                {ranking.length > 0 && (
+                  <button type="button" className="vote-rank-clear" onClick={() => setRanking([])}>清空重排</button>
+                )}
+              </div>
+            </div>
+
             {voteUnavailableReason && <div className="vote-hint">{voteUnavailableReason}</div>}
-            <button {...busyProps("submit-audience-vote")} disabled={!canSubmit} title={voteUnavailableReason || undefined} onClick={submit}>
-              {submitting ? "提交中" : "提交投票"}
-            </button>
             {error && <div className="vote-error">{error}</div>}
           </>
         )}
       </section>
+
+      {!submitted && options.vote_state.window_status === "open" && (
+        <div className="vote-submit-bar">
+          <button
+            className="vote-submit-btn"
+            {...busyProps("submit-audience-vote")}
+            disabled={!canSubmit}
+            onClick={submit}
+          >
+            {submitting
+              ? "提交中…"
+              : winnerSide == null
+                ? "请先选择胜方"
+                : !fullyRanked
+                  ? `还需排 ${allIds.length - ranking.length} 位辩手`
+                  : "提交投票"}
+          </button>
+        </div>
+      )}
     </main>
+  );
+}
+
+function RankColumn({
+  title,
+  side,
+  speakers,
+  ranking,
+  onTap,
+}: {
+  title: string;
+  side: Side;
+  speakers: VoteSpeaker[];
+  ranking: string[];
+  onTap: (id: string) => void;
+}) {
+  return (
+    <div className={`vote-rank-col vote-rank-col--${side}`}>
+      <div className="vote-rank-col-title">{title}</div>
+      {speakers.map((speaker) => {
+        const rank = ranking.indexOf(speaker.id);
+        const ranked = rank >= 0;
+        return (
+          <button
+            key={speaker.id}
+            type="button"
+            className={`vote-rank-card ${ranked ? "ranked" : ""}`}
+            onClick={() => onTap(speaker.id)}
+          >
+            <span className={`vote-rank-badge ${ranked ? "on" : ""}`}>{ranked ? rank + 1 : ""}</span>
+            <span className="vote-rank-avatar">
+              {speaker.image_url ? <img src={speaker.image_url} alt={speaker.name} /> : <span>{speaker.name.slice(0, 1)}</span>}
+            </span>
+            <span className="vote-rank-meta">
+              <strong>{speaker.name}</strong>
+              <em>{sideLabel(speaker.side)}{seatLabel(speaker.seat)}</em>
+            </span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
 function voteStatusLabel(options: VoteOptions): string {
   if (options.match.status === "paused") return "比赛暂停";
   if (options.match.status === "intervention") return "应急处理中";
-  return options.vote_state.window_status === "open" ? "投票中" : "投票未开启";
+  return options.vote_state.window_status === "open" ? "投票进行中" : "投票未开启";
 }
 
 function audienceVoteUnavailableReason(options: VoteOptions): string | null {
   if (options.match.status === "paused") return "比赛暂停中，继续后才能投票。";
   if (options.match.status === "intervention") return "现场正在应急处理，投票暂不可用。";
-  if (options.vote_state.window_status !== "open") return "学生投票尚未开启。";
+  if (options.vote_state.window_status !== "open") return "观众投票尚未开启，请等待主持人开启。";
   return null;
 }
 

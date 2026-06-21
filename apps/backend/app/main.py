@@ -245,6 +245,7 @@ async def get_public_vote_options(match_id: str) -> Dict[str, Any]:
                     "seat": speaker["seat"],
                     "name": speaker["name"],
                     "speaker_type": speaker["speaker_type"],
+                    "image_url": speaker.get("image_url", ""),
                 }
                 for speaker in snapshot["speakers"]
                 if speaker["side"] in {"affirmative", "negative"}

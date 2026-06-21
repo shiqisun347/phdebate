@@ -1366,6 +1366,12 @@ class MatchStore:
                 self.snapshot["vote_state"]["window_status"] = "open"
             elif normalized_scene == "judge_result":
                 self.snapshot["vote_state"]["window_status"] = "closed"
+            elif normalized_scene == "xiaoqi_result" and not self.snapshot["vote_state"].get("xiaoqi_recorded"):
+                raise MatchStateError(
+                    "xiaoqi_result_not_recorded",
+                    "请先完成「小七结果录入」（获胜方 + 最佳辩手），再切换到小七评判。",
+                    {"xiaoqi_recorded": False},
+                )
             elif normalized_scene == "audience_result" and not self.snapshot["vote_state"].get("judge_published"):
                 raise MatchStateError(
                     "publish_order",
@@ -3291,6 +3297,10 @@ class MatchStore:
                         "学生投票窗口未开启，暂不能提交投票。",
                         {"window_status": self.snapshot["vote_state"]["window_status"]},
                     )
+                # 兼容：新版投票带 ranking（8 人排序），best_speaker_id 取排名第一。
+                ranking = [str(s) for s in (body.get("ranking") or [])]
+                if ranking and not body.get("best_speaker_id"):
+                    body["best_speaker_id"] = ranking[0]
                 vote_keys = self._audience_vote_keys(body)
                 existing_keys = set(self.snapshot["vote_state"].get("audience_vote_keys", []))
                 legacy_keys = self._legacy_audience_vote_keys(body)
@@ -3315,6 +3325,7 @@ class MatchStore:
                             "vote_keys": vote_keys,
                             "winner_side": body["winner_side"],
                             "best_speaker_id": body["best_speaker_id"],
+                            "ranking": ranking,
                             "created_at": iso_now(),
                         }
                     )
@@ -3324,6 +3335,9 @@ class MatchStore:
                 self.snapshot["vote_state"]["judge_summary"] = judge_summary
                 self.snapshot["vote_state"]["winner_side"] = judge_summary["winner_side"]
                 self.snapshot["vote_state"]["best_speaker_id"] = judge_summary["best_speaker_id"]
+                # 小七结果录入（获胜方 + 最佳辩手）完成标记：大屏切「小七评判」前必须先录入。
+                if str(body.get("scope") or "") == "xiaoqi":
+                    self.snapshot["vote_state"]["xiaoqi_recorded"] = True
             if duplicate_error is None:
                 self._persist_snapshot()
         if duplicate_error is not None:
@@ -3839,6 +3853,7 @@ class MatchStore:
             "audience_published": False,
             "winner_side": "affirmative",
             "best_speaker_id": first_speaker,
+            "xiaoqi_recorded": False,
             "judge_summary": judge_summary,
             "audience_summary": self._empty_audience_summary(),
             "audience_votes": [],
@@ -4092,6 +4107,7 @@ class MatchStore:
         self.snapshot["vote_state"].setdefault("audience_votes", [])
         self.snapshot["vote_state"].setdefault("audience_vote_keys", [])
         self.snapshot["vote_state"].setdefault("used_audience_tokens", [])
+        self.snapshot["vote_state"].setdefault("xiaoqi_recorded", False)
         audience_summary = self.snapshot["vote_state"]["audience_summary"]
         if not self.snapshot["vote_state"]["audience_votes"] and audience_summary.get("total", 0) == 0 and self.snapshot["vote_state"].get("audience_count", 0) > 0:
             count = int(self.snapshot["vote_state"]["audience_count"])
@@ -4556,15 +4572,24 @@ class MatchStore:
         summary["total"] = int(summary.get("total", self.snapshot["vote_state"].get("audience_count", 0))) + 1
         summary["winner"][body["winner_side"]] = int(summary["winner"].get(body["winner_side"], 0)) + 1
 
-        found = False
-        for item in summary["best_speaker"]:
-            if item["speaker_id"] == body["best_speaker_id"]:
-                item["count"] = int(item.get("count", 0)) + 1
-                found = True
-                break
-        if not found:
-            summary["best_speaker"].append({"speaker_id": body["best_speaker_id"], "count": 1})
-        summary["best_speaker"].sort(key=lambda item: item["count"], reverse=True)
+        # 辩手排行用 Borda 计分聚合：一票里排第 1 名得 N 分、第 2 名得 N-1 分……依次递减，
+        # 跨所有票累加；按总分排序，第一名即"最佳辩手"。兼容旧版只含 best_speaker_id 的票（+1 分）。
+        points: Dict[str, int] = {
+            str(item["speaker_id"]): int(item.get("count", 0)) for item in summary.get("best_speaker", [])
+        }
+        ranking = [str(s) for s in (body.get("ranking") or [])]
+        if ranking:
+            n = len(ranking)
+            for idx, sid in enumerate(ranking):
+                points[sid] = points.get(sid, 0) + (n - idx)
+        elif body.get("best_speaker_id"):
+            sid = str(body["best_speaker_id"])
+            points[sid] = points.get(sid, 0) + 1
+        summary["best_speaker"] = sorted(
+            ({"speaker_id": sid, "count": pts} for sid, pts in points.items()),
+            key=lambda item: item["count"],
+            reverse=True,
+        )
         self.snapshot["vote_state"]["audience_count"] = summary["total"]
 
     def _recompute_audience_summary(self) -> None:
@@ -6708,8 +6733,23 @@ class MatchStore:
 
     def _validate_vote_body(self, body: Dict[str, Any], audience: bool = False) -> None:
         if audience:
-            if "winner_side" not in body or "best_speaker_id" not in body:
-                raise MatchStateError("invalid_vote", "学生投票必须包含优胜方和最佳辩手。")
+            if "winner_side" not in body:
+                raise MatchStateError("invalid_vote", "学生投票必须包含优胜方。")
+            ranking = body.get("ranking")
+            if ranking is not None:
+                if not isinstance(ranking, list) or not ranking:
+                    raise MatchStateError("invalid_vote", "辩手排序无效。")
+                seen: set = set()
+                for sid in ranking:
+                    if sid in seen:
+                        raise MatchStateError("invalid_vote", "辩手排序中存在重复。", {"speaker_id": sid})
+                    seen.add(sid)
+                    try:
+                        self._find_speaker(sid)
+                    except KeyError:
+                        raise MatchStateError("invalid_vote", "排序中的辩手无效。", {"speaker_id": sid})
+            elif "best_speaker_id" not in body:
+                raise MatchStateError("invalid_vote", "学生投票必须包含辩手排序。")
         winner_side = body.get("winner_side")
         if winner_side is not None:
             self._validate_side(winner_side)
@@ -6746,6 +6786,7 @@ class MatchStore:
         normalized = aliases.get(scene, scene)
         allowed = {
             "idle", "opening", "teams", "live", "paused",
+            "audience_vote",
             "xiaoqi_commentary", "xiaoqi_result",
             "judge_commentary", "judge_result", "audience_result",
             "acknowledgment",
