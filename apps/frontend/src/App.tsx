@@ -5,8 +5,11 @@ import { HostPage } from "./pages/HostPage";
 import { NavigationPage } from "./pages/NavigationPage";
 import { ScreenPage } from "./pages/ScreenPage";
 import { VotePage } from "./pages/VotePage";
+import { useVersionGuard } from "./realtime/useVersionGuard";
 
 export function App() {
+  // 版本守卫：任何旧标签页在新版部署后自动刷新，杜绝旧缓存 bundle 仍在运行。
+  useVersionGuard();
   const params = new URLSearchParams(window.location.search);
   const path = window.location.pathname;
   const matchId = routeMatchId(path, params);

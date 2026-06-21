@@ -110,6 +110,7 @@ export interface Speech {
   tts_ready_sentences?: number | null;
   tts_playing_sentence_idx?: number | null;
   tts_played_sentences?: number | null;
+  tts_played_sentence_indices?: number[] | null;
   tts_skipped_sentences?: number[] | null;
   tts_last_playback_status?: string | null;
   tts_last_progress_at?: string | null;

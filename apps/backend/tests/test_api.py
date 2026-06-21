@@ -1660,6 +1660,8 @@ def test_agent_speech_formal_tts_archives_audio(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
     monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
+    # 关闭首句前置静音，使本测试可对"合成字节 == 归档字节"做精确断言（静音前缀另有专测）。
+    monkeypatch.setenv("PHDEBATE_TTS_LEAD_SILENCE", "0")
     _patch_tts_selection(monkeypatch, FakeGateway("wss://fake-tts"), provider="xfyun")
     _use_embedded_mock_agent("spk_aff_2")
 
@@ -2298,6 +2300,275 @@ def test_tts_playback_progress_updates_current_speech() -> None:
     assert speech["tts_playing_sentence_idx"] == 2
     assert speech["tts_played_sentences"] == 3
     assert data["speech_service"]["tts"]["queue_size"] == 1
+
+
+def test_tts_playback_progress_error_records_skipped_sentence() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_error_progress",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "",
+                "content_partial": "AI TTS 播放端卡住",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_error_progress",
+                "tts_expected_sentences": 4,
+                "tts_created_sentences": 4,
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_error_progress/tts/playback-progress",
+        json={"task_id": "task_agent_tts_error_progress", "sentence_idx": 2, "status": "error"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    speech = data["current_speech"]
+    assert 2 in speech["tts_skipped_sentences"]
+    assert speech["tts_last_playback_status"] == "error"
+    assert data["speech_service"]["tts"]["detail"] == "screen playback error at segment 3/4"
+
+
+def test_tts_playback_progress_played_last_segment_auto_completes_speech() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_played_last",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "AI 发言最后一段已经播完。",
+                "content_partial": "AI 发言最后一段已经播完。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_played_last",
+                "tts_expected_sentences": 3,
+                "tts_created_sentences": 3,
+                "tts_played_sentences": 2,
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_played_last/tts/playback-progress",
+        json={"task_id": "task_agent_tts_played_last", "sentence_idx": 2, "status": "played"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["current_speech"] is None
+    assert data["speech_service"]["tts"]["status"] == "idle"
+    assert store.events[-2]["type"] == "tts.playback_progress"
+    assert store.events[-2]["payload"]["auto_complete"] is True
+    assert store.events[-1]["type"] == "speech.ended"
+
+
+def test_tts_playback_progress_out_of_order_played_does_not_auto_complete() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_out_of_order_played",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "乱序播放进度不能误触发完成。",
+                "content_partial": "乱序播放进度不能误触发完成。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_out_of_order_played",
+                "tts_expected_sentences": 3,
+                "tts_created_sentences": 3,
+                "tts_played_sentences": 0,
+                "tts_played_sentence_indices": [],
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_out_of_order_played/tts/playback-progress",
+        json={"task_id": "task_agent_tts_out_of_order_played", "sentence_idx": 2, "status": "played"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    speech = data["current_speech"]
+    assert speech is not None
+    assert speech["tts_played_sentences"] == 3  # legacy high-water retained for UI compatibility
+    assert speech["tts_played_sentence_indices"] == [2]
+    assert data["speech_service"]["tts"]["queue_size"] == 2
+    assert store.events[-1]["type"] == "tts.playback_progress"
+    assert "auto_complete" not in store.events[-1]["payload"]
+
+
+def test_tts_playback_progress_legacy_playing_high_water_does_not_auto_complete() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_legacy_playing_highwater",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "旧快照最后一段只是正在播放，不能被当成完成。",
+                "content_partial": "旧快照最后一段只是正在播放，不能被当成完成。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_legacy_playing_highwater",
+                "tts_expected_sentences": 3,
+                "tts_created_sentences": 3,
+                "tts_played_sentences": 3,
+                "tts_playing_sentence_idx": 2,
+                "tts_last_playback_status": "playing",
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_legacy_playing_highwater/tts/playback-progress",
+        json={"task_id": "task_agent_tts_legacy_playing_highwater", "sentence_idx": 2, "status": "playing"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    speech = data["current_speech"]
+    assert speech is not None
+    assert speech["tts_played_sentence_indices"] == [0, 1]
+    assert speech["tts_played_sentences"] == 3
+    assert data["speech_service"]["tts"]["queue_size"] == 0
+    assert "auto_complete" not in store.events[-1]["payload"]
+
+
+def test_tts_playback_progress_legacy_out_of_order_error_does_not_auto_complete() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_legacy_out_of_order_error",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "旧快照乱序错误不能误触发完成。",
+                "content_partial": "旧快照乱序错误不能误触发完成。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_legacy_out_of_order_error",
+                "tts_expected_sentences": 3,
+                "tts_created_sentences": 3,
+                "tts_played_sentences": 0,
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_legacy_out_of_order_error/tts/playback-progress",
+        json={"task_id": "task_agent_tts_legacy_out_of_order_error", "sentence_idx": 2, "status": "error"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    speech = data["current_speech"]
+    assert speech is not None
+    assert speech["tts_played_sentence_indices"] == []
+    assert speech["tts_skipped_sentences"] == [2]
+    assert data["speech_service"]["tts"]["queue_size"] == 2
+    assert "auto_complete" not in store.events[-1]["payload"]
+
+
+def test_tts_playback_progress_legacy_previous_played_then_last_stalled_auto_completes() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_legacy_last_stalled",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "旧快照最后一段卡住也应自动结束。",
+                "content_partial": "旧快照最后一段卡住也应自动结束。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_legacy_last_stalled",
+                "tts_expected_sentences": 3,
+                "tts_created_sentences": 3,
+                "tts_played_sentences": 2,
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_legacy_last_stalled/tts/playback-progress",
+        json={"task_id": "task_agent_tts_legacy_last_stalled", "sentence_idx": 2, "status": "stalled"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["current_speech"] is None
+    assert store.events[-2]["payload"]["auto_complete"] is True
+    assert store.events[-1]["type"] == "speech.ended"
+
+
+def test_tts_playback_progress_stalled_last_segment_auto_completes_speech() -> None:
+    async def seed_agent_tts_speech() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = {
+                "id": "speech_agent_tts_stalled_last",
+                "phase_id": "phase_constructive_aff",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "AI 发言最后一段播放端卡住。",
+                "content_partial": "AI 发言最后一段播放端卡住。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "speaking",
+                "tts_task_id": "task_agent_tts_stalled_last",
+                "tts_expected_sentences": 2,
+                "tts_created_sentences": 2,
+                "tts_played_sentences": 1,
+                "tts_skipped_sentences": [],
+            }
+            store._persist_snapshot()
+
+    asyncio.run(seed_agent_tts_speech())
+
+    response = client.post(
+        "/api/matches/match_001/speeches/speech_agent_tts_stalled_last/tts/playback-progress",
+        json={"task_id": "task_agent_tts_stalled_last", "sentence_idx": 1, "status": "stalled"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["current_speech"] is None
+    ended = next(item for item in store.snapshot["recent_transcript"] if item["speech_id"] == "speech_agent_tts_stalled_last")
+    assert ended["text"] == "AI 发言最后一段播放端卡住。"
+    assert store.events[-2]["payload"]["auto_complete"] is True
+    assert store.events[-1]["type"] == "speech.ended"
 
 
 def test_tts_playback_resume_emits_event() -> None:

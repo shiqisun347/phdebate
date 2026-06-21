@@ -21,6 +21,7 @@ export interface PlaybackSpeech {
   source: string; // 期望 "agent_text"
   state: string; // 期望 "speaking"
   expectedSentences: number | null; // tts_expected_sentences；null = 仍在生成
+  createdSentences: number; // tts_created_sentences；已排入 TTS 队列，可对缺口做超时裁决
   skippedSentences: number[]; // tts_skipped_sentences
   chunks: PlaybackChunk[]; // 来自 audio_assets[].chunks
 }
@@ -54,7 +55,7 @@ export interface PlaybackConfig {
 
 export const DEFAULT_PLAYBACK_CONFIG: PlaybackConfig = {
   perSentenceWatchdogMs: 12000,
-  activeStallWatchdogMs: 20000,
+  activeStallWatchdogMs: 8000,
 };
 
 export type StopReason =
@@ -99,7 +100,27 @@ export function reconcile(input: PlaybackInput, config: PlaybackConfig = DEFAULT
 
   // 1) STOP 守卫（最高优先级）。任何一条命中都清空播放、把 position 重置并重新绑定到当前
   //    speech（若有），这样下一拍即可立即开始新发言。不依赖会被合并丢弃的一次性事件。
-  const stop = (reason: StopReason): PlaybackDecision => ({ kind: "STOP", reason, position: seedFor(speech) });
+  const stop = (reason: StopReason): PlaybackDecision => {
+    if (
+      (reason === "suppressed" || reason === "audio_disabled") &&
+      speech &&
+      position.speechId === speech.speechId &&
+      position.taskId === speech.taskId
+    ) {
+      return {
+        kind: "STOP",
+        reason,
+        position: {
+          ...position,
+          nextIdx: position.activeIdx ?? position.nextIdx,
+          activeIdx: null,
+          activeStartedMs: null,
+          waitingSinceMs: null,
+        },
+      };
+    }
+    return { kind: "STOP", reason, position: seedFor(speech) };
+  };
   if (!audioEnabled) return stop("audio_disabled");
   if (suppressed) return stop("suppressed");
   if (!speech) return stop("no_speech");
@@ -120,8 +141,9 @@ export function reconcile(input: PlaybackInput, config: PlaybackConfig = DEFAULT
     if (activeMediaState === "ended") {
       // 正常结束：推进到下一段，继续往下解析（可能直接 PLAY 下一段）。
       pos = { ...pos, nextIdx: pos.activeIdx + 1, activeIdx: null, activeStartedMs: null, waitingSinceMs: null };
-    } else if (activeMediaState === "errored" || activeMediaState === "stalled" || stalledByTime) {
-      // 播放失败 / 卡住 / onended 永不触发：强制跳过，保证队列前进。
+    } else if (activeMediaState === "errored" || stalledByTime) {
+      // 播放失败 / 长时间没有播放进度 / onended 永不触发：强制跳过，保证队列前进。
+      // 浏览器的 stalled/waiting 可能只是短暂缓冲，不能一收到就跳；只让时间看门狗裁决。
       const skippedIdx = pos.activeIdx;
       const next = { ...pos, nextIdx: skippedIdx + 1, activeIdx: null, activeStartedMs: null, waitingSinceMs: null };
       return {
@@ -173,9 +195,9 @@ export function reconcile(input: PlaybackInput, config: PlaybackConfig = DEFAULT
     };
   }
 
-  // 4d) 尚未就绪。
-  if (expected == null) {
-    // 仍在生成，更多分段可能在路上 —— 耐心等待，绝不越过（否则会无限跳过不存在的尾段）。
+  // 4d) 尚未就绪。expected 未知时，idx >= created 表示这一段尚未被后端创建，必须等待；
+  // idx < created 表示该分段已排入 TTS 队列，若长期没有 ready/skipped 就可以自愈跳过。
+  if (expected == null && idx >= Math.max(0, speech.createdSentences)) {
     return { kind: "WAIT", position: pos.waitingSinceMs == null ? { ...pos, waitingSinceMs: nowMs } : pos, sentenceIdx: idx };
   }
   // expected 已知：idx < expected 却既无音频也未跳过 —— 等到看门狗超时后跳过（自愈）。

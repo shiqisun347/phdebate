@@ -18,6 +18,7 @@ function mkSpeech(overrides: Partial<PlaybackSpeech> = {}): PlaybackSpeech {
     source: "agent_text",
     state: "speaking",
     expectedSentences: null,
+    createdSentences: 0,
     skippedSentences: [],
     chunks: [],
     ...overrides,
@@ -165,6 +166,14 @@ describe("reconcile — 媒体异常推进", () => {
     expect(d.position.nextIdx).toBe(1);
   });
 
+  it("19b. 浏览器 stalled 事件只是缓冲信号，未超时不能立即跳过", () => {
+    const speech = mkSpeech({ expectedSentences: 2, chunks: chunks(0, 1) });
+    const pos: PlaybackPosition = { ...emptyPosition(), speechId: "S1", taskId: "T1", activeIdx: 0, activeStartedMs: 1000, startNotifiedKey: "S1:T1" };
+    const d = reconcile({ speech, position: pos, nowMs: 1100, audioEnabled: true, suppressed: false, activeMediaState: "stalled" });
+    expect(d.kind).toBe("IDLE");
+    expect(d.position.activeIdx).toBe(0);
+  });
+
   it("onended 正常结束：推进到下一段并直接 PLAY", () => {
     const speech = mkSpeech({ expectedSentences: 2, chunks: chunks(0, 1) });
     const pos: PlaybackPosition = { ...emptyPosition(), speechId: "S1", taskId: "T1", activeIdx: 0, activeStartedMs: 1000, startNotifiedKey: "S1:T1" };
@@ -237,13 +246,39 @@ describe("reconcile — STOP 守卫（截断）", () => {
 });
 
 describe("reconcile — 暂停/恢复与幂等", () => {
-  it("15. suppress 后恢复：从头重播（reliability over position）", () => {
-    const speech = mkSpeech({ expectedSentences: 1, chunks: chunks(0) });
-    const stop = reconcile({ speech, position: { ...emptyPosition(), speechId: "S1", taskId: "T1", nextIdx: 1 }, nowMs: 1000, audioEnabled: true, suppressed: true, activeMediaState: "idle" });
+  it("15. suppress 后恢复：不回到第一段，只从被截断的当前段继续", () => {
+    const speech = mkSpeech({ expectedSentences: 3, chunks: chunks(0, 1, 2) });
+    const stop = reconcile({
+      speech,
+      position: { ...emptyPosition(), speechId: "S1", taskId: "T1", nextIdx: 1, activeIdx: 1, activeStartedMs: 1000, startNotifiedKey: "S1:T1" },
+      nowMs: 1200,
+      audioEnabled: true,
+      suppressed: true,
+      activeMediaState: "playing",
+    });
     expect(stop.kind).toBe("STOP");
-    expect(stop.position.nextIdx).toBe(0); // 重置
+    expect(stop.position.nextIdx).toBe(1);
+    expect(stop.position.activeIdx).toBeNull();
     const resumed = reconcile({ speech, position: stop.position, nowMs: 1001, audioEnabled: true, suppressed: false, activeMediaState: "idle" });
-    expect(["NOTIFY_START", "PLAY"]).toContain(resumed.kind);
+    expect(resumed.kind).toBe("PLAY");
+    expect((resumed as any).sentenceIdx).toBe(1);
+  });
+
+  it("15b. 关闭音频后再打开：保留下一段位置，不从头播放", () => {
+    const speech = mkSpeech({ expectedSentences: 3, chunks: chunks(0, 1, 2) });
+    const stop = reconcile({
+      speech,
+      position: { ...emptyPosition(), speechId: "S1", taskId: "T1", nextIdx: 2, startNotifiedKey: "S1:T1" },
+      nowMs: 1200,
+      audioEnabled: false,
+      suppressed: false,
+      activeMediaState: "idle",
+    });
+    expect(stop.kind).toBe("STOP");
+    expect(stop.position.nextIdx).toBe(2);
+    const resumed = reconcile({ speech, position: stop.position, nowMs: 1300, audioEnabled: true, suppressed: false, activeMediaState: "idle" });
+    expect(resumed.kind).toBe("PLAY");
+    expect((resumed as any).sentenceIdx).toBe(2);
   });
 
   it("17. 完成幂等：DONE 后再次对账返回 IDLE，不重复通知", () => {
@@ -274,10 +309,19 @@ describe("reconcile — 暂停/恢复与幂等", () => {
 
 describe("reconcile — 仍在生成（expected=null）", () => {
   it("20. expected=null：播完已有分段后耐心 WAIT，绝不 DONE、绝不越过", () => {
-    const ds = playToEnd(mkSpeech({ expectedSentences: null, chunks: chunks(0, 1) }), { maxSteps: 12 });
+    const ds = playToEnd(mkSpeech({ expectedSentences: null, createdSentences: 2, chunks: chunks(0, 1) }), { maxSteps: 12 });
     expect(playedIdx(ds)).toEqual([0, 1]);
     expect(kinds(ds)).not.toContain("DONE");
     expect(kinds(ds)).not.toContain("SKIP"); // 不知道总数时不乱跳
+    const lastWait = ds.filter((d) => d.kind === "WAIT").pop() as any;
+    expect(lastWait.sentenceIdx).toBe(2);
+  });
+
+  it("20b. expected=null 但分段已创建：缺口超时后自动跳过，不等主持人强制跳过", () => {
+    const ds = playToEnd(mkSpeech({ expectedSentences: null, createdSentences: 2, chunks: chunks(0) }), { maxSteps: 12 });
+    expect(playedIdx(ds)).toEqual([0]);
+    expect(skippedIdx(ds)).toEqual([1]);
+    expect(kinds(ds)).not.toContain("DONE");
     const lastWait = ds.filter((d) => d.kind === "WAIT").pop() as any;
     expect(lastWait.sentenceIdx).toBe(2);
   });

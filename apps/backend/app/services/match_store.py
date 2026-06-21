@@ -97,6 +97,7 @@ class MatchStore:
         self._lock = asyncio.Lock()
         self._connections: Set[WebSocket] = set()
         self._asr_streams: Dict[str, Any] = {}
+        self._tts_grace_tasks: Dict[str, asyncio.Task] = {}
         self.repo = SQLiteRepository()
         self.agent_gateway = AgentGateway()
         loaded = self.repo.load_snapshot()
@@ -527,8 +528,6 @@ class MatchStore:
         if speech.get("source") != "agent_text" or speech.get("state") == "ended" or not task_id:
             return
         tts = self.snapshot.get("speech_service", {}).setdefault("tts", {})
-        if tts.get("status") not in {None, "", "idle"} and tts.get("speaker_id") == speech.get("speaker_id"):
-            return
         created = int(speech.get("tts_created_sentences") or 0)
         ready = int(speech.get("tts_ready_sentences") or 0)
         played = int(speech.get("tts_played_sentences") or 0)
@@ -536,10 +535,14 @@ class MatchStore:
             return
         status = "playing" if played > 0 or speech.get("state") == "speaking" else "synthesizing"
         if status == "playing":
-            queue_size = max(0, int(speech.get("tts_expected_sentences") or created or ready or 1) - played)
-            detail = f"screen playing segment {max(1, int(speech.get('tts_playing_sentence_idx') or 0) + 1)}/{speech.get('tts_expected_sentences') or created or ready or '?'}"
+            queue_size = self._tts_playback_display_queue_size(speech, fallback_total=created or ready or 1)
+            last_playback_status = str(speech.get("tts_last_playback_status") or "")
+            if last_playback_status in {"stalled", "error", "play_rejected", "failed"}:
+                detail = f"screen playback {last_playback_status} at segment {max(1, int(speech.get('tts_playing_sentence_idx') or 0) + 1)}/{speech.get('tts_expected_sentences') or created or ready or '?'}"
+            else:
+                detail = f"screen playing segment {max(1, int(speech.get('tts_playing_sentence_idx') or 0) + 1)}/{speech.get('tts_expected_sentences') or created or ready or '?'}"
         else:
-            queue_size = max(1, created - ready)
+            queue_size = self._tts_unresolved_sentence_count(speech, fallback_total=created)
             detail = f"TTS archived {ready}/{created or '?'} segments"
         tts.update(
             {
@@ -551,6 +554,9 @@ class MatchStore:
                 "last_progress_at": speech.get("tts_last_progress_at") or iso_now(),
             }
         )
+        expected = self._tts_int(speech.get("tts_expected_sentences"), 0)
+        if expected > 0:
+            self._arm_tts_playback_grace(str(speech.get("id")), str(task_id), expected)
 
     @staticmethod
     def _xiaoqi_public() -> Dict[str, Any]:
@@ -1643,6 +1649,7 @@ class MatchStore:
                 "tts_task_id": task_id if tts_enabled else None,
                 "tts_expected_sentences": None,
                 "tts_skipped_sentences": [],
+                "tts_played_sentence_indices": [],
             }
             if tts_enabled:
                 self.snapshot["speech_service"]["tts"] = {
@@ -1670,7 +1677,7 @@ class MatchStore:
 
         async def synthesize_sentence(sentence: str, sentence_idx: int) -> bool:
             async with tts_semaphore:
-                return await self._synthesize_sentence_tts(sentence, sentence_idx, task_id, speech_id, speaker)
+                return await self._synthesize_sentence_tts_with_timeout(sentence, sentence_idx, task_id, speech_id, speaker)
 
         try:
             async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
@@ -1738,7 +1745,7 @@ class MatchStore:
                                     self.snapshot["speech_service"]["tts"].update(
                                         {
                                             "status": "synthesizing",
-                                            "queue_size": max(1, tts_sentence_idx - int(speech.get("tts_ready_sentences") or 0)),
+                                            "queue_size": max(1, self._tts_unresolved_sentence_count(speech, fallback_total=tts_sentence_idx)),
                                             "speaker_id": speaker_id,
                                             "detail": f"TTS segment {tts_sentence_idx} queued",
                                             "last_progress_at": iso_now(),
@@ -1795,7 +1802,7 @@ class MatchStore:
                     self.snapshot["speech_service"]["tts"].update(
                         {
                             "status": "synthesizing",
-                            "queue_size": max(1, tts_sentence_idx - int(speech.get("tts_ready_sentences") or 0)),
+                            "queue_size": max(1, self._tts_unresolved_sentence_count(speech, fallback_total=tts_sentence_idx)),
                             "speaker_id": speaker_id,
                             "detail": f"TTS segment {tts_sentence_idx} queued",
                             "last_progress_at": iso_now(),
@@ -1829,7 +1836,7 @@ class MatchStore:
             current_tts = self.snapshot["speech_service"]["tts"]
             if not all_tts_failed:
                 current_tts["status"] = "playing"
-                current_tts["queue_size"] = max(1, int(speech.get("tts_expected_sentences", 1) if speech else 1))
+                current_tts["queue_size"] = max(0, self._tts_remaining_playback_count(speech, fallback_total=expected_sentence_count)) if speech else 0
                 current_tts["speaker_id"] = speaker_id
                 current_tts["detail"] = "sentence TTS playback pending"
             current_tts["latency_ms"] = int(current_tts.get("latency_ms", 0) or 0)
@@ -1854,28 +1861,81 @@ class MatchStore:
             await self.start_agent_playback(speech_id, task_id, reason="text_only")
             await self.complete_agent_playback(speech_id, task_id, reason="text_only")
         else:
-            asyncio.create_task(self._complete_agent_playback_after_grace(speech_id, task_id, finished_payload["expected_sentence_count"]))
+            self._arm_tts_playback_grace(speech_id, task_id, finished_payload["expected_sentence_count"])
+
+    async def resume_runtime_tasks(self) -> None:
+        """Re-arm volatile runtime tasks after process restart.
+
+        SQLite/app_state restores the current speech, but asyncio tasks are process-local.
+        If the server restarts while a screen is playing TTS, the playback grace watchdog
+        must be reattached or an already-exhausted speech may wait forever.
+        """
+        async with self._lock:
+            speech = self.snapshot.get("current_speech") or {}
+            if (
+                speech.get("source") == "agent_text"
+                and speech.get("state") != "ended"
+                and speech.get("tts_task_id")
+                and self._tts_int(speech.get("tts_expected_sentences"), 0) > 0
+            ):
+                speech_id = str(speech.get("id"))
+                task_id = str(speech.get("tts_task_id"))
+                expected = self._tts_int(speech.get("tts_expected_sentences"), 0)
+            else:
+                return
+        self._arm_tts_playback_grace(speech_id, task_id, expected)
+
+    def _arm_tts_playback_grace(self, speech_id: str, task_id: str, expected_sentence_count: int) -> None:
+        key = f"{speech_id}:{task_id}"
+        existing = self._tts_grace_tasks.get(key)
+        if existing and not existing.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = asyncio.create_task(self._complete_agent_playback_after_grace(speech_id, task_id, expected_sentence_count))
+        self._tts_grace_tasks[key] = task
+
+        def _forget(done: asyncio.Task) -> None:
+            if self._tts_grace_tasks.get(key) is done:
+                self._tts_grace_tasks.pop(key, None)
+
+        task.add_done_callback(_forget)
 
     async def _complete_agent_playback_after_grace(self, speech_id: str, task_id: str, expected_sentence_count: int) -> None:
-        # 进度感知的兜底：只有当大屏在「idle_limit 秒内没有任何播放进度」时才强行收尾，
-        # 而不是在生成完成后固定 N 秒就收尾——否则一段较短发言（grace=120s）若播放中途卡顿、
-        # 总时长超过这个固定窗口，就会在还在出声时被提前判为"发言完毕"（事件没结束就收尾）。
-        # 只要大屏还在按句上报进度，空闲计时就会被重置，兜底永不在活跃播放期间触发；真正
-        # 离线/卡死（长时间无进度）时才收尾。比固定计时更保守，不改变正常播放路径。
-        idle_limit = max(120, min(900, int(expected_sentence_count or 1) * 12))
-        poll_seconds = 15
+        # 进度感知的兜底：TTS 已经全部归档后，如果大屏从未开始播放，快速收尾，避免现场
+        # 长时间卡在"播放中"；一旦大屏开始播放，则依赖前端真实 currentTime heartbeat 刷新
+        # tts_last_progress_at，只有长时间没有任何真实播放进度时才收尾。
+        poll_seconds = 3
+        grace_started_at = utc_now()
         while True:
-            await asyncio.sleep(poll_seconds)
             async with self._lock:
                 speech = self.snapshot.get("current_speech")
                 if not (speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id):
                     return  # 已被正常收尾 / 已切换发言
-                last_iso = speech.get("tts_last_progress_at") or speech.get("started_at")
+                expected = self._tts_int(speech.get("tts_expected_sentences"), 0)
+                playback_exhausted = expected > 0 and self._tts_remaining_playback_count(speech, fallback_total=expected) == 0
+                last_playback_status = str(speech.get("tts_last_playback_status") or "")
+                playback_statuses = {"playing", "played", "stalled", "error", "play_rejected", "failed", "skipped"}
+                last_iso = speech.get("tts_last_progress_at") if last_playback_status in playback_statuses else None
+                if not last_iso and speech.get("started_at"):
+                    last_iso = speech.get("started_at")
                 last_dt = parse_iso(last_iso) if last_iso else None
-                idle_seconds = (utc_now() - last_dt).total_seconds() if last_dt else idle_limit + 1
+                idle_anchor = last_dt or grace_started_at
+                idle_seconds = (utc_now() - idle_anchor).total_seconds()
+                idle_limit = (
+                    self._tts_playback_idle_timeout_seconds(expected or expected_sentence_count)
+                    if last_dt
+                    else self._tts_playback_start_timeout_seconds()
+                )
+            if playback_exhausted:
+                await self.complete_agent_playback(speech_id, task_id, reason="screen_playback_progress_exhausted")
+                return
             if idle_seconds >= idle_limit:
                 await self.complete_agent_playback(speech_id, task_id, reason="screen_playback_timeout")
                 return
+            await asyncio.sleep(poll_seconds)
 
     async def complete_agent_playback(self, speech_id: str, task_id: str, reason: str = "screen_playback_complete") -> Dict[str, Any]:
         ignored_payload: Optional[Dict[str, Any]] = None
@@ -4740,6 +4800,7 @@ class MatchStore:
             "sentence_idx": max(0, int(sentence_idx)),
             "status": status,
         }
+        auto_complete_payload: Optional[Dict[str, Any]] = None
         async with self._lock:
             speech = self.snapshot.get("current_speech") or {}
             if speech.get("id") != speech_id:
@@ -4751,6 +4812,27 @@ class MatchStore:
             else:
                 expected = int(speech.get("tts_expected_sentences") or speech.get("tts_created_sentences") or 0)
                 playing_idx = max(0, int(sentence_idx))
+                if not isinstance(speech.get("tts_played_sentence_indices"), list):
+                    legacy_played = max(0, int(speech.get("tts_played_sentences") or 0))
+                    if status == "playing" and legacy_played > 0 and playing_idx == legacy_played - 1:
+                        legacy_played -= 1
+                    speech["tts_played_sentence_indices"] = list(range(legacy_played))
+                if status in {"stalled", "error", "play_rejected", "failed", "skipped"}:
+                    # 屏幕播放失败，只有在「后端确实没产出该段音频」时才允许把它永久标记为跳过。
+                    # 若该段已有归档音频，则某一块屏幕一时播不出（旧缓存版本 / 网络抖动 / 解码失败）
+                    # 绝不能把它拉黑，更不能据此提前收尾——否则任意一块异常屏幕都会把整场发言
+                    # "播一句就结束"（线上实测：旧 bundle 的连环 error 把整段拖到 speech.ended）。
+                    # 这类失败只作诊断，不改变权威的 ready/skipped 不变量。
+                    if playing_idx not in self._tts_ready_indices(speech_id):
+                        skipped = speech.setdefault("tts_skipped_sentences", [])
+                        if playing_idx not in {int(i) for i in skipped}:
+                            skipped.append(playing_idx)
+                            skipped.sort()
+                if status == "played":
+                    played_indices = speech.setdefault("tts_played_sentence_indices", [])
+                    if playing_idx not in {int(i) for i in played_indices}:
+                        played_indices.append(playing_idx)
+                        played_indices.sort()
                 if speech.get("state") == "thinking" and status in {"playing", "played"}:
                     speaker_id = speech.get("speaker_id")
                     speaker = self._find_speaker(speaker_id)
@@ -4761,9 +4843,14 @@ class MatchStore:
                     speech["started_at"] = speech.get("started_at") or iso_now()
                     speech["state"] = "speaking"
                 speech["tts_playing_sentence_idx"] = playing_idx
-                speech["tts_played_sentences"] = max(int(speech.get("tts_played_sentences") or 0), playing_idx + 1)
                 speech["tts_last_playback_status"] = status
-                speech["tts_last_progress_at"] = iso_now()
+                # 只有「真实播放进度」(playing/played) 才推进高水位、刷新 last_progress_at。否则
+                # 异常屏幕持续上报 error/stalled 会不断重置 grace 兜底计时，让发言永远收不了尾。
+                if status in {"playing", "played"}:
+                    speech["tts_played_sentences"] = max(int(speech.get("tts_played_sentences") or 0), playing_idx + 1)
+                    speech["tts_last_progress_at"] = iso_now()
+                else:
+                    speech.setdefault("tts_last_progress_at", iso_now())
                 if status == "played":
                     detail = f"screen played segment {playing_idx + 1}/{expected or '?'}"
                 elif status in {"stalled", "error", "play_rejected", "failed"}:
@@ -4773,7 +4860,7 @@ class MatchStore:
                 self.snapshot["speech_service"]["tts"].update(
                     {
                         "status": "playing",
-                        "queue_size": max(0, expected - int(speech.get("tts_played_sentences") or 0)),
+                        "queue_size": self._tts_playback_display_queue_size(speech, fallback_total=expected),
                         "speaker_id": speech.get("speaker_id"),
                         "detail": detail,
                         "last_progress_at": speech["tts_last_progress_at"],
@@ -4787,8 +4874,21 @@ class MatchStore:
                         "last_progress_at": speech.get("tts_last_progress_at"),
                     }
                 )
+                if self._should_auto_complete_tts_playback(speech, status):
+                    payload["auto_complete"] = True
+                    auto_complete_payload = {
+                        "speech_id": speech_id,
+                        "task_id": task_id,
+                        "reason": "screen_playback_progress_exhausted",
+                    }
             self._persist_snapshot()
         await self.emit("tts.playback_progress", payload, "screen", payload.get("speaker_id"))
+        if auto_complete_payload:
+            return await self.complete_agent_playback(
+                auto_complete_payload["speech_id"],
+                auto_complete_payload["task_id"],
+                reason=auto_complete_payload["reason"],
+            )
         return await self.get_snapshot()
 
     async def request_tts_playback_resume(self, speech_id: str, task_id: str = "", reason: str = "host_resume_tts") -> Dict[str, Any]:
@@ -4800,7 +4900,7 @@ class MatchStore:
                     {
                         "status": "synthesizing" if speech.get("state") == "thinking" else "playing",
                         "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
-                        "queue_size": max(1, int(speech.get("tts_created_sentences") or speech.get("tts_ready_sentences") or 1) - int(speech.get("tts_played_sentences") or 0)),
+                        "queue_size": max(0, self._tts_remaining_playback_count(speech, fallback_total=1)),
                         "speaker_id": speech.get("speaker_id"),
                         "detail": "playback resume requested",
                         "last_progress_at": speech["tts_resume_requested_at"],
@@ -4850,7 +4950,12 @@ class MatchStore:
             if int(sentence_idx) not in skipped:
                 skipped.append(int(sentence_idx))
                 skipped.sort()
-            self.snapshot["speech_service"]["tts"]["last_progress_at"] = iso_now()
+            self.snapshot["speech_service"]["tts"].update(
+                {
+                    "queue_size": self._tts_remaining_playback_count(speech, fallback_total=int(sentence_idx) + 1),
+                    "last_progress_at": iso_now(),
+                }
+            )
             self._persist_snapshot()
             payload = {
                 "speech_id": speech_id,
@@ -4861,7 +4966,10 @@ class MatchStore:
                 "skipped": True,
                 "reason": reason,
             }
+            auto_complete = self._should_auto_complete_tts_playback(speech, "skipped")
         await self.emit("tts.sentence_ready", payload, "screen", speaker_id)
+        if auto_complete:
+            return await self.complete_agent_playback(speech_id, task_id, reason="host_force_skip_exhausted")
         return await self.get_snapshot()
 
     async def resynthesize_speech_tts(self, speech_id: str, reason: str = "host_resynthesize") -> Dict[str, Any]:
@@ -4890,6 +4998,7 @@ class MatchStore:
             speech["tts_created_sentences"] = 0
             speech["tts_ready_sentences"] = 0
             speech["tts_played_sentences"] = 0
+            speech["tts_played_sentence_indices"] = []
             speech["tts_skipped_sentences"] = []
             speech.pop("tts_playing_sentence_idx", None)
             speech["tts_last_playback_status"] = "resynthesizing"
@@ -4921,7 +5030,7 @@ class MatchStore:
                 self.snapshot["speech_service"]["tts"].update(
                     {
                         "status": "playing",
-                        "queue_size": max(1, expected),
+                        "queue_size": self._tts_remaining_playback_count(speech, fallback_total=expected),
                         "speaker_id": speaker_id,
                         "detail": "resynthesized TTS playback pending",
                         "last_progress_at": iso_now(),
@@ -4933,6 +5042,8 @@ class MatchStore:
             {"task_id": new_task_id, "speech_id": speech_id, "speaker_id": speaker_id, "expected_sentence_count": expected},
             "system",
         )
+        if expected > 0:
+            self._arm_tts_playback_grace(speech_id, new_task_id, expected)
         return await self.get_snapshot()
 
     async def _synthesize_text_tts(self, speech_id: str, task_id: str, speaker: Dict[str, Any], full_text: str) -> int:
@@ -4944,7 +5055,7 @@ class MatchStore:
 
         async def synth(sentence: str, idx: int) -> bool:
             async with semaphore:
-                return await self._synthesize_sentence_tts(sentence, idx, task_id, speech_id, speaker)
+                return await self._synthesize_sentence_tts_with_timeout(sentence, idx, task_id, speech_id, speaker)
 
         tasks: List[asyncio.Task] = []
         sent_chars = 0
@@ -5045,7 +5156,7 @@ class MatchStore:
                 self.snapshot["speech_service"]["tts"].update(
                     {
                         "status": "synthesizing",
-                        "queue_size": max(1, int(speech.get("tts_created_sentences") or sentence_idx + 1) - int(speech.get("tts_ready_sentences") or 0)),
+                        "queue_size": max(1, self._tts_unresolved_sentence_count(speech, fallback_total=sentence_idx + 1)),
                         "speaker_id": speaker_id,
                         "detail": f"synthesizing segment {sentence_idx + 1}",
                         "last_progress_at": speech["tts_last_progress_at"],
@@ -5257,37 +5368,7 @@ class MatchStore:
         request_id = f"tts_{task_id}_s{sentence_idx}"
 
         async def _emit_skip(reason: str) -> None:
-            # Record the skipped index on the speech so the screen can fill the ordered
-            # gap deterministically from the snapshot — the realtime layer can drop this
-            # event, and a missing index would otherwise stall ordered playback forever.
-            # 记录绝不能因为快照写入异常或 speech 已切换而失败——所以包 try/except，并在
-            # finally 里始终 emit。完成时的对账（_reconcile_tts_gaps）会再兜底补齐遗漏的 idx。
-            try:
-                async with self._lock:
-                    speech = self.snapshot.get("current_speech")
-                    if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id:
-                        skipped = speech.setdefault("tts_skipped_sentences", [])
-                        if int(sentence_idx) not in skipped:
-                            skipped.append(int(sentence_idx))
-                        self._persist_snapshot(sync_structured=False)
-            except Exception:  # noqa: BLE001 — 记录失败也必须把事件发出去，绝不吞掉跳过
-                pass
-            finally:
-                await self.emit(
-                    "tts.sentence_ready",
-                    {
-                        "task_id": task_id,
-                        "speech_id": speech_id,
-                        "speaker_id": speaker_id,
-                        "sentence_idx": sentence_idx,
-                        "audio_url": "",
-                        "skipped": True,
-                        "reason": reason,
-                    },
-                    "screen",
-                    speaker_id,
-                    sync_structured=False,
-                )
+            await self._emit_tts_sentence_skip(task_id, speech_id, speaker_id, sentence_idx, reason)
 
         normalized_text = normalize_tts_text(text)
         if not normalized_text:
@@ -5408,7 +5489,14 @@ class MatchStore:
             archive_dir.mkdir(parents=True, exist_ok=True)
             ext = self._audio_extension(result.mime_type)
             file_path = archive_dir / f"tts_{self._safe_path_part(task_id)}_s{sentence_idx}.{ext}"
-            file_path.write_bytes(result.audio)
+            # 首句（idx 0）前置一小段静音：补偿投影机音频输出的启动延迟，避免开场"前几个字被吃掉"。
+            # 只对 mp3 首句生效；MP3 帧自描述，拼接静音帧后浏览器正常解码（静音→语音）。
+            archived_audio = result.audio
+            if sentence_idx == 0 and result.mime_type == "audio/mpeg":
+                lead = self._tts_lead_silence_bytes()
+                if lead:
+                    archived_audio = lead + result.audio
+            file_path.write_bytes(archived_audio)
             audio_root = self.audio_root_path()
             rel = file_path.relative_to(audio_root)
             audio_url = "/api/audio/" + "/".join(rel.parts)
@@ -5437,7 +5525,7 @@ class MatchStore:
                 archive_dir=archive_dir,
                 chunk_path=file_path,
                 chunk_index=sentence_idx,
-                size_bytes=len(result.audio),
+                size_bytes=len(archived_audio),
                 duration_ms=None,
             )
             now = iso_now()
@@ -5460,7 +5548,7 @@ class MatchStore:
                 self.snapshot["speech_service"]["tts"].update(
                     {
                         "status": "playing" if int(speech.get("tts_played_sentences") or 0) > 0 else "synthesizing",
-                        "queue_size": max(0, created - ready),
+                        "queue_size": self._tts_unresolved_sentence_count(speech, fallback_total=created),
                         "speaker_id": speaker_id,
                         "detail": f"TTS archived segment {sentence_idx + 1}/{created or '?'}",
                         "last_progress_at": iso_now(),
@@ -5508,6 +5596,76 @@ class MatchStore:
         )
         return True
 
+    async def _synthesize_sentence_tts_with_timeout(
+        self,
+        text: str,
+        sentence_idx: int,
+        task_id: str,
+        speech_id: str,
+        speaker: Dict[str, Any],
+    ) -> bool:
+        started = time.perf_counter()
+        try:
+            return await asyncio.wait_for(
+                self._synthesize_sentence_tts(text, sentence_idx, task_id, speech_id, speaker),
+                timeout=self._tts_sentence_timeout_seconds(),
+            )
+        except asyncio.TimeoutError:
+            async with self._lock:
+                match_id = self.snapshot["match"]["id"]
+                self.repo.finish_speech_service_request(
+                    match_id=match_id,
+                    request_id=f"tts_{task_id}_s{sentence_idx}",
+                    status="failed",
+                    response={"degraded_to": "text_only"},
+                    error_code="tts_timeout",
+                    error_message="TTS sentence synthesis timed out",
+                    latency_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    completed_at=iso_now(),
+                )
+            await self._emit_tts_sentence_skip(task_id, speech_id, speaker["id"], sentence_idx, "tts_synthesize_timeout")
+            return False
+
+    async def _emit_tts_sentence_skip(self, task_id: str, speech_id: str, speaker_id: str, sentence_idx: int, reason: str) -> None:
+        # Record the skipped index on the speech so the screen can fill the ordered
+        # gap deterministically from the snapshot — the realtime layer can drop this
+        # event, and a missing index would otherwise stall ordered playback forever.
+        try:
+            async with self._lock:
+                speech = self.snapshot.get("current_speech")
+                if speech and speech.get("id") == speech_id and speech.get("tts_task_id") == task_id:
+                    skipped = speech.setdefault("tts_skipped_sentences", [])
+                    if int(sentence_idx) not in skipped:
+                        skipped.append(int(sentence_idx))
+                        skipped.sort()
+                    self.snapshot["speech_service"]["tts"].update(
+                        {
+                            "status": "playing" if int(speech.get("tts_played_sentences") or 0) > 0 else "synthesizing",
+                            "queue_size": self._tts_unresolved_sentence_count(speech, fallback_total=sentence_idx + 1),
+                            "speaker_id": speaker_id,
+                            "detail": f"TTS skipped segment {sentence_idx + 1}: {reason}",
+                            "last_progress_at": iso_now(),
+                        }
+                    )
+                    self._persist_snapshot(sync_structured=False)
+        except Exception:  # noqa: BLE001 — 记录失败也必须把事件发出去，绝不吞掉跳过
+            pass
+        await self.emit(
+            "tts.sentence_ready",
+            {
+                "task_id": task_id,
+                "speech_id": speech_id,
+                "speaker_id": speaker_id,
+                "sentence_idx": sentence_idx,
+                "audio_url": "",
+                "skipped": True,
+                "reason": reason,
+            },
+            "screen",
+            speaker_id,
+            sync_structured=False,
+        )
+
     def _tts_formal_enabled(self) -> bool:
         raw = os.getenv("PHDEBATE_TTS_FORMAL", "").strip().lower()
         if raw in {"0", "false", "no", "off"}:
@@ -5526,6 +5684,47 @@ class MatchStore:
             value = 4
         return max(1, min(8, value))
 
+    def _tts_sentence_timeout_seconds(self) -> float:
+        raw = os.getenv("PHDEBATE_TTS_SENTENCE_TIMEOUT_S", "10").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 10.0
+        return max(4.0, min(90.0, value))
+
+    def _tts_playback_start_timeout_seconds(self) -> float:
+        raw = os.getenv("PHDEBATE_TTS_PLAYBACK_START_TIMEOUT_S", "25").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 25.0
+        return max(8.0, min(180.0, value))
+
+    def _tts_playback_idle_timeout_seconds(self, expected_sentence_count: int = 1) -> float:
+        default = max(45.0, min(120.0, float(max(1, int(expected_sentence_count or 1))) * 12.0))
+        raw = os.getenv("PHDEBATE_TTS_PLAYBACK_IDLE_TIMEOUT_S", str(int(default))).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = default
+        return max(20.0, min(300.0, value))
+
+    def _tts_lead_silence_bytes(self) -> bytes:
+        """首句前置静音字节。补偿投影机音频输出启动延迟，避免开场前几个字被吃掉。
+        通过 PHDEBATE_TTS_LEAD_SILENCE=0 可关闭（开关实时生效，文件字节单独缓存）。"""
+        raw = os.getenv("PHDEBATE_TTS_LEAD_SILENCE", "1").strip().lower()
+        if raw in {"0", "false", "no", "off"}:
+            return b""
+        cached = getattr(self, "_lead_silence_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            path = Path(__file__).resolve().parent.parent / "assets" / "silence-lead.mp3"
+            self._lead_silence_cache = path.read_bytes()
+        except OSError:
+            self._lead_silence_cache = b""
+        return self._lead_silence_cache
+
     def _tts_ready_indices(self, speech_id: str) -> set:
         """已成功归档（有可播 url）的分段序号集合。"""
         asset = self._audio_asset_for_speech(speech_id)
@@ -5538,6 +5737,86 @@ class MatchStore:
             if idx >= 0 and str(chunk.get("audio_url") or ""):
                 ready.add(idx)
         return ready
+
+    @staticmethod
+    def _tts_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _tts_skipped_indices(self, speech: Dict[str, Any]) -> set:
+        skipped = set()
+        for value in speech.get("tts_skipped_sentences") or []:
+            idx = self._tts_int(value, -1)
+            if idx >= 0:
+                skipped.add(idx)
+        return skipped
+
+    def _tts_played_indices(self, speech: Dict[str, Any]) -> set:
+        raw = speech.get("tts_played_sentence_indices")
+        if isinstance(raw, list):
+            played = set()
+            for value in raw:
+                idx = self._tts_int(value, -1)
+                if idx >= 0:
+                    played.add(idx)
+            return played
+        legacy_count = max(0, self._tts_int(speech.get("tts_played_sentences"), 0))
+        last_status = str(speech.get("tts_last_playback_status") or "")
+        playing_idx = self._tts_int(speech.get("tts_playing_sentence_idx"), -1)
+        if last_status == "playing" and legacy_count > 0 and playing_idx == legacy_count - 1:
+            legacy_count -= 1
+        return set(range(legacy_count))
+
+    def _tts_sentence_total(self, speech: Dict[str, Any], fallback_total: int = 0) -> int:
+        expected = self._tts_int(speech.get("tts_expected_sentences"), -1)
+        if expected > 0:
+            return expected
+        created = self._tts_int(speech.get("tts_created_sentences"), 0)
+        ready = self._tts_ready_indices(speech.get("id")) if speech.get("id") else set()
+        skipped = self._tts_skipped_indices(speech)
+        high_water = max(ready | skipped, default=-1) + 1
+        return max(0, created, high_water, int(fallback_total or 0))
+
+    def _tts_unresolved_sentence_count(self, speech: Dict[str, Any], fallback_total: int = 0) -> int:
+        """分段总数中，还没有 ready 也没有 skipped 的数量。用于合成队列口径。"""
+        total = self._tts_sentence_total(speech, fallback_total=fallback_total)
+        if total <= 0:
+            return 0
+        ready = self._tts_ready_indices(speech.get("id")) if speech.get("id") else set()
+        skipped = self._tts_skipped_indices(speech)
+        resolved = {idx for idx in ready | skipped if 0 <= idx < total}
+        return max(0, total - len(resolved))
+
+    def _tts_remaining_playback_count(self, speech: Dict[str, Any], fallback_total: int = 0) -> int:
+        """还需要大屏处理的分段数量；优先按精确 played/skipped 集合计算，兼容旧高水位快照。"""
+        total = self._tts_sentence_total(speech, fallback_total=fallback_total)
+        if total <= 0:
+            return 0
+        resolved = self._tts_played_indices(speech) | self._tts_skipped_indices(speech)
+        resolved = {idx for idx in resolved if 0 <= idx < total}
+        return max(0, total - len(resolved))
+
+    def _tts_playback_display_queue_size(self, speech: Dict[str, Any], fallback_total: int = 0) -> int:
+        """后台展示队列：playing 表示当前段已开始，可按高水位显示；终态判定仍用精确集合。"""
+        total = self._tts_sentence_total(speech, fallback_total=fallback_total)
+        if total <= 0:
+            return 0
+        if str(speech.get("tts_last_playback_status") or "playing") == "playing":
+            played_high_water = min(total, max(0, self._tts_int(speech.get("tts_played_sentences"), 0)))
+            skipped_after_playing = {idx for idx in self._tts_skipped_indices(speech) if played_high_water <= idx < total}
+            return max(0, total - played_high_water - len(skipped_after_playing))
+        return self._tts_remaining_playback_count(speech, fallback_total=fallback_total)
+
+    def _should_auto_complete_tts_playback(self, speech: Dict[str, Any], status: str) -> bool:
+        """当前端已经报告最后一个分段的终态时，后端直接收尾，避免再依赖额外 complete 请求。"""
+        if status not in {"played", "stalled", "error", "play_rejected", "failed", "skipped"}:
+            return False
+        expected = self._tts_int(speech.get("tts_expected_sentences"), 0)
+        if expected <= 0:
+            return False
+        return self._tts_remaining_playback_count(speech, fallback_total=expected) == 0
 
     def _reconcile_tts_gaps(self, speech: Dict[str, Any], expected: int) -> None:
         """保证 [0,expected) 中每个分段要么 ready、要么 skipped。

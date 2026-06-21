@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
 import { post } from "../api/client";
 import type { MatchSnapshot, RealtimeMessage } from "../types/contracts";
 import {
@@ -10,16 +10,23 @@ import {
 } from "./playbackReducer";
 
 /**
- * 大屏 TTS 播放的薄胶水：持有单个可复用的 <audio>，把快照/事件/1秒看门狗这三个触发器
- * 都汇到一次 reconcile，再把纯函数返回的决策落到真实音频上。所有播放"逻辑"在 reducer 里，
- * 这里只剩"开播放/停/上报"这类不可避免的副作用。
+ * 大屏 TTS 播放的薄胶水：把快照/事件/1 秒看门狗三个触发器汇到一次纯函数对账（reducer），
+ * 再把决策落到真实音频上。播放"逻辑"全在 reducer；这里只剩"起播/停/上报"等副作用。
  *
- * 关键可靠性点：
+ * 关键点：
  *  - 快照是唯一真相；live MSE 流式已废弃（忽略 tts.sentence_stream_started）。
- *  - onended/onerror 只是优化；即便它们都不触发，1 秒看门狗也会按时间强制推进，绝不永久卡死。
- *  - 「停止播放」靠 suppress（音频纯控制，不改发言状态）；发言结束/换人/下一阶段靠快照对账截断。
+ *  - **单个可复用的 <audio> 元素**：每段直接 `src=url; play()`。绝不为多段并行创建多个
+ *    <audio> 各自 preload —— 那会在投影机浏览器上同时打开多个取流，叠加生成期间的快照刷新
+ *    撑爆「同一主机并发连接上限（HTTP/1.1 约 6）」，导致中间段音频取不到而 stall/error 连环
+ *    跳过、最后"直接跳到发言结束"（线上实测：只有首段/末段取到流，中间段从未发起请求）。
+ *    单元素任一时刻只占 1 个音频连接，最稳。
+ *  - onended/onerror 只是优化；即便都不触发，1 秒看门狗也会按"真实播放进度"强制推进，绝不卡死。
+ *  - skip/chunk 都走事件快路即时并入，缺口不必等快照刷新。
+ *  - 「停止播放」靠 suppress；发言结束/换人/下一阶段靠快照对账截断。
  */
 const SILENCE_URL = "/assets/silence-24k-1s.mp3";
+const PLAYBACK_PROGRESS_EPSILON = 0.05;
+const PLAYBACK_HEARTBEAT_MS = 5000;
 
 export function usePlayback(
   matchId: string,
@@ -28,16 +35,25 @@ export function usePlayback(
   audioEnabled: boolean,
   setAudioEnabled: (value: boolean) => void
 ): { unlock: () => void } {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const positionRef = useRef<PlaybackPosition>(emptyPosition());
   const mediaRef = useRef<ActiveMediaState>("idle");
-  const urlRef = useRef<string>("");
   const retryRef = useRef<Map<string, number>>(new Map());
   const suppressRef = useRef<Set<string>>(new Set());
   const startReportedRef = useRef<string>(""); // `${speechId}:${taskId}` 已上报"开始播放"
-  // 事件快路：tts.sentence_ready 里直接带了 audio_url，先用它立刻起播，不必等 157KB 快照 GET
-  // 往返（首句"很晚"的主因之一）。快照仍是权威：skipped/expected/状态/截断都看快照，这里只补"已就绪的 url"。
+  // 单个可复用 <audio> 元素 + 当前正在播放段的标识（供一次性绑定的处理器读取）。
+  const activeElRef = useRef<HTMLAudioElement | null>(null);
+  const activeSegmentRef = useRef<string>("");
+  const urlRef = useRef<string>("");
+  const currentPlayRef = useRef<{ speechId: string; taskId: string; speakerId: string; idx: number } | null>(null);
+  const playbackProgressRef = useRef<{ segment: string; currentTime: number; atMs: number }>({
+    segment: "",
+    currentTime: 0,
+    atMs: 0,
+  });
+  const playbackHeartbeatRef = useRef<{ segment: string; atMs: number }>({ segment: "", atMs: 0 });
+  // 事件快路：tts.sentence_ready 里直接带 audio_url / skipped，立刻并入 reducer 视图，省去快照 GET 往返。
   const eventChunksRef = useRef<{ key: string; map: Map<number, string> }>({ key: "", map: new Map() });
+  const eventSkipsRef = useRef<{ key: string; set: Set<number> }>({ key: "", set: new Set() });
   const audioEnabledRef = useRef(audioEnabled);
   const snapshotRef = useRef<MatchSnapshot | null>(snapshot);
   const runnerRef = useRef<(now: number) => void>(() => {});
@@ -45,18 +61,113 @@ export function usePlayback(
   audioEnabledRef.current = audioEnabled;
   snapshotRef.current = snapshot;
 
+  // 单元素的一次性事件处理器：用 currentPlayRef/activeSegmentRef 读取"当前段"，不靠闭包捕获。
+  function attachHandlers(el: HTMLAudioElement): void {
+    el.onplaying = () => {
+      if (activeElRef.current !== el) return;
+      const cur = currentPlayRef.current;
+      if (!cur) return;
+      mediaRef.current = "playing";
+      const startKey = `${cur.speechId}:${cur.taskId}`;
+      if (startReportedRef.current !== startKey) {
+        startReportedRef.current = startKey;
+        void postWithRetry(`/api/matches/${matchId}/speeches/${cur.speechId}/tts/playback-started`, {
+          task_id: cur.taskId,
+          speaker_id: cur.speakerId,
+          reason: "screen_audio_play_started",
+        });
+      }
+      void postWithRetry(`/api/matches/${matchId}/speeches/${cur.speechId}/tts/playback-progress`, {
+        task_id: cur.taskId,
+        sentence_idx: cur.idx,
+        speaker_id: cur.speakerId,
+        status: "playing",
+      });
+    };
+    el.onended = () => {
+      if (activeElRef.current !== el) return;
+      const cur = currentPlayRef.current;
+      mediaRef.current = "ended";
+      if (cur) {
+        void postWithRetry(`/api/matches/${matchId}/speeches/${cur.speechId}/tts/playback-progress`, {
+          task_id: cur.taskId,
+          sentence_idx: cur.idx,
+          speaker_id: cur.speakerId,
+          status: "played",
+        });
+      }
+      runnerRef.current(nowEpoch());
+    };
+    el.onwaiting = () => {
+      if (activeElRef.current !== el) return;
+      mediaRef.current = "stalled";
+      runnerRef.current(nowEpoch());
+    };
+    el.onstalled = () => {
+      if (activeElRef.current !== el) return;
+      mediaRef.current = "stalled";
+      runnerRef.current(nowEpoch());
+    };
+    el.oncanplay = () => {
+      if (activeElRef.current !== el) return;
+      if (!el.paused && !el.ended) mediaRef.current = "playing";
+    };
+    el.onerror = () => {
+      if (activeElRef.current !== el) return;
+      const cur = currentPlayRef.current;
+      const rk = cur ? `${cur.taskId}:${cur.idx}` : "";
+      const tries = (rk && retryRef.current.get(rk)) || 0;
+      if (rk && tries < 1 && urlRef.current) {
+        retryRef.current.set(rk, tries + 1);
+        try {
+          el.src = urlRef.current;
+          el.load();
+          void el.play().catch(() => {
+            mediaRef.current = "errored";
+            runnerRef.current(nowEpoch());
+          });
+          return;
+        } catch {
+          /* fall through */
+        }
+      }
+      mediaRef.current = "errored";
+      runnerRef.current(nowEpoch());
+    };
+  }
+
+  function ensureEl(): HTMLAudioElement {
+    let el = activeElRef.current;
+    if (!el) {
+      el = new Audio();
+      el.preload = "auto";
+      activeElRef.current = el;
+      attachHandlers(el);
+    }
+    return el;
+  }
+
   const runReconcile = useCallback(
     (now: number) => {
-      const audio = audioRef.current;
+      const progressed = observeActiveAudioProgress(now, positionRef, activeElRef, activeSegmentRef, playbackProgressRef, mediaRef);
       const speech = projectSpeech(snapshotRef.current);
-      // 合并事件快路里已知的分段 url（仅当前 speech:task），让首/各句无需等快照 GET 即可起播。
       if (speech) {
+        if (progressed) {
+          maybeReportPlaybackHeartbeat(now, speech, positionRef, activeSegmentRef, playbackHeartbeatRef, mediaRef, matchId);
+        }
+        const key = `${speech.speechId}:${speech.taskId}`;
         const ev = eventChunksRef.current;
-        if (ev.key === `${speech.speechId}:${speech.taskId}` && ev.map.size) {
+        if (ev.key === key && ev.map.size) {
           const have = new Set(speech.chunks.map((c) => c.sentenceIdx));
           ev.map.forEach((url, idx) => {
             if (!have.has(idx)) speech.chunks.push({ sentenceIdx: idx, audioUrl: url });
           });
+        }
+        const sk = eventSkipsRef.current;
+        if (sk.key === key && sk.set.size) {
+          const skipped = new Set(speech.skippedSentences);
+          sk.set.forEach((idx) => skipped.add(idx));
+          speech.skippedSentences = [...skipped];
         }
       }
       const suppressed = speech
@@ -75,68 +186,107 @@ export function usePlayback(
         positionRef.current = decision.position;
 
         if (decision.kind === "PLAY") {
-          if (audio) {
-            retryRef.current.delete(`${decision.position.taskId ?? ""}:${decision.sentenceIdx}`);
-            urlRef.current = decision.audioUrl;
-            mediaRef.current = "playing";
-            try {
-              audio.src = decision.audioUrl;
-              void audio.play().catch((err: unknown) => {
-                if (err && (err as { name?: string }).name === "NotAllowedError") {
-                  // 浏览器自动播放策略：需要用户手势授权，关掉音频开关提示用户点一下扬声器。
-                  mediaRef.current = "idle";
-                  setAudioEnabled(false);
-                  return;
-                }
-                mediaRef.current = "errored";
-                runnerRef.current(nowEpoch());
-              });
-            } catch {
-              mediaRef.current = "errored";
-              runnerRef.current(nowEpoch());
-            }
-          }
-          // 不在此处上报进度：上报必须等真实 onplaying（声音真的出来了）才发，否则会出现
-          // "显示已开始播放、计时已走，但其实没声音"。见下方 audio.onplaying。
+          if (speech) playSegment(speech, decision.sentenceIdx, decision.audioUrl);
           return;
         }
 
         if (decision.kind === "STOP") {
-          // 只 pause()，不 removeAttribute("src")+load()：后者在空 src 上会触发一个 error 事件，
-          // 重新进入状态机（可能表现为"卡顿/重新发音/异常推进"）。pause() 足以静音；下一段播放会
-          // 直接设置新的 src 覆盖，不会意外恢复旧音频。
-          if (audio) {
-            try {
-              audio.pause();
-            } catch {
-              /* ignore */
+          if (decision.reason === "suppressed" || decision.reason === "audio_disabled") {
+            const el = activeElRef.current;
+            if (el) {
+              try {
+                el.pause();
+              } catch {
+                /* ignore */
+              }
             }
+          } else {
+            clearActiveAudio(activeElRef, activeSegmentRef, playbackProgressRef);
           }
           mediaRef.current = "idle";
-          urlRef.current = "";
           return;
         }
 
         if (decision.kind === "DONE") {
-          void post(`/api/matches/${matchId}/speeches/${decision.speechId}/tts/playback-complete`, {
+          clearActiveAudio(activeElRef, activeSegmentRef, playbackProgressRef);
+          void postWithRetry(`/api/matches/${matchId}/speeches/${decision.speechId}/tts/playback-complete`, {
             task_id: decision.taskId,
             speaker_id: speech?.speakerId,
             reason: "screen_playback_complete",
-          }).catch(() => undefined);
+          });
           return;
         }
 
         if (decision.kind === "NOTIFY_START") {
-          // 不在此处上报开始：同样等真实 onplaying 再发，确保"开始播放"与真实出声一致。
-          continue; // 立即再跑一拍 → PLAY，不增加首句延迟
+          continue; // 上报留给真实 onplaying；这里直接进入下一拍 → PLAY
         }
 
         if (decision.kind === "SKIP") {
+          if (speech) {
+            const segment = `${speech.speechId}:${speech.taskId}:${decision.sentenceIdx}`;
+            if (activeSegmentRef.current === segment) {
+              clearActiveAudio(activeElRef, activeSegmentRef, playbackProgressRef);
+            }
+          }
+          if (speech && (decision.reason === "watchdog_timeout" || decision.reason === "media_error")) {
+            void postWithRetry(`/api/matches/${matchId}/speeches/${speech.speechId}/tts/playback-progress`, {
+              task_id: speech.taskId,
+              sentence_idx: decision.sentenceIdx,
+              speaker_id: speech.speakerId,
+              status: decision.reason === "media_error" ? "error" : "stalled",
+            });
+          }
           mediaRef.current = "idle";
           continue; // 立即解析下一段
         }
 
         return; // WAIT / IDLE
+      }
+
+      // 播放当前段：复用唯一 <audio>，直接 src=url; play()。任一时刻只占 1 个音频连接。
+      function playSegment(sp: PlaybackSpeech, idx: number, url: string) {
+        const segment = `${sp.speechId}:${sp.taskId}:${idx}`;
+        const el = ensureEl();
+        currentPlayRef.current = { speechId: sp.speechId, taskId: sp.taskId, speakerId: sp.speakerId, idx };
+        if (activeSegmentRef.current === segment && urlRef.current === url && !el.ended) {
+          mediaRef.current = el.paused ? "idle" : "playing";
+          if (el.paused) {
+            void el.play().catch((err: unknown) => {
+              if (err && (err as { name?: string }).name === "NotAllowedError") {
+                mediaRef.current = "idle";
+                setAudioEnabled(false);
+                return;
+              }
+              mediaRef.current = "errored";
+              runnerRef.current(nowEpoch());
+            });
+          }
+          return;
+        }
+        activeSegmentRef.current = segment;
+        urlRef.current = url;
+        playbackProgressRef.current = { segment, currentTime: 0, atMs: now };
+        mediaRef.current = "playing";
+        retryRef.current.delete(`${sp.taskId}:${idx}`);
+        try {
+          if (el.getAttribute("src") !== url) el.src = url;
+        } catch {
+          /* ignore */
+        }
+        try {
+          el.currentTime = 0;
+        } catch {
+          /* ignore */
+        }
+        void el.play().catch((err: unknown) => {
+          if (err && (err as { name?: string }).name === "NotAllowedError") {
+            mediaRef.current = "idle";
+            setAudioEnabled(false);
+            return;
+          }
+          mediaRef.current = "errored";
+          runnerRef.current(nowEpoch());
+        });
       }
     },
     [matchId, setAudioEnabled]
@@ -144,11 +294,8 @@ export function usePlayback(
 
   runnerRef.current = runReconcile;
 
-  // 在「用户手势」（点扬声器按钮）调用栈内同步解锁音频：
-  //  1) 立刻把 audioEnabled 视为真并跑一次对账——若首段已就绪，audio.play() 就发生在手势里，
-  //     满足浏览器自动播放策略（这是大屏"点了开关却不出声"的根因修复）。
-  //  2) 若此刻还没有可播分段，则用一个独立的静音元素在手势里 play 一下，激活本页媒体权限，
-  //     待分段到达后程序化 play() 即被允许（用独立元素，避免它的 ended 事件污染对账）。
+  // 用户手势（点扬声器）内同步解锁音频：跑一拍对账，首段若已就绪 play() 就发生在手势里；
+  // 若暂无可播段，用独立静音元素在手势里播一下激活媒体权限。
   const unlock = useCallback(() => {
     audioEnabledRef.current = true;
     runnerRef.current(nowEpoch());
@@ -171,77 +318,15 @@ export function usePlayback(
     }
   }, []);
 
-  // 音频开关变化时立即对账（开→尽快开播/解锁，关→立即截断），不必等 1 秒看门狗。
+  // 音频开关变化时立即对账（开→尽快开播/解锁，关→立即截断）。
   useEffect(() => {
     runnerRef.current(nowEpoch());
   }, [audioEnabled]);
 
-  // 单个可复用的 audio 元素 + 一次性事件监听（处理器只用 ref，不怕闭包过期）。
+  // 卸载时释放音频元素。
   useEffect(() => {
-    const audio = new Audio();
-    audio.preload = "auto";
-    audioRef.current = audio;
-
-    audio.onended = () => {
-      mediaRef.current = "ended";
-      runnerRef.current(nowEpoch());
-    };
-    audio.onplaying = () => {
-      // 真实出声的瞬间才上报：把"开始播放/进度"与真实声音对齐——后端正是据此把发言翻成
-      // speaking、起计时、并让大屏进入发言动画页。绝不在还没出声时就上报。
-      mediaRef.current = "playing";
-      const pos = positionRef.current;
-      const speech = projectSpeech(snapshotRef.current);
-      if (!speech || pos.activeIdx == null) return;
-      const startKey = `${speech.speechId}:${speech.taskId}`;
-      if (startReportedRef.current !== startKey) {
-        startReportedRef.current = startKey;
-        void post(`/api/matches/${matchId}/speeches/${speech.speechId}/tts/playback-started`, {
-          task_id: speech.taskId,
-          speaker_id: speech.speakerId,
-          reason: "screen_audio_play_started",
-        }).catch(() => undefined);
-      }
-      void post(`/api/matches/${matchId}/speeches/${speech.speechId}/tts/playback-progress`, {
-        task_id: speech.taskId,
-        sentence_idx: pos.activeIdx,
-        speaker_id: speech.speakerId,
-        status: "playing",
-      }).catch(() => undefined);
-    };
-    audio.onerror = () => {
-      const pos = positionRef.current;
-      const idx = pos.activeIdx;
-      const key = `${pos.taskId ?? ""}:${idx}`;
-      const tries = retryRef.current.get(key) ?? 0;
-      if (idx != null && tries < 1 && urlRef.current) {
-        // 一次轻量重试（重设 src 再播）；再失败就交给 reducer 跳过。
-        retryRef.current.set(key, tries + 1);
-        try {
-          audio.src = urlRef.current;
-          void audio.play().catch(() => {
-            mediaRef.current = "errored";
-            runnerRef.current(nowEpoch());
-          });
-          return;
-        } catch {
-          /* fall through to errored */
-        }
-      }
-      mediaRef.current = "errored";
-      runnerRef.current(nowEpoch());
-    };
-
     return () => {
-      try {
-        audio.pause();
-      } catch {
-        /* ignore */
-      }
-      audio.onended = null;
-      audio.onerror = null;
-      audio.onplaying = null;
-      audioRef.current = null;
+      clearActiveAudio(activeElRef, activeSegmentRef, playbackProgressRef);
     };
   }, []);
 
@@ -250,7 +335,7 @@ export function usePlayback(
     runnerRef.current(nowEpoch());
   }, [snapshot]);
 
-  // 触发器 2：实时事件——只更新 suppress（音频纯控制），其余靠下一帧快照对账。
+  // 触发器 2：实时事件——更新 suppress、并把 chunk/skip 即时并入快路；其余靠下一帧快照对账。
   useEffect(() => {
     if (!lastEvent) {
       return;
@@ -264,20 +349,25 @@ export function usePlayback(
     } else if (lastEvent.type === "tts.playback_resume_requested") {
       if (speechId) suppressRef.current.delete(`speech:${speechId}`);
       if (taskId) suppressRef.current.delete(`task:${taskId}`);
+      // 「继续播放」也重新打开音频开关：若此前因自动播放被拦而被置 false，这里恢复。
+      audioEnabledRef.current = true;
+      setAudioEnabled(true);
     } else if (lastEvent.type === "tts.sentence_ready") {
-      // 快路：事件里带的 audio_url 立刻记下，下面同一拍 reconcile 就能起播，省去快照 GET 往返。
       const url = String(p.audio_url ?? "");
       const idx = Number(p.sentence_idx ?? NaN);
-      if (url && Number.isFinite(idx) && speechId && taskId) {
+      if (Number.isFinite(idx) && speechId && taskId) {
         const key = `${speechId}:${taskId}`;
-        if (eventChunksRef.current.key !== key) eventChunksRef.current = { key, map: new Map() };
-        eventChunksRef.current.map.set(idx, url);
+        if (url) {
+          if (eventChunksRef.current.key !== key) eventChunksRef.current = { key, map: new Map() };
+          eventChunksRef.current.map.set(idx, url);
+        } else if (p.skipped) {
+          if (eventSkipsRef.current.key !== key) eventSkipsRef.current = { key, set: new Set() };
+          eventSkipsRef.current.set.add(idx);
+        }
       }
     }
-    // tts.finished / speech.ended / speech.timeout 等无需特殊处理：useMatch 已在每个事件后重拉快照。
-    // tts.sentence_stream_started 完全忽略（live 流式已废弃）。
     runnerRef.current(nowEpoch());
-  }, [lastEvent]);
+  }, [lastEvent, setAudioEnabled]);
 
   // 触发器 3：1 秒看门狗——即便所有媒体事件都不触发，也能按时间强制推进，永不永久卡死。
   useEffect(() => {
@@ -286,6 +376,145 @@ export function usePlayback(
   }, []);
 
   return { unlock };
+}
+
+function detachHandlers(el: HTMLAudioElement): void {
+  el.onended = null;
+  el.onerror = null;
+  el.onplaying = null;
+  el.onwaiting = null;
+  el.onstalled = null;
+  el.oncanplay = null;
+}
+
+function detachAndStop(el: HTMLAudioElement): void {
+  detachHandlers(el);
+  try {
+    el.pause();
+  } catch {
+    /* ignore */
+  }
+  try {
+    el.removeAttribute("src");
+    el.load();
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearActiveAudio(
+  activeElRef: MutableRefObject<HTMLAudioElement | null>,
+  activeSegmentRef: MutableRefObject<string>,
+  playbackProgressRef: MutableRefObject<{ segment: string; currentTime: number; atMs: number }>
+): void {
+  const el = activeElRef.current;
+  if (el) detachAndStop(el);
+  activeElRef.current = null;
+  activeSegmentRef.current = "";
+  playbackProgressRef.current = { segment: "", currentTime: 0, atMs: 0 };
+}
+
+export function observeActiveAudioProgress(
+  now: number,
+  positionRef: MutableRefObject<PlaybackPosition>,
+  activeElRef: MutableRefObject<HTMLAudioElement | null>,
+  activeSegmentRef: MutableRefObject<string>,
+  playbackProgressRef: MutableRefObject<{ segment: string; currentTime: number; atMs: number }>,
+  mediaRef: MutableRefObject<ActiveMediaState>
+): boolean {
+  const pos = positionRef.current;
+  const el = activeElRef.current;
+  if (!el || pos.activeIdx == null || !pos.speechId || !pos.taskId) return false;
+  const segment = `${pos.speechId}:${pos.taskId}:${pos.activeIdx}`;
+  if (activeSegmentRef.current !== segment) return false;
+
+  if (el.ended) {
+    mediaRef.current = "ended";
+    return false;
+  }
+
+  const currentTime = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+  const previous = playbackProgressRef.current;
+  const advanced =
+    previous.segment === segment && currentTime > previous.currentTime + PLAYBACK_PROGRESS_EPSILON;
+  if (advanced) {
+    playbackProgressRef.current = { segment, currentTime, atMs: now };
+    if (!el.paused) mediaRef.current = "playing";
+    // 看门狗的基准是"最近一次真实播放进度"，不是分段开始时间。长句正常播放时不会被误跳。
+    positionRef.current = { ...positionRef.current, activeStartedMs: now };
+    return true;
+  }
+
+  if (previous.segment !== segment) {
+    playbackProgressRef.current = { segment, currentTime, atMs: now };
+  }
+
+  if (mediaRef.current === "playing" && el.paused) {
+    mediaRef.current = "stalled";
+  }
+  return false;
+}
+
+function maybeReportPlaybackHeartbeat(
+  now: number,
+  speech: PlaybackSpeech,
+  positionRef: MutableRefObject<PlaybackPosition>,
+  activeSegmentRef: MutableRefObject<string>,
+  playbackHeartbeatRef: MutableRefObject<{ segment: string; atMs: number }>,
+  mediaRef: MutableRefObject<ActiveMediaState>,
+  matchId: string
+): void {
+  const idx = positionRef.current.activeIdx;
+  if (idx == null || mediaRef.current !== "playing") return;
+  const segment = `${speech.speechId}:${speech.taskId}:${idx}`;
+  if (activeSegmentRef.current !== segment) return;
+  if (!shouldSendPlaybackHeartbeat(now, segment, playbackHeartbeatRef)) return;
+  void postWithRetry(
+    `/api/matches/${matchId}/speeches/${speech.speechId}/tts/playback-progress`,
+    {
+      task_id: speech.taskId,
+      sentence_idx: idx,
+      speaker_id: speech.speakerId,
+      status: "playing",
+    },
+    2,
+    250
+  );
+}
+
+export function shouldSendPlaybackHeartbeat(
+  now: number,
+  segment: string,
+  playbackHeartbeatRef: MutableRefObject<{ segment: string; atMs: number }>,
+  intervalMs = PLAYBACK_HEARTBEAT_MS
+): boolean {
+  const previous = playbackHeartbeatRef.current;
+  if (previous.segment === segment && now - previous.atMs < intervalMs) return false;
+  playbackHeartbeatRef.current = { segment, atMs: now };
+  return true;
+}
+
+export async function postWithRetry(
+  path: string,
+  body: object,
+  attempts = 4,
+  delayMs = 500,
+  sender: (path: string, body: object) => Promise<unknown> = post
+): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await sender(path, body);
+      return true;
+    } catch {
+      if (attempt >= attempts - 1) return false;
+      await sleep(delayMs * Math.max(1, attempt + 1));
+    }
+  }
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 function projectSpeech(snapshot: MatchSnapshot | null): PlaybackSpeech | null {
@@ -302,6 +531,7 @@ function projectSpeech(snapshot: MatchSnapshot | null): PlaybackSpeech | null {
     source: cs.source,
     state: String(cs.state ?? ""),
     expectedSentences: cs.tts_expected_sentences ?? null,
+    createdSentences: Number(cs.tts_created_sentences ?? 0),
     skippedSentences: (cs.tts_skipped_sentences ?? []).map((value) => Number(value)),
     chunks,
   };

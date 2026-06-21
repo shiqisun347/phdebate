@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -52,6 +53,7 @@ _timer_task: Optional[asyncio.Task] = None
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await start_timer_loop()
+    await store.resume_runtime_tasks()
     try:
         yield
     finally:
@@ -180,6 +182,21 @@ async def get_match(match_id: str, _principal: Principal = Depends(require_read_
     await _ensure_match(match_id)
     snapshot = await store.get_snapshot()
     return {"ok": True, "data": snapshot}
+
+
+@app.get("/api/version")
+async def get_version() -> Dict[str, Any]:
+    """当前部署的前端入口 bundle 文件名（含内容 hash）。供页面做版本守卫：旧标签页发现
+    与服务器不一致即自动整页刷新，杜绝"旧缓存 bundle 仍在跑"。无需鉴权（仅暴露文件名）。"""
+    bundle = ""
+    try:
+        html = FRONTEND_INDEX.read_text(encoding="utf-8")
+        match = re.search(r"/assets/(index-[A-Za-z0-9_]+\.js)", html)
+        if match:
+            bundle = match.group(1)
+    except OSError:
+        bundle = ""
+    return {"ok": True, "data": {"bundle": bundle}}
 
 
 @app.get("/api/current-match")
