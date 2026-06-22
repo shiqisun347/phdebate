@@ -524,6 +524,7 @@ function projectSpeech(snapshot: MatchSnapshot | null): PlaybackSpeech | null {
   const chunks = (asset?.chunks ?? [])
     .map((chunk) => ({ sentenceIdx: Number(chunk.chunk_index), audioUrl: String(chunk.audio_url ?? "") }))
     .filter((chunk) => Number.isFinite(chunk.sentenceIdx));
+  const skippedSentences = (cs.tts_skipped_sentences ?? []).map((value) => Number(value));
   return {
     speechId: cs.id,
     speakerId: cs.speaker_id,
@@ -532,9 +533,34 @@ function projectSpeech(snapshot: MatchSnapshot | null): PlaybackSpeech | null {
     state: String(cs.state ?? ""),
     expectedSentences: cs.tts_expected_sentences ?? null,
     createdSentences: Number(cs.tts_created_sentences ?? 0),
-    skippedSentences: (cs.tts_skipped_sentences ?? []).map((value) => Number(value)),
+    skippedSentences,
     chunks,
+    resumeIdx: computeResumeIdx(cs, skippedSentences),
   };
+}
+
+/**
+ * 续播起点：页面中途刷新时，从「首个既未播放、也未跳过的分段序号」继续，而不是从 0 重头开始。
+ * 后端权威记录已播分段（tts_played_sentence_indices）与跳过分段；正在播放但尚未播完的那一句
+ * 不在已播集合里，因此会从它的开头重新播放——即"接着讲"。全新发言时三者皆空，返回 0，行为不变。
+ */
+export function computeResumeIdx(cs: NonNullable<MatchSnapshot["current_speech"]>, skipped: number[]): number {
+  const resolved = new Set<number>();
+  (cs.tts_played_sentence_indices ?? []).forEach((v) => {
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) resolved.add(n);
+  });
+  skipped.forEach((n) => {
+    if (Number.isFinite(n) && n >= 0) resolved.add(n);
+  });
+  // 旧版仅有计数（无明细列表）时，把前 N 段视为已播。
+  if (!(cs.tts_played_sentence_indices ?? []).length) {
+    const count = Number(cs.tts_played_sentences ?? 0);
+    for (let i = 0; i < count; i += 1) resolved.add(i);
+  }
+  let idx = 0;
+  while (resolved.has(idx)) idx += 1;
+  return idx;
 }
 
 function nowEpoch(): number {

@@ -98,6 +98,11 @@ class MatchStore:
         self._connections: Set[WebSocket] = set()
         self._asr_streams: Dict[str, Any] = {}
         self._tts_grace_tasks: Dict[str, asyncio.Task] = {}
+        # 预取缓存：在空档提前生成 agent 文本 + 归档 TTS，进入该环节时直接促活（见 _prefetch_speech）。
+        # 键：自我介绍 `self_intro:{speaker_id}`；固定单人环节 `phase:{phase_id}:{speaker_id}`。
+        self._prepared_speeches: Dict[str, Dict[str, Any]] = {}
+        self._prefetch_inflight: Set[str] = set()
+        self._prefetch_counter = 0
         self.repo = SQLiteRepository()
         self.agent_gateway = AgentGateway()
         loaded = self.repo.load_snapshot()
@@ -121,6 +126,7 @@ class MatchStore:
         self.seq = 1842
         self.events: List[Dict[str, Any]] = []
         self._asr_streams = {}
+        self._clear_prepared_speeches()
         self.repo.clear_match_history("match_001")
         # 需求3：重置 demo 时清理多比赛注册表与非活动槽位，保证起点干净
         try:
@@ -787,6 +793,7 @@ class MatchStore:
             self.seq = 0
             self.events = []
             self._asr_streams = {}
+            self._clear_prepared_speeches()
             self.snapshot = new_snapshot
             self._persist_snapshot()
 
@@ -909,6 +916,7 @@ class MatchStore:
             self.seq = 0
             self.events = []
             self._asr_streams = {}
+            self._clear_prepared_speeches()
             self.snapshot = new_snapshot
             self._persist_snapshot()
             self._upsert_registry(self.snapshot)
@@ -924,6 +932,7 @@ class MatchStore:
                 if not target:
                     raise MatchStateError("match_not_found", "未找到该比赛，无法切换。", {"match_id": target_id})
                 self._stash_active()
+                self._clear_prepared_speeches()
                 self.snapshot = target
                 self.seq = int(target.get("last_seq", 0))
                 self._ensure_runtime_fields()
@@ -948,6 +957,7 @@ class MatchStore:
             self.repo.delete_app_state(self._match_slot_key(target_id))
             self.repo.clear_match_history(target_id)
             if is_active:
+                self._clear_prepared_speeches()
                 # 删除当前比赛：切到最近的其它比赛；没有了就回到"空白起步"（无比赛，须手动新建）。
                 remaining.sort(key=lambda m: m.get("created_at") or "", reverse=True)
                 nxt = next((m for m in remaining if self.repo.get_app_state(self._match_slot_key(str(m.get("id"))))), None)
@@ -1385,6 +1395,9 @@ class MatchStore:
                 self.snapshot["match"]["live_mode"] = live_mode
             self.snapshot["match"]["updated_at"] = iso_now()
             self._persist_snapshot()
+        # 进入「辩题介绍」即后台预取全部 agent 自我介绍，等到自我介绍阶段可直接促活播放。
+        if normalized_scene == "opening" and self._prefetch_enabled():
+            asyncio.create_task(self._prefetch_all_self_intros())
         return await self.emit("screen.scene_changed", {"scene": normalized_scene, "requested_scene": scene, "live_mode": live_mode}, "host")
 
     def _finalize_current_speech_for_history(self) -> None:
@@ -1600,6 +1613,13 @@ class MatchStore:
                 "该 Agent 配置已停用，不能触发发言。",
                 {"speaker_id": speaker_id, "agent_config_id": config.get("id")},
             )
+
+        # 提前预取命中：直接用缓存促活（音频已归档），不再实时调用 agent/TTS。
+        # 未命中/失效/被关闭则返回 None，原样走下面的 live 路径——零行为变化。
+        prepared = self._take_prepared_speech(speaker_id, mode)
+        if prepared is not None:
+            await self._activate_prepared_speech(prepared, speaker, is_self_intro)
+            return
 
         # Finalize any still-in-progress previous speech into history BEFORE building this
         # request's debate_history, so a speech that was interrupted (e.g. by a free-debate
@@ -2002,6 +2022,270 @@ class MatchStore:
 
     async def run_mock_agent_speech(self, speaker_id: str) -> None:
         await self.run_agent_speech(speaker_id)
+
+    # ======================= 预取（提前生成 + 缓存 agent 发言）=======================
+    # 设计见 plan：纯优化 + 优雅回退。预取把 agent 文本生成 + 逐句 TTS 归档提前做完并缓存；
+    # 进入该环节时 run_agent_speech 命中缓存即"促活"（不再调 agent/TTS），未命中则照旧走 live。
+
+    def _prefetch_enabled(self) -> bool:
+        return os.getenv("PHDEBATE_PREFETCH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+    def _prefetch_concurrency(self) -> int:
+        try:
+            n = int(os.getenv("PHDEBATE_PREFETCH_CONCURRENCY", "2"))
+        except ValueError:
+            n = 2
+        return max(1, min(n, 8))
+
+    def _clear_prepared_speeches(self) -> None:
+        self._prepared_speeches.clear()
+        self._prefetch_inflight.clear()
+
+    def _history_fingerprint(self) -> str:
+        raw = json.dumps(self._build_debate_history(), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _prepared_key(self, speaker_id: str, mode: str, phase_id: Optional[str]) -> str:
+        if mode == "self_intro":
+            return f"self_intro:{speaker_id}"
+        return f"phase:{phase_id}:{speaker_id}"
+
+    async def _prefetch_all_self_intros(self) -> None:
+        """进入「辩题介绍」场景时调用：限流预取全部 agent 的自我介绍（无 history 依赖，恒有效）。"""
+        if not self._prefetch_enabled():
+            return
+        async with self._lock:
+            if self.snapshot.get("current_speech"):
+                return  # 有发言进行中则不预取，避免干扰
+            if self.snapshot["match"]["status"] in {"finished", "archived"}:
+                return
+            speaker_ids = [s["id"] for s in self.snapshot.get("speakers", []) if s.get("speaker_type") == "agent"]
+        sem = asyncio.Semaphore(self._prefetch_concurrency())
+
+        async def _one(sid: str) -> None:
+            async with sem:
+                await self._prefetch_speech(sid, "self_intro")
+
+        await asyncio.gather(*(_one(sid) for sid in speaker_ids), return_exceptions=True)
+
+    async def _prefetch_speech(self, speaker_id: str, mode: str, target_phase: Optional[Dict[str, Any]] = None) -> None:
+        if not self._prefetch_enabled():
+            return
+        is_self_intro = mode == "self_intro"
+        try:
+            speaker = self._find_speaker(speaker_id)
+        except KeyError:
+            return
+        if speaker.get("speaker_type") != "agent":
+            return
+        config = self._agent_config_for_speaker(speaker)
+        if config and not config.get("enabled", True):
+            return
+        phase_id = None if is_self_intro else (target_phase or {}).get("id")
+        key = self._prepared_key(speaker_id, mode, phase_id)
+        if key in self._prefetch_inflight:
+            return
+        existing = self._prepared_speeches.get(key)
+        if existing and existing.get("status") in {"ready", "pending"}:
+            return
+        self._prefetch_inflight.add(key)
+        try:
+            await self._run_prefetch(speaker, mode, target_phase, key)
+        except Exception:  # noqa: BLE001 — 预取失败绝不能影响主流程；命中失败即回退 live。
+            entry = self._prepared_speeches.get(key)
+            if entry and entry.get("status") == "pending":
+                entry["status"] = "failed"
+        finally:
+            self._prefetch_inflight.discard(key)
+
+    async def _run_prefetch(self, speaker: Dict[str, Any], mode: str, target_phase: Optional[Dict[str, Any]], key: str) -> None:
+        is_self_intro = mode == "self_intro"
+        speaker_id = speaker["id"]
+        self._prefetch_counter += 1
+        speech_id = f"speech_prep_{self._prefetch_counter}"
+        task_id = f"task_prep_{self._prefetch_counter}"
+        if is_self_intro:
+            payload = self._build_self_intro_payload(task_id, speech_id, speaker)
+            history_fp: Optional[str] = None
+        else:
+            payload = self._build_agent_payload(task_id, speech_id, speaker, phase_override=target_phase)
+            history_fp = self._history_fingerprint()
+        endpoint = self.agent_gateway.endpoint_for(speaker)
+        config = self._agent_config_for_speaker(speaker)
+        tts_enabled = self._tts_formal_enabled()
+        # 占位（pending），避免并发重复预取同一键。
+        self._prepared_speeches[key] = {
+            "speech_id": speech_id,
+            "task_id": task_id,
+            "speaker_id": speaker_id,
+            "kind": "self_intro" if is_self_intro else "speech",
+            "phase_id": None if is_self_intro else (target_phase or {}).get("id"),
+            "full_text": "",
+            "expected_sentence_count": 0,
+            "skipped_sentences": [],
+            "status": "pending",
+            "history_fp": history_fp,
+            "created_at": iso_now(),
+        }
+
+        full_text = ""
+        tts_sent_chars = 0
+        tts_sentence_idx = 0
+        tts_sentence_tasks: List[asyncio.Task] = []
+        tts_semaphore = asyncio.Semaphore(self._tts_sentence_concurrency())
+
+        async def synth(sentence: str, idx: int) -> bool:
+            async with tts_semaphore:
+                return await self._synthesize_sentence_tts_with_timeout(sentence, idx, task_id, speech_id, speaker)
+
+        try:
+            async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
+                et = event.get("type")
+                if et == "delta":
+                    full_text += event.get("delta", "")
+                    if tts_enabled:
+                        while True:
+                            sentence, new_chars = self._next_tts_sentence(
+                                full_text, tts_sent_chars, allow_soft_break=tts_sentence_idx == 0
+                            )
+                            tts_sent_chars = new_chars
+                            if not sentence:
+                                break
+                            tts_sentence_tasks.append(asyncio.create_task(synth(sentence, tts_sentence_idx)))
+                            tts_sentence_idx += 1
+                elif et == "final":
+                    full_text = event.get("content", full_text)
+                    break
+        except AgentGatewayError:
+            entry = self._prepared_speeches.get(key)
+            if entry and entry.get("speech_id") == speech_id:
+                entry["status"] = "failed"
+            return
+
+        remaining_tail = full_text[tts_sent_chars:].strip()
+        if remaining_tail and tts_enabled:
+            tts_sentence_tasks.append(asyncio.create_task(synth(remaining_tail, tts_sentence_idx)))
+            tts_sentence_idx += 1
+        expected = tts_sentence_idx
+        if tts_sentence_tasks:
+            await asyncio.gather(*tts_sentence_tasks, return_exceptions=True)
+
+        # 用与 live 相同口径补齐缺口，得到最终 skipped 集合（[0,expected) 内未归档者）。
+        tmp_speech = {"id": speech_id, "tts_skipped_sentences": []}
+        self._reconcile_tts_gaps(tmp_speech, expected)
+        skipped = list(tmp_speech["tts_skipped_sentences"])
+
+        entry = self._prepared_speeches.get(key)
+        if not entry or entry.get("speech_id") != speech_id:
+            return  # 被清理/抢占，丢弃本次结果
+        entry.update(
+            {
+                "full_text": full_text,
+                "expected_sentence_count": expected,
+                "skipped_sentences": skipped,
+                "status": "ready",
+            }
+        )
+
+    def _take_prepared_speech(self, speaker_id: str, mode: str) -> Optional[Dict[str, Any]]:
+        """命中且有效则弹出缓存条目；否则返回 None（→ 走 live）。"""
+        if not self._prefetch_enabled():
+            return None
+        is_self_intro = mode == "self_intro"
+        phase_id = None if is_self_intro else self.snapshot["match"]["current_phase_id"]
+        key = self._prepared_key(speaker_id, mode, phase_id)
+        entry = self._prepared_speeches.get(key)
+        if not entry or entry.get("status") != "ready":
+            return None
+        if not is_self_intro and entry.get("history_fp") != self._history_fingerprint():
+            self._prepared_speeches.pop(key, None)  # 历史已变，缓存失效
+            return None
+        return self._prepared_speeches.pop(key)
+
+    async def _activate_prepared_speech(self, prepared: Dict[str, Any], speaker: Dict[str, Any], is_self_intro: bool) -> None:
+        """用缓存数据复刻 run_agent_speech 的状态落点（不调 agent/TTS）。音频已在预取时归档。"""
+        speaker_id = speaker["id"]
+        speech_id = prepared["speech_id"]
+        task_id = prepared["task_id"]
+        full_text = prepared.get("full_text", "")
+        expected = int(prepared.get("expected_sentence_count", 0))
+        skipped = list(prepared.get("skipped_sentences", []))
+        tts_enabled = self._tts_formal_enabled()
+        ready_count = max(0, expected - len(skipped))
+        all_tts_failed = bool(tts_enabled and expected > 0 and ready_count == 0)
+
+        # 先把仍在进行的上一段定稿（同 live run_agent_speech 开头）。
+        async with self._lock:
+            current = self.snapshot.get("current_speech")
+            if current and current.get("id") and current.get("speaker_id") != speaker_id:
+                self._finalize_current_speech_for_history()
+                self._persist_snapshot()
+
+        async with self._lock:
+            phase_id = self.snapshot["match"]["current_phase_id"]
+            self.snapshot["match"]["live_mode"] = "prep"
+            self._clear_flow_state()
+            speech = {
+                "id": speech_id,
+                "phase_id": phase_id,
+                "speaker_id": speaker_id,
+                "side": speaker["side"],
+                "turn_index": self._current_turn_index(),
+                "source": "agent_text",
+                "kind": "self_intro" if is_self_intro else "speech",
+                "content_final": full_text,
+                "content_partial": full_text,
+                "started_at": None,
+                "state": "thinking",
+                "tts_task_id": task_id if tts_enabled else None,
+                "tts_expected_sentences": expected if tts_enabled else 0,
+                "tts_created_sentences": expected,
+                "tts_ready_sentences": ready_count,
+                "tts_skipped_sentences": skipped,
+                "tts_played_sentence_indices": [],
+                "agent_final_ready": True,
+            }
+            self.snapshot["current_speech"] = speech
+            # 正式发言：文本即刻定稿入历史（与 live agent.speech.final 处一致）；
+            # 自我介绍：仅作非定稿展示，complete 时再排除出历史。
+            self._upsert_transcript_segment(speech, speaker_id, full_text, not is_self_intro, "agent_text")
+            if tts_enabled and not all_tts_failed:
+                self.snapshot["speech_service"]["tts"] = {
+                    "status": "playing",
+                    "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                    "queue_size": max(0, ready_count),
+                    "speaker_id": speaker_id,
+                    "detail": "prepared TTS playback pending",
+                    "last_progress_at": iso_now(),
+                }
+            self._set_agent_status(speaker_id, "streaming", "prepared speech activated")
+            self._persist_snapshot()
+
+        await self.emit(
+            "speaker.activated",
+            {"speaker_id": speaker_id, "side": speaker["side"], "speaker_type": "agent"},
+            "system",
+        )
+        await self.emit(
+            "agent.speech.final",
+            {"task_id": task_id, "speech_id": speech_id, "speaker_id": speaker_id, "content": full_text},
+            "agent",
+            speaker_id,
+        )
+        finished_payload = {
+            "task_id": task_id,
+            "speech_id": speech_id,
+            "speaker_id": speaker_id,
+            "expected_sentence_count": expected,
+        }
+        await self.emit("tts.finished", finished_payload, "system")
+        if all_tts_failed:
+            await self.complete_agent_playback(speech_id, task_id, reason="tts_failed")
+        elif not tts_enabled or expected == 0:
+            await self.start_agent_playback(speech_id, task_id, reason="text_only")
+            await self.complete_agent_playback(speech_id, task_id, reason="text_only")
+        else:
+            self._arm_tts_playback_grace(speech_id, task_id, expected)
 
     async def run_agent_command(self, speaker_id: str, command: str, prompt: str = "") -> Dict[str, Any]:
         speaker = self._find_speaker(speaker_id)
@@ -4648,7 +4932,9 @@ class MatchStore:
         phase_by_id = {p["id"]: p["name"] for p in self.snapshot["phases"]}
         ordered_phase_ids = [p["id"] for p in sorted(self.snapshot["phases"], key=lambda x: x["display_order"])]
         groups: Dict[str, list] = {}
-        for segment in self.snapshot.get("recent_transcript", []):
+        # recent_transcript 以"最新在前"存储；按时间正序（最早在前）分组，否则同一环节内多条发言
+        # （目前只有自由辩论会出现多条）会被倒序，导致 agent 收到的对话顺序反了——最新一句跑到最前。
+        for segment in reversed(self.snapshot.get("recent_transcript", [])):
             if not segment.get("valid", True) or not segment.get("is_final"):
                 continue
             if segment.get("exclude_from_history"):
@@ -4674,12 +4960,17 @@ class MatchStore:
         transcript of the active match."""
         return self._build_debate_history()
 
-    def _build_agent_payload(self, task_id: str, speech_id: str, speaker: Dict[str, Any]) -> Dict[str, Any]:
-        phase = self._current_phase()
+    def _build_agent_payload(
+        self, task_id: str, speech_id: str, speaker: Dict[str, Any], phase_override: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        # phase_override：用于"提前预取下一环节发言"——此时当前环节尚未切换，需按目标环节构建
+        # 角色/限时等字段。默认 None=当前环节，行为与原来完全一致。预取只用于固定单人环节。
+        phase = phase_override or self._current_phase()
         match = self.snapshot["match"]
         config = self._agent_config_for_speaker(speaker) or {}
         time_limit = self._free_turn_seconds(phase) if phase["phase_type"] == "free_debate" else phase["duration_seconds"]
-        clock = self._clock("turn" if phase["phase_type"] == "free_debate" else "main")
+        # 预取目标环节尚未开始，其计时器还没跑，剩余时间即满额限时。
+        clock = None if phase_override else self._clock("turn" if phase["phase_type"] == "free_debate" else "main")
         remaining_seconds = int((clock["remaining_ms"] if clock else time_limit * 1000) / 1000)
         next_phase = self._next_phase(phase)
         holder = "正方" if speaker["side"] == "affirmative" else "反方"
@@ -6643,6 +6934,32 @@ class MatchStore:
     def _clear_flow_state(self) -> None:
         self.snapshot["flow"] = self._fresh_flow_state()
 
+    def _schedule_next_phase_prefetch(self, phase: Dict[str, Any]) -> None:
+        """某段发言结束、等待主持进入下一环节时：若下一环节是固定单人 agent 发言，后台预取。
+        自由辩论（动态轮次）不预取。失败/无下一环节静默跳过。"""
+        if not self._prefetch_enabled():
+            return
+        nxt = self._next_phase(phase)
+        if not nxt or nxt.get("phase_type") == "free_debate":
+            return
+        designated = next(
+            (
+                s
+                for s in self.snapshot.get("speakers", [])
+                if s.get("side") == nxt.get("side")
+                and s.get("seat") == nxt.get("speaker_seat")
+                and s.get("speaker_type") == "agent"
+            ),
+            None,
+        )
+        if not designated:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.create_task(self._prefetch_speech(designated["id"], "speech", nxt))
+
     def _set_flow_waiting_for_timeout(
         self,
         phase: Dict[str, Any],
@@ -6679,6 +6996,8 @@ class MatchStore:
             }
         )
         self.snapshot["flow"] = flow
+        if next_action == "phase_next":
+            self._schedule_next_phase_prefetch(phase)
         return deepcopy(flow)
 
     def _set_flow_waiting_after_speech_end(self, speech: Dict[str, Any], speaker: Dict[str, Any], reason: str) -> Dict[str, Any]:
@@ -6711,6 +7030,8 @@ class MatchStore:
             }
         )
         self.snapshot["flow"] = flow
+        if next_action == "phase_next":
+            self._schedule_next_phase_prefetch(phase)
         return deepcopy(flow)
 
     def _invalidate_transcripts_from_order(self, target_order: int, reason: str) -> List[str]:

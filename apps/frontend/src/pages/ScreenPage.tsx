@@ -109,17 +109,21 @@ function ScreenView({ snapshot, audioEnabled, onToggleAudio }: { snapshot: Match
 }
 
 function ScreenChrome({ match }: { match: MatchInfo }) {
-  // 左上角=比赛名称（图片/文本，来自比赛管理，实时同步）；右上角=主办机构（图片/文本），
-  // 主办机构未设置时回退为主办方 logo。
-  const titleImage = match.title_display === "image" && match.title_image_url ? match.title_image_url : "";
+  // 左上角=比赛名称：logo 与文字可同时设置，logo 显示在文字左边（任一为空则只显示另一个）。
+  // 右上角=主办机构（图片/文本），主办机构未设置时回退为主办方 logo。
+  const titleLogo = match.title_image_url || "";
+  const titleText = match.title || "";
   const organizerImage = match.organizer_display === "image" && match.organizer_image_url ? match.organizer_image_url : "";
   return (
     <header className="screen-top">
-      {titleImage ? (
-        <img className="screen-event-logo" src={titleImage} alt={match.title || "比赛名称"} />
-      ) : (
-        <div className="screen-event-wordmark">{match.title || "人机辩论赛"}</div>
-      )}
+      <div className="screen-event-title">
+        {titleLogo && <img className="screen-event-logo" src={titleLogo} alt={titleText || "比赛 logo"} />}
+        {titleText ? (
+          <div className="screen-event-wordmark">{titleText}</div>
+        ) : (
+          !titleLogo && <div className="screen-event-wordmark">人机辩论赛</div>
+        )}
+      </div>
       {organizerImage ? (
         <img className="screen-event-logo" src={organizerImage} alt={match.organizer || "主办机构"} />
       ) : match.organizer ? (

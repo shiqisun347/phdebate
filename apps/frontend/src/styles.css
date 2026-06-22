@@ -763,6 +763,13 @@ textarea {
   height: 42px;
 }
 
+.screen-event-title {
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 0.9vw, 16px);
+  min-width: 0;
+}
+
 .screen-event-wordmark,
 .idle-wordmark {
   color: #f7fbff;
@@ -3518,12 +3525,26 @@ textarea {
   font-weight: 900;
 }
 
-.mic-button.start {
+/* 彩色 mic 按钮：必须比基础 button:hover 规则更具体，否则 hover/按下（触屏点击后 hover 会粘住）
+   会把渐变背景覆盖成灰色——这正是"该我发言了，放上去才变绿/掉色"的根因。这里让本色在 hover/active
+   时保持并提亮，给出反馈又不掉色。 */
+.mic-button.start,
+.mic-button.start:hover:not(:disabled) {
   background: linear-gradient(135deg, #168247, #29bc68);
+  border-color: rgba(120, 240, 170, 0.5);
+}
+.mic-button.start:hover:not(:disabled),
+.mic-button.start:active:not(:disabled) {
+  background: linear-gradient(135deg, #1b9b54, #34d77a);
 }
 
-.mic-button.stop {
+.mic-button.stop,
+.mic-button.stop:hover:not(:disabled) {
   background: linear-gradient(135deg, #b52d38, #ef5c63);
+}
+.mic-button.stop:hover:not(:disabled),
+.mic-button.stop:active:not(:disabled) {
+  background: linear-gradient(135deg, #c9333f, #ff6b72);
 }
 
 .mic-button.disabled {
@@ -3531,9 +3552,21 @@ textarea {
   cursor: not-allowed;
 }
 
+/* 跳过：可点击时用醒目的琥珀色（区别于灰色禁用态，提示"现在可以预点跳过"）。 */
 .mic-button.skip {
   min-height: 56px;
   font-size: 18px;
+  color: #2a1c00;
+  background: linear-gradient(135deg, #f3a52b, #ffc861);
+  border-color: rgba(255, 205, 120, 0.65);
+}
+.mic-button.skip:hover:not(:disabled),
+.mic-button.skip:active:not(:disabled) {
+  background: linear-gradient(135deg, #ffb13a, #ffd27a);
+}
+.mic-button.skip:disabled,
+.mic-button.skip.disabled {
+  color: #eef2f7;
   background: linear-gradient(135deg, #5a5f73, #828aa6);
 }
 

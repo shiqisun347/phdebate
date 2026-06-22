@@ -325,4 +325,25 @@ describe("reconcile — 仍在生成（expected=null）", () => {
     const lastWait = ds.filter((d) => d.kind === "WAIT").pop() as any;
     expect(lastWait.sentenceIdx).toBe(2);
   });
+
+  it("21. 刷新续播：resumeIdx>0 时从该段开始，而不是从 0 重头", () => {
+    // 模拟刷新：前 3 句已播完、第 3 句正在播；归档 4 段都在。续播应从 idx=3 开始。
+    const speech = mkSpeech({ expectedSentences: 4, chunks: chunks(0, 1, 2, 3), resumeIdx: 3 });
+    const ds = playToEnd(speech, { maxSteps: 20 });
+    expect(playedIdx(ds)).toEqual([3]); // 只播 3，不回放 0/1/2
+    expect(kinds(ds)).toContain("DONE");
+  });
+
+  it("21b. resumeIdx 缺省（全新发言）仍从 0 开始，行为不变", () => {
+    const ds = playToEnd(mkSpeech({ expectedSentences: 3, chunks: chunks(0, 1, 2) }), { maxSteps: 20 });
+    expect(playedIdx(ds)).toEqual([0, 1, 2]);
+    expect(kinds(ds)).toContain("DONE");
+  });
+
+  it("21c. resumeIdx 等于 expected：刷新时整段已播完 → 直接 DONE，不回放", () => {
+    const speech = mkSpeech({ expectedSentences: 3, chunks: chunks(0, 1, 2), resumeIdx: 3 });
+    const ds = playToEnd(speech, { maxSteps: 10 });
+    expect(playedIdx(ds)).toEqual([]);
+    expect(ds[0].kind).toBe("DONE");
+  });
 });

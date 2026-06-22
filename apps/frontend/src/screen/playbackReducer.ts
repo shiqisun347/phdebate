@@ -24,6 +24,9 @@ export interface PlaybackSpeech {
   createdSentences: number; // tts_created_sentences；已排入 TTS 队列，可对缺口做超时裁决
   skippedSentences: number[]; // tts_skipped_sentences
   chunks: PlaybackChunk[]; // 来自 audio_assets[].chunks
+  // 续播起点：页面中途刷新、首次绑定本段时从该序号继续（= 首个未播放/未跳过的句）。
+  // 默认 0；只有"刷新时该段已播了一部分"才会 > 0，因此全新发言行为与以前完全一致。
+  resumeIdx?: number;
 }
 
 export interface PlaybackPosition {
@@ -83,10 +86,11 @@ export function emptyPosition(): PlaybackPosition {
 }
 
 function seedFor(speech: PlaybackSpeech | null): PlaybackPosition {
+  const resume = speech && typeof speech.resumeIdx === "number" && speech.resumeIdx > 0 ? speech.resumeIdx : 0;
   return {
     speechId: speech ? speech.speechId : null,
     taskId: speech ? speech.taskId : null,
-    nextIdx: 0,
+    nextIdx: resume,
     activeIdx: null,
     activeStartedMs: null,
     waitingSinceMs: null,

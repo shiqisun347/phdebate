@@ -1511,6 +1511,129 @@ def test_xiaoqi_match_record_push(monkeypatch) -> None:
         xiaoqi_store.config.update(saved)
 
 
+# ============================ 预取（提前生成 + 缓存）============================
+
+def test_prefetch_self_intro_activation_uses_cache(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    monkeypatch.setenv("PHDEBATE_PREFETCH_ENABLED", "1")
+    _use_embedded_mock_agent("spk_aff_2")
+    store._clear_prepared_speeches()
+
+    # 1) 预取自我介绍 → 缓存就绪，使用独立 prep speech_id（绝不与 live speech_{seq} 撞）
+    asyncio.run(store._prefetch_speech("spk_aff_2", "self_intro"))
+    key = "self_intro:spk_aff_2"
+    entry = store._prepared_speeches.get(key)
+    assert entry and entry["status"] == "ready"
+    assert entry["speech_id"].startswith("speech_prep_")
+    assert entry["full_text"]
+
+    # 2) 促活：run_agent_speech 命中缓存，绝不再发起 live agent 生成
+    called = {"n": 0}
+    orig_stream = store.agent_gateway.stream_speech
+
+    def spy(*args, **kwargs):
+        called["n"] += 1
+        return orig_stream(*args, **kwargs)
+
+    monkeypatch.setattr(store.agent_gateway, "stream_speech", spy)
+    asyncio.run(store.run_agent_speech("spk_aff_2", mode="self_intro"))
+    assert called["n"] == 0  # 未触发任何 live 生成
+    assert key not in store._prepared_speeches  # 缓存已被消费
+    store._clear_prepared_speeches()
+
+
+def test_prefetch_phase_history_fingerprint_invalidation(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    monkeypatch.setenv("PHDEBATE_PREFETCH_ENABLED", "1")
+    _use_embedded_mock_agent("spk_aff_2")
+    store._clear_prepared_speeches()
+    saved_phase = store.snapshot["match"]["current_phase_id"]
+    phase = next(p for p in store.snapshot["phases"] if p["id"] == "phase_aff_statement_2")
+    key = "phase:phase_aff_statement_2:spk_aff_2"
+
+    try:
+        # 预取固定单人环节发言 → 就绪
+        asyncio.run(store._prefetch_speech("spk_aff_2", "speech", phase))
+        assert store._prepared_speeches[key]["status"] == "ready"
+
+        # 当前环节=目标环节、history 未变 → 命中（返回缓存条目）
+        store.snapshot["match"]["current_phase_id"] = "phase_aff_statement_2"
+        taken = store._take_prepared_speech("spk_aff_2", "speech")
+        assert taken is not None and taken["speech_id"].startswith("speech_prep_")
+
+        # 重新预取后改变 debate_history → fingerprint 不匹配 → 回退 live（None）+ 丢弃失效条目
+        asyncio.run(store._prefetch_speech("spk_aff_2", "speech", phase))
+        assert store._prepared_speeches[key]["status"] == "ready"
+        store.snapshot.setdefault("recent_transcript", []).append(
+            {
+                "id": "seg_fp_test", "speech_id": "sp_fp_test", "phase_id": "phase_aff_constructive_1",
+                "speaker_id": "spk_aff_1", "side": "affirmative", "text": "历史变化测试",
+                "valid": True, "is_final": True,
+            }
+        )
+        assert store._take_prepared_speech("spk_aff_2", "speech") is None
+        assert key not in store._prepared_speeches
+    finally:
+        store.snapshot["match"]["current_phase_id"] = saved_phase
+        store.snapshot["recent_transcript"] = [
+            s for s in store.snapshot.get("recent_transcript", []) if s.get("id") != "seg_fp_test"
+        ]
+        store._clear_prepared_speeches()
+
+
+def test_prefetch_schedule_skips_free_debate_but_covers_single_speaker(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_PREFETCH_ENABLED", "1")
+    calls: list = []
+
+    async def fake_prefetch(speaker_id, mode, target_phase=None):
+        calls.append((speaker_id, mode, (target_phase or {}).get("id")))
+
+    monkeypatch.setattr(store, "_prefetch_speech", fake_prefetch)
+    before_free = next(p for p in store.snapshot["phases"] if p["id"] == "phase_neg_statement_3")  # next = free_debate
+    before_single = next(p for p in store.snapshot["phases"] if p["id"] == "phase_aff_constructive_1")  # next = neg_constructive_1
+
+    async def run() -> None:
+        store._schedule_next_phase_prefetch(before_free)    # 下一是自由辩论 → 不预取
+        store._schedule_next_phase_prefetch(before_single)  # 下一是固定单人 agent → 预取
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert all(c[2] != "phase_free_debate" for c in calls)
+    assert ("spk_neg_1", "speech", "phase_neg_constructive_1") in calls
+
+
+def test_prefetch_disabled_falls_back_to_live(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_PREFETCH_ENABLED", "0")
+    store._clear_prepared_speeches()
+    asyncio.run(store._prefetch_all_self_intros())
+    assert store._prepared_speeches == {}
+    # 关闭时即便缓存里有条目，take 也返回 None（彻底回退 live）
+    store._prepared_speeches["self_intro:spk_aff_2"] = {"status": "ready", "speech_id": "speech_prep_x"}
+    assert store._take_prepared_speech("spk_aff_2", "self_intro") is None
+    store._clear_prepared_speeches()
+
+
+def test_debate_history_multi_message_phase_is_chronological() -> None:
+    # 回归：自由辩论同一环节多条发言，必须按时间正序（最早在前）进入 debate_history。
+    # recent_transcript 以"最新在前"存储——若不翻转，agent 会收到倒序的对话（最新一句跑到最前）。
+    saved = store.snapshot.get("recent_transcript")
+    try:
+        store.snapshot["recent_transcript"] = [
+            {"id": "seg_C", "speech_id": "C", "phase_id": "phase_free_debate", "speaker_id": "spk_neg_1",
+             "text": "第三句·最新", "valid": True, "is_final": True},
+            {"id": "seg_B", "speech_id": "B", "phase_id": "phase_free_debate", "speaker_id": "spk_aff_2",
+             "text": "第二句", "valid": True, "is_final": True},
+            {"id": "seg_A", "speech_id": "A", "phase_id": "phase_free_debate", "speaker_id": "spk_neg_1",
+             "text": "第一句·最早", "valid": True, "is_final": True},
+        ]
+        history = store._build_debate_history()
+        free = next(st for st in history if st["stage"] == "自由辩论")
+        assert [m["content"] for m in free["message"]] == ["第一句·最早", "第二句", "第三句·最新"]
+    finally:
+        store.snapshot["recent_transcript"] = saved
+
+
 def test_xiaoqi_store_prunes_deprecated_keys(tmp_path, monkeypatch) -> None:
     import app.services.xiaoqi_store as xs
 

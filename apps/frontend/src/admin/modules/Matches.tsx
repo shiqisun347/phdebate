@@ -296,7 +296,6 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     negative_position: m.negative_position,
     venue: m.venue,
   });
-  const [titleDisplay, setTitleDisplay] = React.useState<BrandDisplay>(m.title_display ?? "text");
   const [organizerDisplay, setOrganizerDisplay] = React.useState<BrandDisplay>(m.organizer_display ?? "text");
   const [saving, setSaving] = React.useState(false);
   const setB = <K extends keyof Base>(k: K, v: Base[K]) => setBase((p) => ({ ...p, [k]: v }));
@@ -304,7 +303,8 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
   async function save() {
     setSaving(true);
     try {
-      await patch(`/api/matches/${matchId}`, { ...base, title_display: titleDisplay, organizer_display: organizerDisplay });
+      // 比赛名称：文本与 logo 同时生效（logo 经上传/移除独立保存）；title_image_url 非空时大屏显示 logo+文字。
+      await patch(`/api/matches/${matchId}`, { ...base, title_display: m.title_image_url ? "image" : "text", organizer_display: organizerDisplay });
       toast("已保存", "success");
       await onSaved();
     } catch (err) {
@@ -317,12 +317,21 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
   async function uploadImage(kind: "title" | "organizer", file: File) {
     try {
       await uploadMatchImage(matchId, kind, file);
-      if (kind === "title") setTitleDisplay("image");
-      else setOrganizerDisplay("image");
+      if (kind === "organizer") setOrganizerDisplay("image");
       await refresh();
       toast("图片已上传", "success");
     } catch (err) {
       toast(err instanceof Error ? err.message : "上传失败", "error");
+    }
+  }
+
+  async function removeTitleLogo() {
+    try {
+      await patch(`/api/matches/${matchId}`, { title_image_url: "", title_display: "text" });
+      await refresh();
+      toast("已移除 logo", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "移除失败", "error");
     }
   }
 
@@ -331,15 +340,14 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
       <DialogHeader title="编辑比赛基础信息" description="仅当前比赛可编辑，保存后实时同步到大屏" onClose={onClose} />
       <DialogBody>
         <div className="grid gap-4 sm:grid-cols-2">
-          <BrandField
+          <TitleLogoField
             label="比赛名称"
-            hint="显示于大屏左上角"
-            mode={titleDisplay}
-            onModeChange={setTitleDisplay}
+            hint="名称与 logo 可同时设置，大屏左上角 logo 显示在名称左侧（任一留空则只显示另一个）"
             text={base.title}
             onTextChange={(v) => setB("title", v)}
-            imageUrl={m.title_image_url}
+            logoUrl={m.title_image_url}
             onUpload={(file) => uploadImage("title", file)}
+            onRemove={removeTitleLogo}
           />
           <BrandField
             label="主办机构"
@@ -431,6 +439,62 @@ function BrandField({
           </Button>
         </div>
       )}
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
+  );
+}
+
+/** 比赛名称：文本 + logo 同时可设置（不是二选一）；大屏上 logo 显示在文字左边。 */
+function TitleLogoField({
+  label,
+  hint,
+  text,
+  onTextChange,
+  logoUrl,
+  onUpload,
+  onRemove,
+}: {
+  label: string;
+  hint?: string;
+  text: string;
+  onTextChange: (value: string) => void;
+  logoUrl?: string;
+  onUpload: (file: File) => void | Promise<void>;
+  onRemove: () => void | Promise<void>;
+}) {
+  const fileRef = React.useRef<HTMLInputElement>(null);
+  return (
+    <div className="space-y-1.5">
+      <Label>{label}</Label>
+      <Input value={text} onChange={(e) => onTextChange(e.target.value)} placeholder="比赛名称（可与 logo 同时显示）" />
+      <div className="flex items-center gap-3 rounded-md border border-border p-2">
+        {logoUrl ? (
+          <img src={logoUrl} alt={`${label} logo`} className="max-h-12 rounded object-contain" />
+        ) : (
+          <span className="text-xs text-muted-foreground">未设置 logo（可选，显示在名称左侧）</span>
+        )}
+        <div className="ml-auto flex shrink-0 gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void onUpload(file);
+              e.target.value = "";
+            }}
+          />
+          <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}>
+            <Upload /> {logoUrl ? "更换 logo" : "上传 logo"}
+          </Button>
+          {logoUrl && (
+            <Button size="sm" variant="outline" onClick={() => void onRemove()}>
+              移除
+            </Button>
+          )}
+        </div>
+      </div>
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
   );

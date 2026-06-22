@@ -1,11 +1,36 @@
 import { describe, expect, it } from "vitest";
 import {
   clearActiveAudio,
+  computeResumeIdx,
   observeActiveAudioProgress,
   postWithRetry,
   shouldSendPlaybackHeartbeat,
 } from "./usePlayback";
 import type { ActiveMediaState, PlaybackPosition } from "./playbackReducer";
+import type { MatchSnapshot } from "../types/contracts";
+
+type CS = NonNullable<MatchSnapshot["current_speech"]>;
+function mkCS(over: Partial<CS> = {}): CS {
+  return { id: "S1", speaker_id: "spk_aff_1", source: "agent_text", ...(over as object) } as CS;
+}
+
+describe("computeResumeIdx (刷新续播起点)", () => {
+  it("全新发言（无任何进度）→ 0", () => {
+    expect(computeResumeIdx(mkCS(), [])).toBe(0);
+  });
+  it("已播 [0,1,2]、正在播 3 → 从 3 续播（不回放 0/1/2）", () => {
+    expect(computeResumeIdx(mkCS({ tts_played_sentence_indices: [0, 1, 2], tts_playing_sentence_idx: 3 }), [])).toBe(3);
+  });
+  it("已播 [0,1,2,3]（含当前段已播完）→ 续到 4", () => {
+    expect(computeResumeIdx(mkCS({ tts_played_sentence_indices: [0, 1, 2, 3] }), [])).toBe(4);
+  });
+  it("中间段被跳过也算已解决：已播 [0,1] + 跳过 [2] → 续到 3", () => {
+    expect(computeResumeIdx(mkCS({ tts_played_sentence_indices: [0, 1] }), [2])).toBe(3);
+  });
+  it("旧版仅有计数 tts_played_sentences=2（无明细）→ 续到 2", () => {
+    expect(computeResumeIdx(mkCS({ tts_played_sentences: 2 }), [])).toBe(2);
+  });
+});
 
 function ref<T>(current: T): { current: T } {
   return { current };
