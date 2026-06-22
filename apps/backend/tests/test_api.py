@@ -704,7 +704,7 @@ def test_current_match_reset_archives_old_match_and_keeps_export_downloadable() 
     assert summary_data["recent_events"][0]["match_id"] == data["match"]["id"]
 
 
-def test_start_match_from_ready_switches_from_idle_to_live_and_resumes_clock() -> None:
+def test_start_match_from_ready_goes_live_but_does_not_auto_start_clock() -> None:
     reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
     assert reset.status_code == 200
     reset_data = reset.json()["data"]
@@ -718,8 +718,23 @@ def test_start_match_from_ready_switches_from_idle_to_live_and_resumes_clock() -
     assert data["match"]["status"] == "running"
     assert data["match"]["screen_scene"] == "live"
     assert data["clocks"][0]["name"] == "main"
-    assert data["clocks"][0]["state"] == "running"
-    assert data["clocks"][0]["deadline_at"]
+    # 「开始比赛」不再自动起钟：倒计时要等发言人点「开始发言」（或 AI 首次播报）才开始。
+    assert data["clocks"][0]["state"] == "paused"
+    assert not data["clocks"][0]["deadline_at"]
+
+
+def test_match_clock_starts_only_when_speaker_starts_speaking() -> None:
+    client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
+    client.post("/api/matches/current/start")
+    # 开始比赛后主钟仍暂停（不自动倒计时）。
+    snap = client.get("/api/matches/current").json()["data"]
+    main = next(c for c in snap["clocks"] if c["name"] == "main")
+    assert main["state"] == "paused" and not main["deadline_at"]
+    # 正方一辩（人类）点「开始发言」后，主钟才开始走。
+    started = client.post("/api/matches/current/speakers/spk_aff_1/start-speaking")
+    assert started.status_code == 200, started.text
+    main2 = next(c for c in started.json()["data"]["clocks"] if c["name"] == "main")
+    assert main2["state"] == "running" and main2["deadline_at"]
 
 
 def test_begin_match_alias_supports_host_browser_start_flow() -> None:
@@ -2173,10 +2188,11 @@ def test_free_debate_decision_timeout_triggers_agent(monkeypatch) -> None:
     assert summary["event_type_counts"].get("free_debate.auto_agent", 0) >= 1
 
 
-def test_free_debate_decision_window_defaults_to_two_seconds(monkeypatch) -> None:
+def test_free_debate_decision_window_defaults_to_five_seconds(monkeypatch) -> None:
+    # 自由辩论给人留 5s 抢麦时间（超时/全预跳过才由随机 AI 接管）。
     monkeypatch.delenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", raising=False)
     asyncio.run(store.start_phase("phase_free_debate"))
-    assert store._free_debate_decision_seconds() == 2.0
+    assert store._free_debate_decision_seconds() == 5.0
 
 
 def test_free_debate_speech_end_auto_advances_without_host_confirm(monkeypatch) -> None:
@@ -3607,6 +3623,31 @@ def test_patch_speech_rejects_missing_speech() -> None:
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "speech_not_found"
+
+
+def test_archive_recognition_authoritative_even_after_realtime_completed(monkeypatch) -> None:
+    # 现场反馈「ASR 只转录一部分」：实时流按 HTTP 分片【到达顺序】喂给 ASR，长发言并发上传易乱序/丢失
+    # → 终稿不全。修复后即便实时流已 completed，也要用按 chunk_index 顺序拼接的完整归档做一次批量识别
+    # 作为权威终稿（仅 PCM/L16）。本用例锁定该判定：completed 不再跳过自动批量识别。
+    monkeypatch.setenv("PHDEBATE_ASR_AUTO_RECOGNIZE", "1")
+    saved = store.snapshot.get("audio_assets")
+    try:
+        store.snapshot["audio_assets"] = [
+            {
+                "id": "aud_asr_t",
+                "speech_id": "sp_asr_t",
+                "speaker_id": "spk_aff_1",
+                "mime_type": "audio/L16;rate=16000",
+                "asr_realtime_status": "completed",
+                "chunks": [{"chunk_index": 0, "file_path": "/tmp/x.pcm", "audio_url": "/x"}],
+            }
+        ]
+        assert asyncio.run(store.should_auto_recognize_audio_archive("sp_asr_t")) is True
+        # webm（非 PCM）仍不在此重识别（保持实时结果）。
+        store.snapshot["audio_assets"][0]["mime_type"] = "audio/webm;codecs=opus"
+        assert asyncio.run(store.should_auto_recognize_audio_archive("sp_asr_t")) is False
+    finally:
+        store.snapshot["audio_assets"] = saved
 
 
 def test_asr_failure_sets_degraded_status_without_stopping_match() -> None:

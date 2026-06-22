@@ -120,13 +120,6 @@ function withProviderDefaults(kind: "asr" | "tts", provider: SpeechProvider, cur
   };
 }
 
-function voiceOptions(provider: string, currentVoice?: string) {
-  const base = provider === "xfyun" ? XFYUN_VOICES : ALICLOUD_VOICES;
-  if (currentVoice && !base.some((item) => item.voice === currentVoice)) {
-    return [{ voice: currentVoice, label: currentVoice }, ...base];
-  }
-  return base;
-}
 
 function configured(section: IntegrationSection, provider: "xfyun" | "alicloud", key: "app_id" | "api_key" | "api_secret" | "workspace_id") {
   if (provider === "xfyun") {
@@ -417,8 +410,18 @@ function VoicePresetManager({
     [config.tts.provider, config.tts.settings]
   );
   const [editing, setEditing] = React.useState<VoicePreset | null>(null);
+  // 自定义音色：除内置预设外，允许直接输入服务商的音色 ID（如复刻音色 / 其它官方发音人）。
+  const [customVoice, setCustomVoice] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const visiblePresets = config.voice_presets.filter((preset) => preset.provider === config.tts.provider);
+  const baseVoices = config.tts.provider === "xfyun" ? XFYUN_VOICES : ALICLOUD_VOICES;
+  const isBaseVoice = (voice: string) => baseVoices.some((item) => item.voice === voice);
+
+  function openEditor(preset: VoicePreset | null) {
+    const next = preset ?? blank;
+    setEditing(next);
+    setCustomVoice(Boolean(next.voice) && !isBaseVoice(next.voice));
+  }
 
   async function savePreset() {
     if (!editing?.name.trim() || !editing.voice.trim()) {
@@ -471,7 +474,7 @@ function VoicePresetManager({
             <CardTitle>音色预设库</CardTitle>
             <CardDescription>辩手管理只能从这里已启用的预设中选择。</CardDescription>
           </div>
-          <Button size="sm" onClick={() => setEditing(blank)}>
+          <Button size="sm" onClick={() => openEditor(null)}>
             <Plus /> 新建音色
           </Button>
         </div>
@@ -498,7 +501,7 @@ function VoicePresetManager({
                   size="sm"
                   variant="outline"
                   onClick={() =>
-                    setEditing({
+                    openEditor({
                       ...blank,
                       ...preset,
                       provider: config.tts.provider,
@@ -526,12 +529,32 @@ function VoicePresetManager({
               <Field label="名称" value={editing.name} onChange={(value) => setEditing({ ...editing, name: value })} />
               <div className="space-y-1.5">
                 <Label>音色</Label>
-                <Select value={editing.voice} onChange={(event) => setEditing({ ...editing, voice: event.target.value })}>
+                <Select
+                  value={customVoice ? "__custom__" : editing.voice}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "__custom__") {
+                      setCustomVoice(true);
+                      if (isBaseVoice(editing.voice)) setEditing({ ...editing, voice: "" });
+                    } else {
+                      setCustomVoice(false);
+                      setEditing({ ...editing, voice: value });
+                    }
+                  }}
+                >
                   <option value="">请选择音色…</option>
-                  {voiceOptions(config.tts.provider, editing.voice).map((item) => (
+                  {baseVoices.map((item) => (
                     <option key={item.voice} value={item.voice}>{item.label}</option>
                   ))}
+                  <option value="__custom__">✎ 自定义音色…</option>
                 </Select>
+                {customVoice && (
+                  <Input
+                    value={editing.voice}
+                    onChange={(event) => setEditing({ ...editing, voice: event.target.value })}
+                    placeholder={config.tts.provider === "xfyun" ? "讯飞发音人 ID，如 x4_xxx" : "阿里云音色 ID，如 voice-xxxx（含复刻音色）"}
+                  />
+                )}
               </div>
               <div className="space-y-1.5">
                 <Label>服务商</Label>

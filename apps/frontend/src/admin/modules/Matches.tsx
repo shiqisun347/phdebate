@@ -297,6 +297,10 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     venue: m.venue,
   });
   const [organizerDisplay, setOrganizerDisplay] = React.useState<BrandDisplay>(m.organizer_display ?? "text");
+  const affTeam = snapshot!.teams.find((t) => t.side === "affirmative");
+  const negTeam = snapshot!.teams.find((t) => t.side === "negative");
+  const [affTeamName, setAffTeamName] = React.useState(affTeam?.name ?? "");
+  const [negTeamName, setNegTeamName] = React.useState(negTeam?.name ?? "");
   const [saving, setSaving] = React.useState(false);
   const setB = <K extends keyof Base>(k: K, v: Base[K]) => setBase((p) => ({ ...p, [k]: v }));
 
@@ -305,6 +309,13 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     try {
       // 比赛名称：文本与 logo 同时生效（logo 经上传/移除独立保存）；title_image_url 非空时大屏显示 logo+文字。
       await patch(`/api/matches/${matchId}`, { ...base, title_display: m.title_image_url ? "image" : "text", organizer_display: organizerDisplay });
+      // 战队名字（与立场分开）：仅在改动时更新对应战队。
+      if (affTeam && affTeamName.trim() && affTeamName.trim() !== affTeam.name) {
+        await patch(`/api/matches/${matchId}/teams/${affTeam.id}`, { name: affTeamName.trim() });
+      }
+      if (negTeam && negTeamName.trim() && negTeamName.trim() !== negTeam.name) {
+        await patch(`/api/matches/${matchId}/teams/${negTeam.id}`, { name: negTeamName.trim() });
+      }
       toast("已保存", "success");
       await onSaved();
     } catch (err) {
@@ -361,6 +372,8 @@ function EditBaseDialog({ onClose, onSaved }: { onClose: () => void; onSaved: ()
           />
           <Field label="辩题"><Input value={base.topic} onChange={(e) => setB("topic", e.target.value)} /></Field>
           <Field label="场地"><Input value={base.venue} onChange={(e) => setB("venue", e.target.value)} /></Field>
+          <Field label="正方战队名" hint="同步到大屏正方战队名"><Input value={affTeamName} onChange={(e) => setAffTeamName(e.target.value)} placeholder="如：智码战队" /></Field>
+          <Field label="反方战队名" hint="同步到大屏反方战队名"><Input value={negTeamName} onChange={(e) => setNegTeamName(e.target.value)} placeholder="如：问道战队" /></Field>
           <Field label="正方立场" hint="同步到大屏正方立场"><Input value={base.affirmative_position} onChange={(e) => setB("affirmative_position", e.target.value)} /></Field>
           <Field label="反方立场" hint="同步到大屏反方立场"><Input value={base.negative_position} onChange={(e) => setB("negative_position", e.target.value)} /></Field>
         </div>

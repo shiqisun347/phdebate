@@ -191,7 +191,9 @@ async def get_version() -> Dict[str, Any]:
     bundle = ""
     try:
         html = FRONTEND_INDEX.read_text(encoding="utf-8")
-        match = re.search(r"/assets/(index-[A-Za-z0-9_]+\.js)", html)
+        # Vite 内容 hash 是 base64url，可能含 `-`/`_`，字符类必须包含 `-`，否则带连字符的 hash
+        # （如 index-Cu-AY6EQ.js）匹配不到 → 版本号为空 → 版本守卫失效（旧缓存不再自动刷新）。
+        match = re.search(r"/assets/(index-[A-Za-z0-9_-]+\.js)", html)
         if match:
             bundle = match.group(1)
     except OSError:

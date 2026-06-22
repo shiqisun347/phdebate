@@ -31,6 +31,9 @@ type RuntimeScreenScene =
 export function ScreenPage({ matchId }: ScreenPageProps) {
   const { snapshot, loadError, lastEvent } = useMatch(matchId, "screen");
   const [audioEnabled, setAudioEnabled] = useState(() => window.localStorage.getItem("phdebate_screen_audio_enabled") === "1");
+  // 本次页面加载是否已通过「点击手势」解锁音频。浏览器自动播放策略要求每次加载都需一次手势，
+  // localStorage 里的开关状态会跨刷新保留，但手势解锁不会 —— 因此用独立的会话级状态跟踪。
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
 
   useEffect(() => {
     window.localStorage.setItem("phdebate_screen_audio_enabled", audioEnabled ? "1" : "0");
@@ -44,7 +47,17 @@ export function ScreenPage({ matchId }: ScreenPageProps) {
   const toggleAudio = () => {
     const next = !audioEnabled;
     setAudioEnabled(next);
-    if (next) unlock();
+    if (next) {
+      unlock();
+      setAudioUnlocked(true);
+    }
+  };
+
+  // 全屏遮罩：开关为「开」但本次加载尚未手势解锁 → 引导操作员开赛前先点一次，避免第一段被浏览器拦截。
+  const enableAudioFromGate = () => {
+    setAudioEnabled(true);
+    unlock();
+    setAudioUnlocked(true);
   };
 
   // 打铃提示音（与 TTS 播放无关，独立处理）。

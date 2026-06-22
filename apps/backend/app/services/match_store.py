@@ -1023,16 +1023,31 @@ class MatchStore:
             self.snapshot["match"]["status"] = status
             self.snapshot["match"]["updated_at"] = iso_now()
             if status == "paused":
+                # 记录此刻"正在走"的钟，恢复时只重启这些——避免把"尚未开始的环节钟"也一起起跑。
+                self._refresh_clocks()
+                self.snapshot["match"]["resume_clock_ids"] = [
+                    c["id"] for c in self.snapshot["clocks"] if c.get("state") == "running"
+                ]
                 self._pause_running_clocks()
                 self.snapshot["match"]["screen_scene"] = "paused"
             elif status == "running":
-                self._resume_paused_clocks()
+                # 仅恢复暂停前正在走的钟；初次「开始比赛」时没有待恢复的钟 → 不自动起跑，
+                # 倒计时要等发言人点「开始发言」（或 AI 首次播报）才开始（_start_relevant_clocks）。
+                resume_ids = self.snapshot["match"].pop("resume_clock_ids", None)
+                if resume_ids:
+                    self._resume_clocks_by_id(resume_ids)
                 if self.snapshot["match"].get("screen_scene") in {"idle", "paused"}:
                     self.snapshot["match"]["screen_scene"] = "live"
             elif status in {"finished", "intervention"}:
+                if status == "intervention":
+                    self._refresh_clocks()
+                    self.snapshot["match"]["resume_clock_ids"] = [
+                        c["id"] for c in self.snapshot["clocks"] if c.get("state") == "running"
+                    ]
                 self._pause_running_clocks()
                 self._clear_flow_state()
                 if status == "finished":
+                    self.snapshot["match"].pop("resume_clock_ids", None)
                     self.snapshot["vote_state"]["window_status"] = "closed"
             self._persist_snapshot()
         event_type = {
@@ -2028,7 +2043,10 @@ class MatchStore:
     # 进入该环节时 run_agent_speech 命中缓存即"促活"（不再调 agent/TTS），未命中则照旧走 live。
 
     def _prefetch_enabled(self) -> bool:
-        return os.getenv("PHDEBATE_PREFETCH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+        # 默认关闭：预取的"促活"路径不发 tts.sentence_ready，大屏缺少出声快路触发；且未命中缓存时
+        # 孤儿预取会与 live 发言并发生成、加倍 TTS 服务商负载导致 live 句子合成失败/不出声。
+        # 修好这两点（促活重发 sentence_ready + live 启动时取消同人在途预取）前先关掉，避免影响现场。
+        return os.getenv("PHDEBATE_PREFETCH_ENABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
 
     def _prefetch_concurrency(self) -> int:
         try:
@@ -2909,8 +2927,11 @@ class MatchStore:
             return False
         async with self._lock:
             asset = self._audio_asset_for_speech(speech_id)
-            if asset and asset.get("asr_realtime_status") == "completed":
-                return False
+            # 始终用"完整、按 chunk_index 顺序"的归档音频做一次批量识别作为权威终稿。
+            # 实时流是按 HTTP 分片【到达顺序】喂给 ASR 的，长发言下分片并发上传可能乱序/丢失，
+            # 导致实时转写只覆盖一部分内容（现场反馈"只转录一部分"）。归档批量识别按序拼接整段
+            # 音频一次性识别，最稳，故不再因"实时流已完成"而跳过。仅 PCM/L16 可直接识别；
+            # webm 回退（少数浏览器无 PCM 采集）保持实时结果，不在此重识别。
             return bool(asset and self._asr_supported_audio_mime(str(asset.get("mime_type") or "")))
 
     async def auto_recognize_audio_archive(self, speech_id: str) -> None:
@@ -6374,10 +6395,12 @@ class MatchStore:
                 clock["state"] = "paused"
                 clock["deadline_at"] = None
 
-    def _resume_paused_clocks(self) -> None:
+    def _resume_clocks_by_id(self, clock_ids: List[str]) -> None:
+        """只恢复指定 id 的钟（暂停/应急前正在走的那些）。"""
         now = utc_now()
+        idset = {str(cid) for cid in clock_ids}
         for clock in self.snapshot["clocks"]:
-            if clock["state"] == "paused" and clock["remaining_ms"] > 0:
+            if clock.get("id") in idset and clock["state"] == "paused" and clock["remaining_ms"] > 0:
                 clock["state"] = "running"
                 clock["deadline_at"] = to_iso(now + timedelta(milliseconds=clock["remaining_ms"]))
 
@@ -7220,8 +7243,8 @@ class MatchStore:
         return int(phase.get("turn_seconds") or 30)
 
     def _free_debate_decision_seconds(self, phase: Optional[Dict[str, Any]] = None) -> float:
-        # 需求 5.md：一方说完后，本方人类有 2s 决定窗口（点开始发言），超时（或全部预跳过）则随机 AI 接管。
-        # 可用 PHDEBATE_FREE_DEBATE_DECISION_SECONDS 覆盖（测试/现场调参）。
+        # 一方说完后，本方人类有 5s 抢麦窗口（点开始发言），超时（或全部预跳过）则随机 AI 接管。
+        # 可用 PHDEBATE_FREE_DEBATE_DECISION_SECONDS 覆盖，或在该环节配置 decision_seconds（测试/现场调参）。
         env_value = os.getenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "").strip()
         if env_value:
             try:
@@ -7230,9 +7253,9 @@ class MatchStore:
                 pass
         phase = phase or self._current_phase()
         try:
-            return max(0.0, float(phase.get("decision_seconds") or 2))
+            return max(0.0, float(phase.get("decision_seconds") or 5))
         except (TypeError, ValueError):
-            return 2.0
+            return 5.0
 
     def _validated_seconds(self, value: Any, field: str, minimum: int, maximum: int) -> int:
         try:
