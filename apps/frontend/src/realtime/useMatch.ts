@@ -40,6 +40,18 @@ export function useMatch(matchId: string, channel: string, speakerId?: string) {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let retry: number | undefined;
+    let reconnectAttempt = 0;
+
+    // 指数退避重连：固定 1.2s 死循环重连在弱网/被服务端因「慢客户端队列满」主动断开时会形成
+    // 重连风暴（每次重连还要拉一次全量快照），把后端越拖越慢。退避到最长 ~15s + 抖动，连上后清零。
+    function scheduleReconnect() {
+      if (cancelled) return;
+      setSocketStatus("reconnecting");
+      const base = Math.min(15000, 1200 * 2 ** Math.min(reconnectAttempt, 4));
+      const delay = base + Math.floor(Math.random() * 400);
+      reconnectAttempt += 1;
+      retry = window.setTimeout(open, delay);
+    }
 
     async function open() {
       try {
@@ -52,14 +64,13 @@ export function useMatch(matchId: string, channel: string, speakerId?: string) {
         socketRef.current = socket;
         socket.onopen = () => {
           setSocketStatus("open");
+          reconnectAttempt = 0; // 连上即清零退避计数，下次断开从最短间隔重连。
           if (channel === "speaker" && speakerId && socketRef.current) {
             void sendSpeakerHeartbeat(socketRef.current, speakerId);
           }
         };
         socket.onclose = () => {
-          if (cancelled) return;
-          setSocketStatus("reconnecting");
-          retry = window.setTimeout(open, 1200);
+          scheduleReconnect();
         };
         socket.onerror = () => socket?.close();
         socket.onmessage = async (event) => {
@@ -99,8 +110,7 @@ export function useMatch(matchId: string, channel: string, speakerId?: string) {
       } catch (err) {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : "连接失败");
-        setSocketStatus("reconnecting");
-        retry = window.setTimeout(open, 1200);
+        scheduleReconnect();
       }
     }
 

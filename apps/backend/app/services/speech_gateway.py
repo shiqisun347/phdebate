@@ -36,6 +36,9 @@ class SpeechGatewaySelection:
 
 
 ConnectFactory = Callable[..., Any]
+ALICLOUD_ASR_AUDIO_FRAME_BYTES = 96 * 1024
+ALICLOUD_ASR_AUDIO_SEND_RATE_BYTES_PER_SEC = 512 * 1024
+ALICLOUD_ASR_MAX_AUDIO_SEND_RATE_BYTES_PER_SEC = 1536 * 1024
 
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
@@ -309,6 +312,7 @@ class AlicloudASRStreamSession:
         self.started = time.perf_counter()
         self.chunk_count = 0
         self.final_timeout = float(self.options.get("final_timeout") or 12)
+        self._queued_audio_bytes = 0
         self._audio: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
         self._task: Optional[asyncio.Task[ASRResult]] = None
         self._closed = False
@@ -321,7 +325,14 @@ class AlicloudASRStreamSession:
         if self._closed:
             raise SpeechGatewayError("ASR 流式会话已经结束。", code="stream_closed", provider="alicloud")
         if audio:
-            await self._audio.put(audio)
+            try:
+                configured = int(self.options.get("frame_bytes") or ALICLOUD_ASR_AUDIO_FRAME_BYTES)
+            except (TypeError, ValueError):
+                configured = ALICLOUD_ASR_AUDIO_FRAME_BYTES
+            frame_bytes = max(1, min(configured, ALICLOUD_ASR_AUDIO_FRAME_BYTES))
+            self._queued_audio_bytes += len(audio)
+            for offset in range(0, len(audio), frame_bytes):
+                await self._audio.put(audio[offset : offset + frame_bytes])
 
     async def finish(self) -> ASRResult:
         if not self._closed:
@@ -330,7 +341,8 @@ class AlicloudASRStreamSession:
         if not self._task:
             raise SpeechGatewayError("ASR 流式会话尚未启动。", code="stream_not_started", provider="alicloud")
         try:
-            return await asyncio.wait_for(self._task, timeout=self.final_timeout + 1)
+            send_budget = self._queued_audio_bytes / self._audio_send_rate_bytes_per_sec()
+            return await asyncio.wait_for(self._task, timeout=self.final_timeout + send_budget + 2)
         except asyncio.TimeoutError as exc:
             error = SpeechGatewayError("阿里云 ASR final 响应超时。", code="final_timeout", provider="alicloud")
             await _call_callback(self.on_error, error)
@@ -395,6 +407,9 @@ class AlicloudASRStreamSession:
         return ASRResult(text=full_text, latency_ms=latency_ms, chunk_count=self.chunk_count)
 
     async def _send_frames(self, websocket: Any) -> None:
+        started = time.perf_counter()
+        sent_bytes = 0
+        rate = self._audio_send_rate_bytes_per_sec()
         while True:
             chunk = await self._audio.get()
             if chunk is None:
@@ -407,6 +422,18 @@ class AlicloudASRStreamSession:
                 )
             )
             self.chunk_count += 1
+            sent_bytes += len(chunk)
+            target_elapsed = sent_bytes / rate
+            delay = started + target_elapsed - time.perf_counter()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+    def _audio_send_rate_bytes_per_sec(self) -> float:
+        try:
+            configured = float(self.options.get("send_rate_bytes_per_sec") or self.options.get("audio_send_rate_bytes_per_sec") or ALICLOUD_ASR_AUDIO_SEND_RATE_BYTES_PER_SEC)
+        except (TypeError, ValueError):
+            configured = ALICLOUD_ASR_AUDIO_SEND_RATE_BYTES_PER_SEC
+        return max(1.0, min(configured, float(ALICLOUD_ASR_MAX_AUDIO_SEND_RATE_BYTES_PER_SEC)))
 
 
 def _asr_session(settings: Dict[str, Any]) -> Dict[str, Any]:

@@ -1166,7 +1166,7 @@ def test_speaker_pause_resume_and_current_speech_reset_flow(monkeypatch, tmp_pat
         files={"file": ("reset-target.pcm", b"pcm-to-reset", "audio/L16;rate=16000")},
     )
     assert chunk.status_code == 200
-    assert any(item["speech_id"] == speech_id for item in chunk.json()["data"]["audio_assets"])
+    assert chunk.json()["data"]["speech_id"] == speech_id
 
     adjusted_turn_ms = max(1000, int(started_remaining["turn"]) - 7000)
     adjusted_side_ms = max(1000, int(started_remaining["affirmative_total"]) - 9000)
@@ -1293,6 +1293,16 @@ def test_audit_logs_can_be_queried_for_admin_actions() -> None:
     assert items[0]["actor_type"] == "host"
     assert items[0]["result"] == "success"
     assert items[0]["request"]["scene"] == "judge_commentary"
+
+    request_logs = client.get("/api/matches/current/logs?limit=10")
+    assert request_logs.status_code == 200
+    audit_log = next(item for item in request_logs.json()["data"]["audit_logs"] if item["action"] == "screen.scene_changed")
+    assert "request" not in audit_log
+    assert "judge_commentary" in audit_log["request_preview"]
+
+    detail = client.get(f"/api/matches/current/logs/audit/{audit_log['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["data"]["request"]["scene"] == "judge_commentary"
 
 
 def test_match_export_bundle_contains_core_files() -> None:
@@ -1769,6 +1779,20 @@ def test_agent_speech_can_use_injected_gateway(monkeypatch) -> None:
     assert agent_requests[0]["status"] == "completed"
     assert agent_requests[0]["response_text"] == "外部 Agent 流式接入成功。"
     assert agent_requests[0]["request"]["speaker_id"] == "spk_aff_2"
+
+    request_logs = client.get("/api/matches/current/logs?limit=10")
+    assert request_logs.status_code == 200
+    agent_log = request_logs.json()["data"]["agent_requests"][0]
+    assert agent_log["status"] == "completed"
+    assert agent_log["response_preview"] == "外部 Agent 流式接入成功。"
+    assert "request" not in agent_log
+    assert "response_text" not in agent_log
+
+    detail = client.get(f"/api/matches/current/logs/agent/{agent_log['id']}")
+    assert detail.status_code == 200
+    detail_data = detail.json()["data"]
+    assert detail_data["request"]["speaker_id"] == "spk_aff_2"
+    assert detail_data["response_text"] == "外部 Agent 流式接入成功。"
 
     export = client.post("/api/matches/current/exports")
     assert export.status_code == 200
@@ -3368,12 +3392,18 @@ def test_audio_chunk_upload_archives_file_and_completes_asset() -> None:
         files={"file": ("chunk.webm", b"audio-bytes", "audio/webm")},
     )
     assert response.status_code == 200
-    data = response.json()["data"]
-    asset = data["audio_assets"][0]
-    assert asset["speech_id"] == "speech_live"
-    assert asset["speaker_id"] == "spk_aff_3"
+    # 上传分片接口只回这一片的归档结果(不再回传整张快照，避免长录音逐片拖垮连接)。
+    chunk = response.json()["data"]
+    assert chunk["speech_id"] == "speech_live"
+    assert chunk["speaker_id"] == "spk_aff_3"
+    assert chunk["chunk_index"] == 0
+    assert chunk["chunk_count"] == 1
+    assert chunk["size_bytes"] == len(b"audio-bytes")
+    assert Path(chunk["file_path"]).exists()
+    # 录音中的完整资产状态(status/duration_ms/分片路径)从快照读取。
+    snap = client.get("/api/matches/match_001").json()["data"]
+    asset = next(a for a in snap["audio_assets"] if a["speech_id"] == "speech_live")
     assert asset["chunk_count"] == 1
-    assert asset["size_bytes"] == len(b"audio-bytes")
     assert asset["duration_ms"] == 500
     assert asset["status"] == "recording"
     assert Path(asset["chunks"][0]["file_path"]).exists()
@@ -3384,6 +3414,38 @@ def test_audio_chunk_upload_archives_file_and_completes_asset() -> None:
     )
     assert complete.status_code == 200
     assert complete.json()["data"]["audio_assets"][0]["status"] == "completed"
+
+
+def test_late_audio_chunk_after_complete_is_ignored_not_reverted() -> None:
+    """网络抖动/stop 后补传：发言音频已归档完成后，迟到的分片必须被良性忽略——
+    既不把资产状态打回 recording，也不重开 ASR，且不向控制台报错（否则现场每次收尾后
+    一个迟到分片就把已完成录音弄脏、并触发对已结束发言的识别）。"""
+    first = client.post(
+        "/api/matches/match_001/speeches/speech_live/audio-chunks",
+        data={"speaker_id": "spk_aff_3", "chunk_index": "0", "duration_ms": "500"},
+        files={"file": ("c0.webm", b"audio-0", "audio/webm")},
+    )
+    assert first.status_code == 200
+    complete = client.post(
+        "/api/matches/match_001/speeches/speech_live/audio/complete",
+        json={"speaker_id": "spk_aff_3"},
+    )
+    assert complete.status_code == 200
+    assert complete.json()["data"]["audio_assets"][0]["status"] == "completed"
+
+    # 迟到分片
+    late = client.post(
+        "/api/matches/match_001/speeches/speech_live/audio-chunks",
+        data={"speaker_id": "spk_aff_3", "chunk_index": "1", "duration_ms": "500"},
+        files={"file": ("c1.webm", b"audio-1", "audio/webm")},
+    )
+    assert late.status_code == 200  # 不报错
+    assert late.json()["data"].get("ignored_after_complete") is True
+    # 资产仍是 completed、chunk_count 没被迟到分片改动。
+    snap = client.get("/api/matches/match_001").json()["data"]
+    asset = next(a for a in snap["audio_assets"] if a["speech_id"] == "speech_live")
+    assert asset["status"] == "completed"
+    assert asset["chunk_count"] == 1
 
 
 def test_archived_pcm_audio_can_be_recognized_and_written_to_transcript(monkeypatch, tmp_path) -> None:
@@ -3406,7 +3468,9 @@ def test_archived_pcm_audio_can_be_recognized_and_written_to_transcript(monkeypa
         files={"file": ("chunk-0.pcm", b"pcm-audio-0", "audio/L16")},
     )
     assert first.status_code == 200
-    first_asset = first.json()["data"]["audio_assets"][0]
+    assert Path(first.json()["data"]["file_path"]).suffix == ".pcm"
+    snap = client.get("/api/matches/match_001").json()["data"]
+    first_asset = next(a for a in snap["audio_assets"] if a["speech_id"] == "speech_live")
     assert "l16" in first_asset["mime_type"].lower()
     assert Path(first_asset["chunks"][0]["file_path"]).suffix == ".pcm"
     second = client.post(
@@ -3445,12 +3509,13 @@ def test_pcm_audio_chunk_updates_live_asr_observability(tmp_path, monkeypatch) -
     )
 
     assert response.status_code == 200
-    data = response.json()["data"]
-    asset = data["audio_assets"][0]
+    assert response.json()["data"]["pcm_ready"] is True
+    snap = client.get("/api/matches/match_001").json()["data"]
+    asset = next(a for a in snap["audio_assets"] if a["speech_id"] == "speech_live")
     assert asset["mime_type"] == "audio/L16;rate=16000"
-    assert data["speech_service"]["asr"]["status"] == "streaming"
-    assert data["speech_service"]["asr"]["active_sessions"] == 1
-    assert "receiving PCM/L16" in data["speech_service"]["asr"]["detail"]
+    assert snap["speech_service"]["asr"]["status"] == "streaming"
+    assert snap["speech_service"]["asr"]["active_sessions"] == 1
+    assert "receiving PCM/L16" in snap["speech_service"]["asr"]["detail"]
 
 
 def test_complete_audio_archive_can_auto_recognize_pcm(monkeypatch, tmp_path) -> None:
@@ -3520,10 +3585,12 @@ def test_pcm_chunks_drive_realtime_asr_partial_and_final(monkeypatch, tmp_path) 
     )
 
     assert first.status_code == 200
-    data = first.json()["data"]
-    assert data["current_speech"]["content_partial"] == "实时 partial 1"
-    assert data["recent_transcript"][0]["is_final"] is False
-    assert data["audio_assets"][0]["asr_realtime_status"] == "streaming"
+    assert first.json()["data"]["pcm_ready"] is True
+    snap = client.get("/api/matches/match_001").json()["data"]
+    assert snap["current_speech"]["content_partial"] == "实时 partial 1"
+    assert snap["recent_transcript"][0]["is_final"] is False
+    asset = next(a for a in snap["audio_assets"] if a["speech_id"] == "speech_live")
+    assert asset["asr_realtime_status"] == "streaming"
 
     second = client.post(
         "/api/matches/match_001/speeches/speech_live/audio-chunks",
@@ -3531,7 +3598,7 @@ def test_pcm_chunks_drive_realtime_asr_partial_and_final(monkeypatch, tmp_path) 
         files={"file": ("chunk-1.pcm", b"pcm-1", "audio/L16;rate=16000")},
     )
     assert second.status_code == 200
-    assert second.json()["data"]["current_speech"]["content_partial"] == "实时 partial 2"
+    assert client.get("/api/matches/match_001").json()["data"]["current_speech"]["content_partial"] == "实时 partial 2"
 
     complete = client.post(
         "/api/matches/match_001/speeches/speech_live/audio/complete",
@@ -3680,3 +3747,45 @@ def test_tts_failure_marks_text_only_degradation_for_agent_speech() -> None:
     assert data["speech_service"]["tts"]["status"] == "failed"
     assert data["speech_service"]["tts"]["speaker_id"] == "spk_aff_2"
     assert data["speech_service"]["tts"]["degraded_to"] == "text_only"
+
+
+def test_broadcast_is_nonblocking_and_drops_stuck_client() -> None:
+    """卡死根因加固：emit 的广播必须是同步、非阻塞的——只把事件塞进每个连接自己的队列。
+    一个消费不过来(网络慢/卡)的客户端，队列满后被丢弃(它会用 last_seq 重连重同步)，
+    绝不阻塞 emit、绝不波及健康客户端。"""
+
+    class DummyWS:
+        async def send_json(self, _msg):
+            return None
+
+        async def close(self):
+            return None
+
+    async def scenario() -> None:
+        stuck_ws = DummyWS()
+        stuck_q: asyncio.Queue = asyncio.Queue(maxsize=1)
+        stuck_q.put_nowait({"type": "backlog"})  # 预填满：模拟慢客户端队列已积压到上限
+
+        healthy_ws = DummyWS()
+        healthy_q: asyncio.Queue = asyncio.Queue(maxsize=64)
+
+        store._conn_send_queues[stuck_ws] = stuck_q
+        store._conn_send_queues[healthy_ws] = healthy_q
+        store._connections.update({stuck_ws, healthy_ws})
+        try:
+            # 同步调用、立即返回（不是协程，根本不会 await 网络）。
+            store._broadcast({"type": "evt", "seq": 1})
+            # 卡住的客户端队列已满 → 被丢弃。
+            assert stuck_ws not in store._conn_send_queues
+            assert stuck_ws not in store._connections
+            # 健康客户端照常收到事件。
+            assert healthy_q.get_nowait() == {"type": "evt", "seq": 1}
+        finally:
+            for ws in (stuck_ws, healthy_ws):
+                store._conn_send_queues.pop(ws, None)
+                store._connections.discard(ws)
+                task = store._conn_senders.pop(ws, None)
+                if task is not None:
+                    task.cancel()
+
+    asyncio.run(scenario())

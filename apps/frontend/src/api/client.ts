@@ -1,4 +1,4 @@
-import type { AgentConfigTestResult, ApiResponse, ASRArchiveRecognitionResult, ASRProbeResult, AuditLog, AudienceVotePayload, CurrentMatchSummary, DataSummary, ExportBundle, GeneratedFlow, IntegrationConfig, MatchList, MatchSnapshot, PreflightReport, RequestLogs, Ruleset, RulesetList, RuntimeAuthStatus, SpeechDiagnostics, TTSProbeResult, VoteOptions, XiaoqiCommandResult, XiaoqiConfig } from "../types/contracts";
+import type { AgentConfigTestResult, ApiResponse, ASRArchiveRecognitionResult, ASRProbeResult, AudioChunkUploadResult, AuditLog, AudienceVotePayload, CurrentMatchSummary, DataSummary, ExportBundle, GeneratedFlow, IntegrationConfig, MatchList, MatchSnapshot, PreflightReport, RequestLogDetail, RequestLogKind, RequestLogs, Ruleset, RulesetList, RuntimeAuthStatus, SpeechDiagnostics, TTSProbeResult, VoteOptions, XiaoqiCommandResult, XiaoqiConfig } from "../types/contracts";
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
@@ -149,6 +149,10 @@ export function getRequestLogs(matchId: string, limit = 200): Promise<RequestLog
   return request<RequestLogs>(`/api/matches/${matchId}/logs?limit=${limit}`);
 }
 
+export function getRequestLogDetail(matchId: string, kind: RequestLogKind, id: string): Promise<RequestLogDetail> {
+  return request<RequestLogDetail>(`/api/matches/${matchId}/logs/${kind}/${encodeURIComponent(id)}`);
+}
+
 export function clearRequestLogs(matchId: string): Promise<RequestLogs> {
   return remove<RequestLogs>(`/api/matches/${matchId}/logs`);
 }
@@ -242,24 +246,46 @@ export async function uploadAudioChunk(
   blob: Blob,
   durationMs?: number,
   filename?: string
-): Promise<MatchSnapshot> {
+): Promise<AudioChunkUploadResult> {
   const token = authTokenForCurrentPage();
-  const form = new FormData();
-  form.set("speaker_id", speakerId);
-  form.set("chunk_index", String(chunkIndex));
-  if (durationMs !== undefined) form.set("duration_ms", String(durationMs));
-  form.set("file", blob, filename ?? defaultAudioFilename(chunkIndex, blob.type));
+  const url = `${apiBase}/api/matches/${matchId}/speeches/${speechId}/audio-chunks`;
+  // 录音分片上传带退避重试：现场弱网下单次 fetch 抖动很常见，不重试会直接丢分片→录音/转写残缺。
+  // 网络错误与 5xx 才重试；4xx（如说话人不符）是确定性错误，不重试。后端对“已完成发言”的迟到
+  // 分片是幂等良性忽略，所以重试安全。
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const form = new FormData();
+    form.set("speaker_id", speakerId);
+    form.set("chunk_index", String(chunkIndex));
+    if (durationMs !== undefined) form.set("duration_ms", String(durationMs));
+    form.set("file", blob, filename ?? defaultAudioFilename(chunkIndex, blob.type));
 
-  const response = await fetch(`${apiBase}/api/matches/${matchId}/speeches/${speechId}/audio-chunks`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    body: form
-  });
-  const body = (await response.json()) as ApiResponse<MatchSnapshot>;
-  if (!response.ok || body.ok === false) {
-    throw new Error(body.error?.message ?? `Request failed: ${response.status}`);
+    let response: Response | null = null;
+    let body: ApiResponse<AudioChunkUploadResult> | null = null;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: form
+      });
+      body = (await response.json()) as ApiResponse<AudioChunkUploadResult>;
+    } catch (err) {
+      lastErr = err; // 网络层抖动 → 可重试
+    }
+
+    if (response && body) {
+      if (response.ok && body.ok !== false) return body.data;
+      const message = body.error?.message ?? `Request failed: ${response.status}`;
+      if (response.status < 500) throw new Error(message); // 4xx 确定性错误：不重试
+      lastErr = new Error(message); // 5xx：可重试
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
+    }
   }
-  return body.data;
+  throw lastErr instanceof Error ? lastErr : new Error("录音分片上传失败");
 }
 
 export async function uploadSpeakerImage(matchId: string, speakerId: string, file: File): Promise<MatchSnapshot> {

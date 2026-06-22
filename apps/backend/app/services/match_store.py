@@ -96,8 +96,15 @@ class MatchStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._connections: Set[WebSocket] = set()
+        # 每个 WebSocket 连接独占一条有界发送队列 + 一个发送协程：广播只往队列里塞(非阻塞)，
+        # 由各自的发送协程串行发出。一个慢/卡的客户端只会撑爆自己的队列被丢弃，绝不阻塞
+        # 持有 self._lock 的比赛主流程或其它客户端(彻底消除「一个慢客户端拖死全场」)。
+        self._conn_send_queues: Dict[WebSocket, "asyncio.Queue[Dict[str, Any]]"] = {}
+        self._conn_senders: Dict[WebSocket, asyncio.Task] = {}
         self._asr_streams: Dict[str, Any] = {}
         self._tts_grace_tasks: Dict[str, asyncio.Task] = {}
+        self._tts_request_lock = asyncio.Lock()
+        self._last_tts_request_at = 0.0
         # 预取缓存：在空档提前生成 agent 文本 + 归档 TTS，进入该环节时直接促活（见 _prefetch_speech）。
         # 键：自我介绍 `self_intro:{speaker_id}`；固定单人环节 `phase:{phase_id}:{speaker_id}`。
         self._prepared_speeches: Dict[str, Dict[str, Any]] = {}
@@ -1015,7 +1022,7 @@ class MatchStore:
             if persist:
                 self._persist_snapshot(sync_structured=sync_structured)
             self._save_audit_for_event(event)
-            await self._broadcast({"type": event_type, **event})
+            self._broadcast({"type": event_type, **event})
             return event
 
     async def set_match_status(self, status: str) -> Dict[str, Any]:
@@ -2839,6 +2846,21 @@ class MatchStore:
             speaker = self._find_speaker(speaker_id)
             if speaker["speaker_type"] != "human":
                 raise MatchStateError("invalid_speaker", "只有人类辩手控制台可以上传录音分片。", {"speaker_id": speaker_id})
+            # stop 后补传/网络重试：该发言音频已归档完成时，迟到分片不能把资产状态打回 recording、
+            # 更不能重开一路对已结束发言的实时 ASR。良性忽略（返回当前资产摘要，不报错、不污染状态）。
+            existing = self._audio_asset_for_speech(speech_id)
+            if existing and existing.get("status") == "completed":
+                return {
+                    "audio_asset_id": existing["id"],
+                    "speech_id": speech_id,
+                    "speaker_id": existing.get("speaker_id") or speaker_id,
+                    "chunk_index": chunk_index,
+                    "chunk_count": existing.get("chunk_count", 0),
+                    "size_bytes": existing.get("size_bytes", 0),
+                    "file_path": "",
+                    "pcm_ready": False,
+                    "ignored_after_complete": True,
+                }
             phase_id, phase_key = self._audio_speech_context(speech_id, speaker_id)
             ext = self._audio_extension(mime_type)
             archive_dir = self._audio_archive_dir(self.snapshot["match"]["id"], phase_key, speech_id)
@@ -2888,11 +2910,11 @@ class MatchStore:
             }
             self._persist_snapshot()
 
-        result = await self.emit("audio.chunk_archived", payload, "speech", speaker_id)
+        await self.emit("audio.chunk_archived", payload, "speech", speaker_id)
         if payload["pcm_ready"]:
             await self.emit("asr.audio_chunk_received", payload, "speech", speaker_id)
             await self._send_live_asr_chunk(speech_id, speaker_id, content, mime_type)
-        return result
+        return payload
 
     async def complete_audio_archive(self, speech_id: str, speaker_id: Optional[str] = None) -> Dict[str, Any]:
         async with self._lock:
@@ -3986,33 +4008,49 @@ class MatchStore:
         self.repo.clear_request_logs(self.snapshot["match"]["id"])
 
     def get_request_logs(self, limit: int = 200) -> Dict[str, Any]:
-        """API 请求日志：Agent 请求 + 语音服务请求 + 操作审计。"""
+        """API 请求日志列表：只返回摘要，完整输入/输出由单条详情接口按需读取。"""
         match_id = self.snapshot["match"]["id"]
         return {
             "match_id": match_id,
-            "agent_requests": self.repo.load_agent_requests(match_id, limit),
-            "speech_service_requests": self.repo.load_speech_service_requests(match_id, limit),
-            "audit_logs": self.repo.load_audit_logs(match_id, limit),
+            "agent_requests": self.repo.load_agent_request_summaries(match_id, limit),
+            "speech_service_requests": self.repo.load_speech_service_request_summaries(match_id, limit),
+            "audit_logs": self.repo.load_audit_log_summaries(match_id, limit),
         }
+
+    def get_request_log_detail(self, kind: str, row_id: str) -> Optional[Dict[str, Any]]:
+        """完整单条日志详情，用于管理端展开行时按需加载。"""
+        match_id = self.snapshot["match"]["id"]
+        normalized = str(kind or "").strip().lower()
+        if normalized == "agent":
+            return self.repo.load_agent_request(match_id, row_id)
+        if normalized in {"speech", "xiaoqi"}:
+            return self.repo.load_speech_service_request(match_id, row_id)
+        if normalized == "audit":
+            return self.repo.load_audit_log(match_id, row_id)
+        return None
 
     async def websocket(self, websocket: WebSocket, last_seq: int = 0, channel: str = "screen", speaker_id: Optional[str] = None) -> None:
         await websocket.accept()
-        self._connections.add(websocket)
-        try:
-            snapshot = await self.get_snapshot()
+        snapshot = await self.get_snapshot()
+        queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=self._broadcast_queue_maxsize())
+        # 在锁内「登记连接 + 把初始快照塞进队列」原子完成：此后任何 emit 都只会把后续事件
+        # 排在快照之后(seq 递增)，既不丢事件也不会有事件抢在快照前面。初始快照也走队列，
+        # 由唯一的发送协程发出——避免两个协程并发 send_json 同一个连接(会撕裂帧/报错)。
+        async with self._lock:
             missed = [event for event in self.events if event["seq"] > last_seq]
-            try:
-                await websocket.send_json(
-                    {
-                        "type": "snapshot",
-                        "match_id": snapshot["match"]["id"],
-                        "seq": self.seq,
-                        "server_time_ms": int(utc_now().timestamp() * 1000),
-                        "payload": {"state": snapshot, "missed_events": missed},
-                    }
-                )
-            except (WebSocketDisconnect, RuntimeError):
-                return
+            queue.put_nowait(
+                {
+                    "type": "snapshot",
+                    "match_id": snapshot["match"]["id"],
+                    "seq": self.seq,
+                    "server_time_ms": int(utc_now().timestamp() * 1000),
+                    "payload": {"state": snapshot, "missed_events": missed},
+                }
+            )
+            self._connections.add(websocket)
+            self._conn_send_queues[websocket] = queue
+            self._conn_senders[websocket] = asyncio.create_task(self._connection_sender(websocket, queue))
+        try:
             while True:
                 try:
                     text = await websocket.receive_text()
@@ -4022,7 +4060,7 @@ class MatchStore:
                 except Exception:
                     continue
         finally:
-            self._connections.discard(websocket)
+            self._drop_connection(websocket)
             if channel == "speaker":
                 await self.mark_speaker_offline(speaker_id)
 
@@ -4038,15 +4076,54 @@ class MatchStore:
         elif message_type == "speaker.mic_error" and channel == "speaker":
             await self.record_speaker_mic_error(payload, speaker_id)
 
-    async def _broadcast(self, message: Dict[str, Any]) -> None:
-        disconnected: List[WebSocket] = []
-        for websocket in list(self._connections):
+    def _broadcast_queue_maxsize(self) -> int:
+        raw = os.getenv("PHDEBATE_BROADCAST_QUEUE_MAX", "512").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 512
+        return max(32, min(8192, value))
+
+    def _broadcast(self, message: Dict[str, Any]) -> None:
+        """非阻塞广播：把事件塞进每个连接自己的发送队列(纯内存，O(连接数)，无 await)。
+        队列满 = 该客户端消费不过来(网络慢/卡)，直接丢弃该连接——它会用 last_seq 重连并
+        全量重同步，绝不拖累其它客户端或持锁的比赛流程。"""
+        stale: List[WebSocket] = []
+        for websocket, queue in list(self._conn_send_queues.items()):
             try:
-                await websocket.send_json(message)
-            except Exception:
-                disconnected.append(websocket)
-        for websocket in disconnected:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                stale.append(websocket)
+        for websocket in stale:
+            self._drop_connection(websocket)
+
+    def _drop_connection(self, websocket: WebSocket) -> None:
+        """注销连接并停掉它的发送协程(协程在 finally 里关闭 socket)。同步、可重入、无 await。"""
+        self._connections.discard(websocket)
+        self._conn_send_queues.pop(websocket, None)
+        task = self._conn_senders.pop(websocket, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _connection_sender(self, websocket: WebSocket, queue: "asyncio.Queue[Dict[str, Any]]") -> None:
+        """单连接发送协程：串行从自己的队列取消息发出，与其它连接、与比赛主流程完全解耦。"""
+        try:
+            while True:
+                message = await queue.get()
+                try:
+                    await websocket.send_json(message)
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
             self._connections.discard(websocket)
+            self._conn_send_queues.pop(websocket, None)
+            self._conn_senders.pop(websocket, None)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     def _refresh_clocks(self) -> None:
         now = utc_now()
@@ -5777,29 +5854,10 @@ class MatchStore:
                     "screen",
                     speaker_id,
                 )
-                audio_parts: List[bytes] = []
-                chunk_count = 0
-                latency_ms = 0
-                result_mime_type = live_mime_type
-                async for event in selection.gateway.synthesize_stream(normalized_text, **selection.options):
-                    if event["type"] == "chunk":
-                        chunk = bytes(event["audio"])
-                        chunk_count += 1
-                        audio_parts.append(chunk)
-                        await tts_live_manager.publish_chunk(live_key, chunk, int(event.get("index") or chunk_count))
-                    elif event["type"] == "done":
-                        result_mime_type = event["mime_type"]
-                        latency_ms = event["latency_ms"]
-                        chunk_count = event["chunk_count"]
-                result = TTSResult(
-                    audio=b"".join(audio_parts),
-                    mime_type=result_mime_type,
-                    latency_ms=latency_ms,
-                    chunk_count=chunk_count,
-                )
+                result = await self._stream_tts_live_with_retry(selection, normalized_text, live_key, live_mime_type)
                 await tts_live_manager.finish(live_key, {"mime_type": result.mime_type, "latency_ms": result.latency_ms, "chunk_count": result.chunk_count})
             else:
-                result = await selection.gateway.synthesize(normalized_text, **selection.options)
+                result = await self._synthesize_tts_with_retry(selection, normalized_text)
         except SpeechProviderError as exc:
             try:
                 await tts_live_manager.fail((match_id, speech_id, task_id, sentence_idx), _speech_error_message(exc))
@@ -5819,6 +5877,27 @@ class MatchStore:
                     completed_at=iso_now(),
                 )
             await _emit_skip("tts_synthesize_failed")
+            return False
+        except Exception as exc:  # noqa: BLE001 — 任何意外错误都必须降级为跳句，绝不让某句静默死亡卡住大屏 12s
+            try:
+                await tts_live_manager.fail((match_id, speech_id, task_id, sentence_idx), "TTS 合成内部错误")
+            except Exception:
+                pass
+            try:
+                async with self._lock:
+                    self.repo.finish_speech_service_request(
+                        match_id=match_id,
+                        request_id=request_id,
+                        status="failed",
+                        response={"degraded_to": "text_only"},
+                        error_code="tts_internal_error",
+                        error_message=f"{type(exc).__name__}: {exc}",
+                        latency_ms=max(0, int((time.perf_counter() - request_started_time) * 1000)),
+                        completed_at=iso_now(),
+                    )
+            except Exception:
+                pass
+            await _emit_skip("tts_internal_error")
             return False
 
         try:
@@ -5932,6 +6011,123 @@ class MatchStore:
             sync_structured=False,
         )
         return True
+
+    async def _synthesize_tts_with_retry(self, selection: Any, text: str) -> TTSResult:
+        attempts = self._tts_retry_attempts()
+        for attempt in range(attempts + 1):
+            await self._throttle_tts_request_start()
+            try:
+                return await selection.gateway.synthesize(text, **selection.options)
+            except SpeechProviderError as exc:
+                if attempt >= attempts or not self._is_retryable_tts_error(exc):
+                    raise
+                await asyncio.sleep(self._tts_retry_delay_seconds(attempt))
+        raise SpeechGatewayError("TTS 合成失败。", code="tts_error")
+
+    async def _stream_tts_live_with_retry(self, selection: Any, text: str, live_key: Any, live_mime_type: str) -> TTSResult:
+        """live 流式合成 + 受限重试。长文本一次几十句并发打服务商，瞬时错误(429/连接断)很常见；
+        非流式分支有重试，流式分支若不重试就会每句直接 skip → 大屏没声音。
+
+        关键安全约束：**只有在还没向订阅者推出任何音频块时**才重试——一旦推过块再重试，
+        大屏会收到重复音频。所以失败发生在首块之前(典型的服务商直接拒绝/429)才重试，
+        中途断流则放弃(交由上层跳句)。每次尝试前重新限速。"""
+        attempts = self._tts_retry_attempts()
+        last_exc: Optional[Exception] = None
+        for attempt in range(attempts + 1):
+            await self._throttle_tts_request_start()
+            audio_parts: List[bytes] = []
+            chunk_count = 0
+            latency_ms = 0
+            result_mime_type = live_mime_type
+            published = 0
+            try:
+                async for event in selection.gateway.synthesize_stream(text, **selection.options):
+                    if event["type"] == "chunk":
+                        chunk = bytes(event["audio"])
+                        chunk_count += 1
+                        audio_parts.append(chunk)
+                        await tts_live_manager.publish_chunk(live_key, chunk, int(event.get("index") or chunk_count))
+                        published += 1
+                    elif event["type"] == "done":
+                        result_mime_type = event["mime_type"]
+                        latency_ms = event["latency_ms"]
+                        chunk_count = event["chunk_count"]
+                return TTSResult(audio=b"".join(audio_parts), mime_type=result_mime_type, latency_ms=latency_ms, chunk_count=chunk_count)
+            except SpeechProviderError as exc:
+                last_exc = exc
+                # 已推出音频块则不能重试(会重复)；未推出且错误可重试才退避重试。
+                if published == 0 and attempt < attempts and self._is_retryable_tts_error(exc):
+                    await asyncio.sleep(self._tts_retry_delay_seconds(attempt))
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise SpeechGatewayError("TTS 流式合成失败。", code="tts_error")
+
+    # 永久性错误：配置/授权失败、输入为空、服务关闭——重试也不会成功，立即跳句而非无谓拖延。
+    _TTS_PERMANENT_ERROR_CODES = frozenset(
+        {
+            "empty_text",
+            "missing_config",
+            "missing_api_key",
+            "tts_disabled",
+            "asr_disabled",
+            "unauthenticated",
+            "unauthorized",
+            "forbidden",
+            "401",
+            "403",
+        }
+    )
+
+    async def _throttle_tts_request_start(self) -> None:
+        """给 TTS 服务商请求的「启动」加最小节奏间隔。
+
+        长文本会一次裂解出几十句、并发起 TTS 合成；若毫无间隔地齐发，极易触发服务商
+        并发上限/限流(429)，导致 live 那句合成失败、大屏不出声。这里用一把独立小锁把相邻
+        两次请求启动至少隔开 PHDEBATE_TTS_MIN_REQUEST_INTERVAL_MS，把突发摊平。
+        注意：只用 self._tts_request_lock，绝不触碰驱动比赛流程的 self._lock；sleep 会让出
+        event loop，不阻塞其它协程。"""
+        min_interval = self._tts_min_request_interval_seconds()
+        if min_interval <= 0:
+            return
+        async with self._tts_request_lock:
+            now = time.perf_counter()
+            wait = self._last_tts_request_at + min_interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = time.perf_counter()
+            self._last_tts_request_at = now
+
+    def _tts_min_request_interval_seconds(self) -> float:
+        raw = os.getenv("PHDEBATE_TTS_MIN_REQUEST_INTERVAL_MS", "80").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 80.0
+        return max(0.0, min(2000.0, value)) / 1000.0
+
+    def _tts_retry_attempts(self) -> int:
+        raw = os.getenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "2").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 2
+        return max(0, min(5, value))
+
+    def _is_retryable_tts_error(self, exc: Exception) -> bool:
+        """瞬时错误(超时/断连/限流)值得重试；永久性配置/输入错误不重试。"""
+        code = str(getattr(exc, "code", "") or "").strip().lower()
+        return code not in self._TTS_PERMANENT_ERROR_CODES
+
+    def _tts_retry_delay_seconds(self, attempt: int) -> float:
+        raw = os.getenv("PHDEBATE_TTS_RETRY_BASE_MS", "250").strip()
+        try:
+            base = float(raw)
+        except ValueError:
+            base = 250.0
+        base = max(0.0, min(2000.0, base)) / 1000.0
+        return min(2.0, base * (2 ** max(0, int(attempt))))
 
     async def _synthesize_sentence_tts_with_timeout(
         self,

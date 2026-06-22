@@ -32,6 +32,9 @@ def speech_service_request_id(match_id: str, request_id: str) -> str:
     return f"{match_id}:{request_id}"
 
 
+LOG_PREVIEW_CHARS = 360
+
+
 class SQLiteRepository:
     """SQLite persistence for the live MVP slice.
 
@@ -534,6 +537,42 @@ class SQLiteRepository:
             logs.append(item)
         return logs
 
+    def load_audit_log_summaries(self, match_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 10000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, match_id, actor_type, actor_id, action, target_type, target_id,
+                       result, error_message, created_at, origin, phase_id, phase_name, screen_scene,
+                       substr(request_json, 1, ?) AS request_preview,
+                       length(request_json) AS request_bytes
+                FROM audit_logs
+                WHERE match_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (LOG_PREVIEW_CHARS, match_id, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_audit_log(self, match_id: str, audit_id: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, match_id, actor_type, actor_id, action, target_type, target_id,
+                       request_json, result, error_message, created_at, origin, phase_id, phase_name, screen_scene
+                FROM audit_logs
+                WHERE match_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (match_id, audit_id),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["request"] = json.loads(item.pop("request_json"))
+        return item
+
     def save_match_archive(
         self,
         *,
@@ -707,6 +746,46 @@ class SQLiteRepository:
             requests.append(item)
         return requests
 
+    def load_agent_request_summaries(self, match_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 10000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, match_id, task_id, speech_id, speaker_id, endpoint, status,
+                       error_code, error_message, latency_ms, started_at, completed_at, updated_at,
+                       origin, phase_id, phase_name, screen_scene,
+                       substr(request_json, 1, ?) AS request_preview,
+                       length(request_json) AS request_bytes,
+                       substr(COALESCE(response_text, ''), 1, ?) AS response_preview,
+                       length(COALESCE(response_text, '')) AS response_bytes
+                FROM agent_requests
+                WHERE match_id = ?
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (LOG_PREVIEW_CHARS, LOG_PREVIEW_CHARS, match_id, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_agent_request(self, match_id: str, request_row_id: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, match_id, task_id, speech_id, speaker_id, endpoint, status,
+                       request_json, response_text, error_code, error_message, latency_ms,
+                       started_at, completed_at, updated_at, origin, phase_id, phase_name, screen_scene
+                FROM agent_requests
+                WHERE match_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (match_id, request_row_id),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["request"] = json.loads(item.pop("request_json"))
+        return item
+
     def save_speech_service_request_started(
         self,
         *,
@@ -830,6 +909,47 @@ class SQLiteRepository:
             item["response"] = json.loads(item.pop("response_json"))
             requests.append(item)
         return requests
+
+    def load_speech_service_request_summaries(self, match_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 10000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, match_id, request_id, service, operation, speech_id, speaker_id,
+                       status, error_code, error_message, latency_ms, started_at, completed_at, updated_at,
+                       origin, phase_id, phase_name, screen_scene,
+                       substr(request_json, 1, ?) AS request_preview,
+                       length(request_json) AS request_bytes,
+                       substr(COALESCE(response_json, '{}'), 1, ?) AS response_preview,
+                       length(COALESCE(response_json, '{}')) AS response_bytes
+                FROM speech_service_requests
+                WHERE match_id = ?
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (LOG_PREVIEW_CHARS, LOG_PREVIEW_CHARS, match_id, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_speech_service_request(self, match_id: str, request_row_id: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, match_id, request_id, service, operation, speech_id, speaker_id,
+                       status, request_json, response_json, error_code, error_message,
+                       latency_ms, started_at, completed_at, updated_at, origin, phase_id, phase_name, screen_scene
+                FROM speech_service_requests
+                WHERE match_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (match_id, request_row_id),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["request"] = json.loads(item.pop("request_json"))
+        item["response"] = json.loads(item.pop("response_json"))
+        return item
 
     def save_export_bundle(self, bundle: Dict[str, Any]) -> None:
         entries = bundle.get("entries") if isinstance(bundle.get("entries"), list) else []

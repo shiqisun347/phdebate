@@ -953,7 +953,7 @@ async def upload_speech_audio_chunk(
     await _ensure_match(match_id)
     authorize_speaker_or_host(request, speaker_id)
     content = await file.read()
-    await store.record_audio_chunk(
+    data = await store.record_audio_chunk(
         speech_id=speech_id,
         speaker_id=speaker_id,
         chunk_index=chunk_index,
@@ -961,7 +961,7 @@ async def upload_speech_audio_chunk(
         mime_type=file.content_type or "application/octet-stream",
         duration_ms=duration_ms,
     )
-    return {"ok": True, "data": await store.get_snapshot()}
+    return {"ok": True, "data": data}
 
 
 @app.post("/api/matches/{match_id}/speeches/{speech_id}/audio/complete")
@@ -1056,6 +1056,23 @@ async def test_agent_config_inline(match_id: str, body: Dict[str, Any], _princip
 async def get_request_logs(match_id: str, limit: int = 200, _principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
     await _ensure_match(match_id)
     return {"ok": True, "data": store.get_request_logs(limit)}
+
+
+@app.get("/api/matches/{match_id}/logs/{log_kind}/{log_id}")
+async def get_request_log_detail(
+    match_id: str,
+    log_kind: str,
+    log_id: str,
+    _principal: Principal = Depends(require_read_access),
+) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    detail = store.get_request_log_detail(log_kind, log_id)
+    if detail is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "log_not_found", "message": "log not found", "details": {"kind": log_kind, "id": log_id}},
+        )
+    return {"ok": True, "data": detail}
 
 
 @app.delete("/api/matches/{match_id}/logs")

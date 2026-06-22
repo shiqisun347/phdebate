@@ -14,6 +14,7 @@ import pytest
 from app.main import app
 from app.services import match_store as match_store_module
 from app.services.match_store import store
+from app.services.tts_live import tts_live_manager
 from app.services.xfyun_gateway import TTSResult, XfyunGatewayError
 
 from fastapi.testclient import TestClient
@@ -98,6 +99,103 @@ class _AlwaysOkGateway:
         return TTSResult(audio=b"mp3-bytes", mime_type="audio/mpeg", latency_ms=1, chunk_count=1)
 
 
+class _BoomGateway:
+    """synthesize 抛出非 SpeechProviderError 的意外异常（复刻线上那次 AttributeError 事故）。"""
+
+    async def synthesize(self, text: str, **_opts) -> TTSResult:
+        raise RuntimeError("unexpected boom")
+
+
+def test_unexpected_synthesize_error_skips_sentence_not_stall(monkeypatch) -> None:
+    """根因加固（线上事故复刻）：合成抛出非 SpeechProviderError 的意外异常（如曾经调用未定义方法的
+    AttributeError）时，每个分段也必须降级为「跳句」事件，绝不能让任务静默死亡、让大屏空等看门狗
+    12s。否则任意一个 bug 就会让整段 AI 发言全程没声音。"""
+    monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")
+    monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "0")
+    _patch_tts(monkeypatch, _BoomGateway(), provider="xfyun")
+    speech = _seed_running_speech(content_final=_MULTI_SENTENCE)
+
+    snap = asyncio.run(store.resynthesize_speech_tts(speech["id"]))
+
+    cs = snap["current_speech"]
+    expected = int(cs["tts_expected_sentences"])
+    assert expected >= 4
+    ready = store._tts_ready_indices(speech["id"])
+    skipped = set(int(i) for i in cs["tts_skipped_sentences"])
+    assert ready | skipped == set(range(expected))   # 全覆盖，无空洞（大屏据此可推进到结束）
+    assert skipped == set(range(expected))            # 全部失败 → 全部跳过，而非卡住
+    assert not ready
+
+
+class _RetryThenOkStreamGateway:
+    """流式合成：前 fail_times 次在首块之前抛可重试错误(429)，之后正常出块。"""
+
+    def __init__(self, fail_times: int) -> None:
+        self.calls = 0
+        self.fail_times = fail_times
+
+    async def synthesize_stream(self, text: str, **_opts):
+        i = self.calls
+        self.calls += 1
+        if i < self.fail_times:
+            raise XfyunGatewayError("rate limited", code=429)
+        yield {"type": "chunk", "audio": b"mp3", "index": 1}
+        yield {"type": "done", "mime_type": "audio/mpeg", "latency_ms": 1, "chunk_count": 1}
+
+
+class _MidStreamFailGateway:
+    """先成功推出一块音频，再抛错——此时重试会让大屏收到重复音频，故必须不重试。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def synthesize_stream(self, text: str, **_opts):
+        self.calls += 1
+        yield {"type": "chunk", "audio": b"mp3", "index": 1}
+        raise XfyunGatewayError("stream dropped", code=500)
+
+
+def test_live_stream_retries_before_first_chunk(monkeypatch) -> None:
+    """live 流式 TTS：首块之前遇到 429 等瞬时错误应退避重试并最终成功出声（而非每句直接跳过）。"""
+    monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("PHDEBATE_TTS_MIN_REQUEST_INTERVAL_MS", "0")
+    monkeypatch.setenv("PHDEBATE_TTS_RETRY_BASE_MS", "0")
+    gateway = _RetryThenOkStreamGateway(fail_times=1)
+    selection = SimpleNamespace(gateway=gateway, provider="alicloud", options={}, preset=None)
+    live_key = ("match_001", "sp_test", "task_seed", 0)
+
+    async def scenario():
+        await tts_live_manager.start(live_key, {"mime_type": "audio/mpeg"})
+        try:
+            return await store._stream_tts_live_with_retry(selection, "你好世界", live_key, "audio/mpeg")
+        finally:
+            await tts_live_manager.fail(live_key, "cleanup")
+
+    result = asyncio.run(scenario())
+    assert result.chunk_count == 1            # 成功出块
+    assert gateway.calls == 2                 # 第 1 次失败 + 第 2 次成功
+
+
+def test_live_stream_does_not_retry_after_publishing(monkeypatch) -> None:
+    """live 流式 TTS：已推出音频块后再断流，绝不能重试（否则大屏收到重复音频），直接抛错交由上层跳句。"""
+    monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("PHDEBATE_TTS_MIN_REQUEST_INTERVAL_MS", "0")
+    gateway = _MidStreamFailGateway()
+    selection = SimpleNamespace(gateway=gateway, provider="alicloud", options={}, preset=None)
+    live_key = ("match_001", "sp_test", "task_seed", 1)
+
+    async def scenario():
+        await tts_live_manager.start(live_key, {"mime_type": "audio/mpeg"})
+        try:
+            await store._stream_tts_live_with_retry(selection, "你好世界", live_key, "audio/mpeg")
+        finally:
+            await tts_live_manager.fail(live_key, "cleanup")
+
+    with pytest.raises(XfyunGatewayError):
+        asyncio.run(scenario())
+    assert gateway.calls == 1                 # 中途失败不重试
+
+
 class _StaticAgentGateway:
     def endpoint_for(self, speaker) -> str:
         return "embedded://static"
@@ -138,6 +236,7 @@ def test_tail_skipped_tts_auto_completes_and_next_agent_can_start(monkeypatch) -
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")
+    monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "0")  # 本测试要覆盖尾部分段失败→跳句兜底，关掉重试以免把瞬时失败救活
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
     _patch_tts(monkeypatch, _FlakyGateway(), provider="xfyun")
     _use_embedded_mock_agent("spk_aff_2")
@@ -242,6 +341,7 @@ def test_first_segment_gets_lead_silence_prepended(monkeypatch) -> None:
 def test_completion_invariant_with_gaps(monkeypatch) -> None:
     """多句 + 半数失败：必然出现 skipped 缺口，且不变量仍成立（大屏据此可推进到结束）。"""
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")  # 顺序，便于断言确定的缺口
+    monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "0")  # 本测试要验证失败→跳句缺口，关掉重试以免把瞬时失败救活
     _patch_tts(monkeypatch, _FlakyGateway(), provider="xfyun")
     speech = _seed_running_speech(content_final=_MULTI_SENTENCE)
 

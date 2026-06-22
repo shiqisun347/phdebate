@@ -1,7 +1,8 @@
 import asyncio
+import base64
 import json
 
-from app.services.speech_gateway import AlicloudASRGateway, AlicloudTTSGateway, normalize_tts_text
+from app.services.speech_gateway import ALICLOUD_ASR_AUDIO_FRAME_BYTES, AlicloudASRGateway, AlicloudTTSGateway, normalize_tts_text
 
 
 class FakeAlicloudASRWebSocket:
@@ -73,6 +74,49 @@ def test_alicloud_asr_stream_reports_cumulative_text_across_vad_segments() -> No
     # partial 始终是"已定稿全文 + 当前在写分段"，绝不回退成单段。
     assert partials[-1] == full
     assert "各位评委大家好我方" in partials
+
+
+class WaitingAlicloudASRWebSocket(FakeAlicloudASRWebSocket):
+    def __init__(self):
+        super().__init__([])
+        self.finished_sent = False
+
+    async def __anext__(self):
+        if self.finished_sent:
+            raise StopAsyncIteration
+        # 发送侧按服务商速率上限(~1.5MB/s)节流，会做真实 sleep；用真实时间等待而非纯 sleep(0) 让步。
+        for _ in range(2000):
+            if any(message.get("type") == "session.finish" for message in self.sent):
+                self.finished_sent = True
+                return json.dumps({"type": "session.finished"})
+            await asyncio.sleep(0.005)
+        raise AssertionError("session.finish was not sent")
+
+
+def test_alicloud_asr_stream_splits_large_audio_frames() -> None:
+    socket = WaitingAlicloudASRWebSocket()
+
+    def fake_connect(_url, additional_headers=None, **_kwargs):
+        return socket
+
+    gateway = AlicloudASRGateway(
+        section={
+            "endpoint": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+            "settings": {"model": "qwen3-asr-flash-realtime"},
+            "secrets": {"alicloud": {"api_key": "test-key"}},
+        },
+        connect=fake_connect,
+    )
+    audio = b"x" * (ALICLOUD_ASR_AUDIO_FRAME_BYTES * 2 + 123)
+
+    result = asyncio.run(gateway.recognize(audio))
+
+    audio_messages = [message for message in socket.sent if message.get("type") == "input_audio_buffer.append"]
+    decoded_frames = [base64.b64decode(message["audio"]) for message in audio_messages]
+    assert len(decoded_frames) == 3
+    assert b"".join(decoded_frames) == audio
+    assert all(len(frame) <= ALICLOUD_ASR_AUDIO_FRAME_BYTES for frame in decoded_frames)
+    assert result.chunk_count == len(decoded_frames)
 
 
 class FakeAlicloudWebSocket:

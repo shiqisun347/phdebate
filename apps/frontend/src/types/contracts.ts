@@ -170,6 +170,19 @@ export interface AudioAsset {
   completed_at?: string;
 }
 
+// 分片上传接口的返回：后端只回这一片的归档结果(不再回传整张快照，避免长录音逐片回传 ~157KB 拖垮连接)。
+export interface AudioChunkUploadResult {
+  audio_asset_id: string;
+  speech_id: string;
+  speaker_id: string;
+  chunk_index: number;
+  chunk_count: number;
+  size_bytes: number;
+  file_path: string;
+  pcm_ready: boolean;
+  ignored_after_complete?: boolean; // 发言已完成后到达的迟到分片被良性忽略时为 true
+}
+
 export interface FlowState {
   awaiting_host_confirm: boolean;
   reason: string | null;
@@ -409,45 +422,77 @@ export interface LogClassification {
   screen_scene?: string | null;
 }
 
-export interface AgentRequestLog extends LogClassification {
+export interface LogPayloadSummary {
+  request_preview?: string | null;
+  response_preview?: string | null;
+  request_bytes?: number | null;
+  response_bytes?: number | null;
+}
+
+export interface AgentRequestLogSummary extends LogClassification, LogPayloadSummary {
   id: string;
+  match_id?: string;
   task_id: string;
   speech_id: string | null;
   speaker_id: string;
   endpoint: string;
   status: string;
-  request: Record<string, unknown>;
-  response_text: string | null;
   error_code: string | null;
   error_message: string | null;
   latency_ms: number | null;
   started_at: string;
   completed_at: string | null;
+  updated_at?: string | null;
 }
 
-export interface SpeechServiceRequestLog extends LogClassification {
+export interface AgentRequestLog extends AgentRequestLogSummary {
+  request: Record<string, unknown>;
+  response_text: string | null;
+}
+
+export interface SpeechServiceRequestLogSummary extends LogClassification, LogPayloadSummary {
   id: string;
+  match_id?: string;
   request_id: string;
   service: string;
   operation: string;
   speech_id: string | null;
   speaker_id: string | null;
   status: string;
-  request: Record<string, unknown>;
-  response: Record<string, unknown>;
   error_code: string | null;
   error_message: string | null;
   latency_ms: number | null;
   started_at: string;
   completed_at: string | null;
+  updated_at?: string | null;
+}
+
+export interface SpeechServiceRequestLog extends SpeechServiceRequestLogSummary {
+  request: Record<string, unknown>;
+  response: Record<string, unknown>;
+}
+
+export interface AuditLogSummary extends LogClassification, LogPayloadSummary {
+  id: string;
+  match_id: string;
+  actor_type: string;
+  actor_id: string | null;
+  action: string;
+  target_type: string | null;
+  target_id: string | null;
+  result: string;
+  error_message: string | null;
+  created_at: string;
 }
 
 export interface RequestLogs {
   match_id: string;
-  agent_requests: AgentRequestLog[];
-  speech_service_requests: SpeechServiceRequestLog[];
-  audit_logs: AuditLog[];
+  agent_requests: AgentRequestLogSummary[];
+  speech_service_requests: SpeechServiceRequestLogSummary[];
+  audit_logs: AuditLogSummary[];
 }
+
+export type RequestLogKind = "agent" | "speech" | "xiaoqi" | "audit";
 
 export interface ASRProbeResult {
   result: {
@@ -679,6 +724,8 @@ export interface AuditLog extends LogClassification {
   error_message: string | null;
   created_at: string;
 }
+
+export type RequestLogDetail = AgentRequestLog | SpeechServiceRequestLog | AuditLog;
 
 export interface ExportEntry {
   path: string;

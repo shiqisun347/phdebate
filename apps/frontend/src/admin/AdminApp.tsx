@@ -2,6 +2,7 @@ import * as React from "react";
 import { Menu, Wifi, WifiOff, ChevronRight } from "lucide-react";
 import "./admin.css";
 import { cn } from "./lib/cn";
+import { AuthPrompt } from "../components/AuthPrompt";
 import { ToastProvider } from "./lib/toast";
 import { AdminDataProvider, useAdminData } from "./lib/data";
 import { NAV, findItem, type ModuleId } from "./nav";
@@ -119,10 +120,13 @@ function MonitorIcon() {
 function Shell() {
   const [active, navigate] = useHashModule();
   const [mobileOpen, setMobileOpen] = React.useState(false);
-  const { snapshot } = useAdminData();
+  const { snapshot, loadError } = useAdminData();
   const item = findItem(active);
   const ModuleComponent = MODULES[active];
   const noMatch = Boolean(snapshot && !snapshot.match.id);
+
+  if (!snapshot && loadError) return <AuthPrompt role="admin" message={loadError} />;
+  if (!snapshot) return <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">正在加载技术后台...</div>;
 
   return (
     <div className="flex h-screen overflow-hidden">

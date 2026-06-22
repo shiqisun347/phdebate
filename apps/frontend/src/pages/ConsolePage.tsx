@@ -145,9 +145,9 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       const chunkIndex = chunkIndexRef.current;
       chunkIndexRef.current += 1;
       const upload = uploadAudioChunk(matchId, currentSpeechId, currentSpeakerId, chunkIndex, blob, durationMs, filename)
-        .then((nextSnapshot) => {
-          const asset = nextSnapshot.audio_assets.find((item) => item.speech_id === currentSpeechId);
-          if (!cancelled) setAudioStatus(asset?.chunk_count ? "记录中" : "待命");
+        .then((chunk) => {
+          // 后端只回这一片的归档结果(含累计 chunk_count)，不再回传整张快照。
+          if (!cancelled) setAudioStatus(chunk.chunk_count ? "记录中" : "待命");
         })
         .catch((err) => {
           if (!cancelled) {

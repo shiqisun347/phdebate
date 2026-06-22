@@ -4,14 +4,16 @@ import { Button, Card, CardContent, Badge, Input, Select, EmptyState, Switch } f
 import { Tabs } from "../ui/Tabs";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
-import { getRequestLogs, clearRequestLogs } from "../../api/client";
+import { getRequestLogs, getRequestLogDetail, clearRequestLogs } from "../../api/client";
 import { SCENE_LABELS } from "../lib/labels";
-import type { RequestLogs, LogOrigin } from "../../types/contracts";
+import type { RequestLogDetail, RequestLogKind, RequestLogs, LogOrigin } from "../../types/contracts";
 
 type Kind = "agent" | "speech" | "xiaoqi" | "audit";
 interface Row {
   id: string;
+  logId: string;
   kind: Kind;
+  detailKind: RequestLogKind;
   origin: LogOrigin;
   phase: string;
   scene: string;
@@ -21,6 +23,8 @@ interface Row {
   latency: number | null;
   label: string;
   detail: string;
+  requestPreview: string;
+  outputPreview: string;
   input: unknown;
   output: unknown;
   raw: unknown;
@@ -36,12 +40,27 @@ function originOf(v: unknown): LogOrigin {
   return ((v as { origin?: string })?.origin as LogOrigin) || "live";
 }
 
-function flatten(logs: RequestLogs): Row[] {
+function detailInput(detail: RequestLogDetail | undefined): unknown {
+  return detail && "request" in detail ? detail.request : null;
+}
+
+function detailOutput(detail: RequestLogDetail | undefined): unknown {
+  if (!detail) return null;
+  if ("response_text" in detail) return detail.error_message || detail.response_text;
+  if ("response" in detail) return detail.error_message || detail.response;
+  return detail.error_message || "";
+}
+
+function flatten(logs: RequestLogs, details: Record<string, RequestLogDetail>): Row[] {
   const rows: Row[] = [];
   for (const r of logs.agent_requests) {
+    const rowId = `agent-${r.id}`;
+    const detail = details[rowId];
     rows.push({
-      id: `agent-${r.id}`,
+      id: rowId,
+      logId: r.id,
       kind: "agent",
+      detailKind: "agent",
       origin: originOf(r),
       phase: r.phase_name || "",
       scene: r.screen_scene || "",
@@ -51,16 +70,22 @@ function flatten(logs: RequestLogs): Row[] {
       latency: r.latency_ms,
       label: r.endpoint,
       detail: r.error_message || r.task_id,
-      input: r.request,
-      output: r.error_message || r.response_text,
-      raw: r,
+      requestPreview: r.request_preview || "",
+      outputPreview: r.error_message || r.response_preview || "",
+      input: detailInput(detail),
+      output: detailOutput(detail),
+      raw: detail || r,
     });
   }
   for (const r of logs.speech_service_requests) {
     const isXiaoqi = r.service === "xiaoqi";
+    const rowId = `speech-${r.id}`;
+    const detail = details[rowId];
     rows.push({
-      id: `speech-${r.id}`,
+      id: rowId,
+      logId: r.id,
       kind: isXiaoqi ? "xiaoqi" : "speech",
+      detailKind: isXiaoqi ? "xiaoqi" : "speech",
       origin: originOf(r),
       phase: r.phase_name || "",
       scene: r.screen_scene || "",
@@ -70,15 +95,21 @@ function flatten(logs: RequestLogs): Row[] {
       latency: r.latency_ms,
       label: `${r.service}.${r.operation}`,
       detail: r.error_message || "",
-      input: r.request,
-      output: r.error_message || r.response,
-      raw: r,
+      requestPreview: r.request_preview || "",
+      outputPreview: r.error_message || r.response_preview || "",
+      input: detailInput(detail),
+      output: detailOutput(detail),
+      raw: detail || r,
     });
   }
   for (const r of logs.audit_logs) {
+    const rowId = `audit-${r.id}`;
+    const detail = details[rowId];
     rows.push({
-      id: `audit-${r.id}`,
+      id: rowId,
+      logId: r.id,
       kind: "audit",
+      detailKind: "audit",
       origin: originOf(r),
       phase: r.phase_name || "",
       scene: r.screen_scene || "",
@@ -88,9 +119,11 @@ function flatten(logs: RequestLogs): Row[] {
       latency: null,
       label: r.action,
       detail: r.target_type || "",
-      input: r.request,
-      output: r.error_message || "",
-      raw: r,
+      requestPreview: r.request_preview || "",
+      outputPreview: r.error_message || "",
+      input: detailInput(detail),
+      output: detailOutput(detail),
+      raw: detail || r,
     });
   }
   return rows.sort((a, b) => (a.time < b.time ? 1 : -1));
@@ -112,6 +145,8 @@ export function Logs() {
   const toast = useToast();
   const [logs, setLogs] = React.useState<RequestLogs | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [details, setDetails] = React.useState<Record<string, RequestLogDetail>>({});
+  const [loadingDetails, setLoadingDetails] = React.useState<Set<string>>(new Set());
   const [kind, setKind] = React.useState<"all" | Kind>("all");
   const [origin, setOrigin] = React.useState<"all" | LogOrigin>("all");
   const [status, setStatus] = React.useState<"all" | "ok" | "failed">("all");
@@ -142,7 +177,7 @@ export function Logs() {
     return () => window.clearInterval(t);
   }, [auto, load]);
 
-  const allRows = React.useMemo(() => (logs ? flatten(logs) : []), [logs]);
+  const allRows = React.useMemo(() => (logs ? flatten(logs, details) : []), [logs, details]);
   const phases = React.useMemo(() => Array.from(new Set(allRows.map((r) => r.phase).filter(Boolean))), [allRows]);
 
   const rows = React.useMemo(() => {
@@ -153,15 +188,42 @@ export function Logs() {
     if (phase !== "all") r = r.filter((x) => x.phase === phase);
     if (query.trim()) {
       const q = query.toLowerCase();
-      r = r.filter((x) => `${x.label} ${x.detail} ${JSON.stringify(x.raw)}`.toLowerCase().includes(q));
+      r = r.filter((x) => `${x.label} ${x.detail} ${x.requestPreview} ${x.outputPreview} ${JSON.stringify(x.raw)}`.toLowerCase().includes(q));
     }
     return r;
   }, [allRows, kind, origin, status, phase, query]);
+
+  const ensureDetail = React.useCallback(async (row: Row) => {
+    if (details[row.id] || loadingDetails.has(row.id)) return;
+    setLoadingDetails((prev) => new Set(prev).add(row.id));
+    try {
+      const detail = await getRequestLogDetail(matchId, row.detailKind, row.logId);
+      setDetails((prev) => ({ ...prev, [row.id]: detail }));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "详情加载失败", "error");
+    } finally {
+      setLoadingDetails((prev) => {
+        const next = new Set(prev);
+        next.delete(row.id);
+        return next;
+      });
+    }
+  }, [details, loadingDetails, matchId, toast]);
+
+  React.useEffect(() => {
+    if (!full) return;
+    rows
+      .filter((row) => !details[row.id] && !loadingDetails.has(row.id))
+      .slice(0, 25)
+      .forEach((row) => void ensureDetail(row));
+  }, [details, ensureDetail, full, loadingDetails, rows]);
 
   async function clear() {
     if (!confirm("确认清空当前比赛的全部日志？该操作不可恢复。")) return;
     try {
       setLogs(await clearRequestLogs(matchId));
+      setDetails({});
+      setExpanded(new Set());
       toast("日志已清空", "success");
     } catch (err) {
       toast(err instanceof Error ? err.message : "清空失败", "error");
@@ -178,12 +240,14 @@ export function Logs() {
     URL.revokeObjectURL(url);
   }
 
-  function toggle(id: string) {
+  function toggle(row: Row) {
+    const shouldOpen = !expanded.has(row.id);
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      next.has(row.id) ? next.delete(row.id) : next.add(row.id);
       return next;
     });
+    if (shouldOpen) void ensureDetail(row);
   }
 
   return (
@@ -258,10 +322,12 @@ export function Logs() {
               {rows.map((r) => {
                 const Icon = KIND_META[r.kind].icon;
                 const isOpen = full || expanded.has(r.id);
+                const hasDetail = Boolean(details[r.id]);
+                const isDetailLoading = loadingDetails.has(r.id);
                 return (
                   <div key={r.id}>
                     <button
-                      onClick={() => toggle(r.id)}
+                      onClick={() => toggle(r)}
                       className="grid w-full grid-cols-[72px_64px_1fr_120px_84px_64px_28px] items-center gap-2 px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent"
                     >
                       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -271,8 +337,8 @@ export function Logs() {
                       <span className="min-w-0">
                         <span className="block truncate font-mono text-xs text-foreground">{r.label}</span>
                         {r.detail && <span className="block truncate text-xs text-muted-foreground">{r.detail}</span>}
-                        {r.output != null && preview(r.output) && (
-                          <span className="block truncate text-xs text-primary/80">↳ 输出：{preview(r.output)}</span>
+                        {(r.outputPreview || preview(r.output)) && (
+                          <span className="block truncate text-xs text-primary/80">↳ 输出：{r.outputPreview || preview(r.output)}</span>
                         )}
                         <span className="block text-[11px] text-muted-foreground">{new Date(r.time).toLocaleString()}</span>
                       </span>
@@ -286,10 +352,13 @@ export function Logs() {
                     </button>
                     {isOpen && (
                       <div className="space-y-3 bg-muted/40 px-4 py-3">
+                        {isDetailLoading && <p className="text-xs text-muted-foreground">正在加载完整输入 / 输出…</p>}
+                        {!hasDetail && !isDetailLoading && r.requestPreview && <LogIO title="输入摘要" value={r.requestPreview} />}
+                        {!hasDetail && !isDetailLoading && r.outputPreview && <LogIO title="输出摘要" value={r.outputPreview} />}
                         <LogIO title="输入" value={r.input} />
                         <LogIO title="输出" value={r.output} />
                         <details>
-                          <summary className="cursor-pointer text-xs text-muted-foreground">完整原始记录</summary>
+                          <summary className="cursor-pointer text-xs text-muted-foreground">{hasDetail ? "完整原始记录" : "摘要原始记录"}</summary>
                           <pre className="mt-2 overflow-x-auto text-xs text-foreground">{JSON.stringify(r.raw, null, 2)}</pre>
                         </details>
                       </div>
