@@ -5,6 +5,7 @@ import { AuthPrompt } from "../components/AuthPrompt";
 import { ClockTile } from "../components/ClockTile";
 import { useActionFeedback } from "../components/Feedback";
 import { StatusPill } from "../components/StatusPill";
+import { useLiveKitAudio } from "../livekit/useLiveKitAudio";
 import { useMatch } from "../realtime/useMatch";
 import { clockByName, clockStateLabel, seatLabel, sideClass, sideLabel, speakerLabel } from "../state/format";
 import type { AgentStatus, Clock as MatchClock, MatchSnapshot, Phase, Side, Speaker } from "../types/contracts";
@@ -80,6 +81,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   const chunkIndexRef = useRef(0);
   const activeAudioChunkCountRef = useRef(0);
   const pendingUploadsRef = useRef<Promise<unknown>[]>([]);
+  const uploadChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const identityInitializedRef = useRef(false);
   const { busyProps, notify, runAction } = useActionFeedback();
   const sendRef = useRef(send);
@@ -92,6 +94,13 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   const activeSpeakerId = speaker?.id ?? null;
   const speakerType = speaker?.speaker_type;
   const activeAudioAsset = snapshot?.audio_assets.find((item) => item.speech_id === activeSpeechId);
+  useLiveKitAudio({
+    matchId,
+    role: "speaker",
+    speakerId: selectedSpeakerId,
+    enabled: entryStep === "ready" && speakerType === "human",
+    publishMicrophone: Boolean(activeSpeechId && activeSpeakerId && !speechPaused),
+  });
 
   useEffect(() => {
     activeAudioChunkCountRef.current = activeAudioAsset?.chunk_count ?? 0;
@@ -144,7 +153,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
     function enqueueUpload(blob: Blob, durationMs: number, filename?: string) {
       const chunkIndex = chunkIndexRef.current;
       chunkIndexRef.current += 1;
-      const upload = uploadAudioChunk(matchId, currentSpeechId, currentSpeakerId, chunkIndex, blob, durationMs, filename)
+      const upload = uploadChainRef.current.catch(() => undefined).then(() => uploadAudioChunk(matchId, currentSpeechId, currentSpeakerId, chunkIndex, blob, durationMs, filename))
         .then((chunk) => {
           // 后端只回这一片的归档结果(含累计 chunk_count)，不再回传整张快照。
           if (!cancelled) setAudioStatus(chunk.chunk_count ? "记录中" : "待命");
@@ -159,6 +168,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       upload.finally(() => {
         pendingUploadsRef.current = pendingUploadsRef.current.filter((item) => item !== upload);
       });
+      uploadChainRef.current = upload;
     }
 
     function queueArchiveComplete() {
@@ -253,6 +263,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
         streamRef.current = localStream;
         chunkIndexRef.current = activeAudioChunkCountRef.current;
         pendingUploadsRef.current = [];
+        uploadChainRef.current = Promise.resolve();
         try {
           stopPcmArchive = startPcmArchive(localStream);
         } catch {

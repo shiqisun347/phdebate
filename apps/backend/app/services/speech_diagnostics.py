@@ -105,6 +105,36 @@ def _component(component: str) -> Dict[str, Any]:
             "model": settings.get("model"),
             "detail": "阿里云 DashScope 配置完整" if api_key_ready else "缺少阿里云 DashScope API Key",
         }
+    if provider == "funasr":
+        endpoint = str(section.get("endpoint") or "").strip()
+        settings = section.get("settings") or {}
+        missing = [] if endpoint else [f"{component}.endpoint"]
+        return {
+            "component": component,
+            "provider": "funasr",
+            "status": "ready" if not missing else "missing_config",
+            "configured": ["endpoint"] if endpoint else [],
+            "missing": missing,
+            "url": _redact_url(endpoint),
+            "auth_ready": bool(endpoint),
+            "model": settings.get("model"),
+            "detail": "本机 FunASR streaming 配置完整" if endpoint else "缺少本机 FunASR WebSocket 地址",
+        }
+    if provider == "local_qwen":
+        endpoint = str(section.get("endpoint") or "").strip()
+        settings = section.get("settings") or {}
+        missing = [] if endpoint else [f"{component}.endpoint"]
+        return {
+            "component": component,
+            "provider": "local_qwen",
+            "status": "ready" if not missing else "missing_config",
+            "configured": ["endpoint"] if endpoint else [],
+            "missing": missing,
+            "url": _redact_url(endpoint),
+            "auth_ready": bool(endpoint),
+            "model": settings.get("model"),
+            "detail": "本机 Qwen 语音服务配置完整" if endpoint else "缺少本机 Qwen 服务地址",
+        }
     return {
         "component": component,
         "provider": provider,

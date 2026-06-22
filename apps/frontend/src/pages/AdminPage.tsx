@@ -53,6 +53,7 @@ type AgentConfigDraft = {
   name: string;
   provider_type: "rest_api" | "openai_sdk";
   model_name: string;
+  model_id: string;
   model_kind: "open_source" | "closed_source";
   endpoint: string;
   base_url: string;
@@ -1299,7 +1300,8 @@ export function AdminPage({ matchId }: AdminPageProps) {
               <div className="ops-modal-form ops-agent-config-new">
                 <label><span>名称</span><input value={draft.name} placeholder="如 正方二辩 Agent" onChange={(event) => updateField("name", event.target.value)} autoFocus /></label>
                 <label><span>请求类型</span><select value={draft.provider_type} onChange={(event) => updateField("provider_type", event.target.value)}><option value="rest_api">REST Agent</option><option value="openai_sdk">OpenAI SDK Agent</option></select></label>
-                <label><span>模型</span><input value={draft.model_name} placeholder="如 Qwen-Max" onChange={(event) => updateField("model_name", event.target.value)} /></label>
+                <label><span>展示名称</span><input value={draft.model_name} placeholder="如 墨辩 Agent / Qwen-Max" onChange={(event) => updateField("model_name", event.target.value)} /></label>
+                <label><span>请求模型 ID</span><input value={draft.model_id} placeholder="qwen3.6-plus" onChange={(event) => updateField("model_id", event.target.value)} /></label>
                 <label><span>模型类型</span><select value={draft.model_kind} onChange={(event) => updateField("model_kind", event.target.value)}><option value="closed_source">闭源模型</option><option value="open_source">开源模型</option></select></label>
                 <label><span>超时 ms</span><input type="number" min={1000} max={120000} step={500} value={draft.timeout_ms} onChange={(event) => updateField("timeout_ms", event.target.valueAsNumber)} /></label>
                 {draft.provider_type === "rest_api" ? (
@@ -1641,6 +1643,7 @@ function emptyAgentConfigDraft(): AgentConfigDraft {
     name: "",
     provider_type: "rest_api",
     model_name: "",
+    model_id: "qwen3.6-plus",
     model_kind: "closed_source",
     endpoint: "",
     base_url: "",
@@ -1655,6 +1658,7 @@ function agentConfigDraftFromSnapshot(config: AgentConfig): AgentConfigDraft {
     name: config.name,
     provider_type: config.provider_type === "openai_sdk" ? "openai_sdk" : "rest_api",
     model_name: config.model_name ?? "",
+    model_id: config.model_id ?? "qwen3.6-plus",
     model_kind: config.model_kind === "open_source" ? "open_source" : "closed_source",
     endpoint: config.endpoint ?? "",
     base_url: config.base_url ?? "",

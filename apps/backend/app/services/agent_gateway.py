@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from urllib.parse import urlparse
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
@@ -35,12 +36,20 @@ class AgentGateway:
     async def health(self, endpoint: str) -> Dict[str, Any]:
         if not endpoint:
             return {"ok": True, "status": "ready", "model": "embedded-mock", "latency_ms": 0}
+        started = time.perf_counter()
         try:
             timeout = httpx.Timeout(self.connect_timeout_ms / 1000, read=self.read_timeout_ms / 1000)
             async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
                 response = await client.get(self._url(endpoint, "/health"), headers=self._headers())
+                if self._is_speech_only_health_response(endpoint, response):
+                    return self._speech_only_health(endpoint, started, f"HTTP {response.status_code}")
                 response.raise_for_status()
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError:
+                    if self._has_explicit_path(endpoint):
+                        return self._speech_only_health(endpoint, started, "non-json health response")
+                    raise
         except (httpx.HTTPError, ValueError) as exc:
             raise AgentGatewayError("agent_unavailable", "Agent 健康检查失败。", {"endpoint": endpoint, "error": str(exc)})
 
@@ -315,8 +324,23 @@ class AgentGateway:
 
     def _url(self, endpoint: str, path: str) -> str:
         endpoint = endpoint.rstrip("/")
-        parsed = urlparse(endpoint)
-        has_explicit_path = bool(parsed.path and parsed.path != "/")
-        if path == "/speech" and has_explicit_path:
+        if path == "/speech" and self._has_explicit_path(endpoint):
             return endpoint
         return f"{endpoint}{path}"
+
+    def _has_explicit_path(self, endpoint: str) -> bool:
+        parsed = urlparse(endpoint.rstrip("/"))
+        return bool(parsed.path and parsed.path != "/")
+
+    def _is_speech_only_health_response(self, endpoint: str, response: httpx.Response) -> bool:
+        return self._has_explicit_path(endpoint) and response.status_code in {404, 405, 501}
+
+    def _speech_only_health(self, endpoint: str, started: float, detail: str) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "speech_only",
+            "model": "rest-api",
+            "latency_ms": max(0, int((time.perf_counter() - started) * 1000)),
+            "endpoint": endpoint,
+            "detail": f"Agent endpoint exposes speech generation only ({detail}); live speech calls still use POST {endpoint}.",
+        }

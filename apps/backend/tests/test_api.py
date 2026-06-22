@@ -119,6 +119,54 @@ def test_streaming_tts_first_segment_starts_early(monkeypatch) -> None:
     assert seg_mid == ""  # 还没遇到句末 → 不切
 
 
+def test_local_qwen_tts_preserves_parallel_synthesis_by_default(monkeypatch) -> None:
+    from app.services.integration_config import integration_config
+
+    monkeypatch.delenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", raising=False)
+    integration_config.config["tts"]["provider"] = "local_qwen"
+    assert store._tts_sentence_concurrency() == 4
+
+    integration_config.config["tts"]["provider"] = "alicloud"
+    assert store._tts_sentence_concurrency() == 4
+
+    integration_config.config["tts"]["provider"] = "local_qwen"
+    monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "3")
+    assert store._tts_sentence_concurrency() == 3
+
+
+def test_tts_speech_profile_is_stable_for_same_speaker(monkeypatch) -> None:
+    preset = {
+        "id": "voice_local_qwen_dylan_debater",
+        "provider": "local_qwen",
+        "voice": "dylan",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "sample_rate": 24000,
+        "speech_rate": 1.0,
+    }
+    gateway = SimpleNamespace()
+
+    monkeypatch.setattr(
+        "app.services.match_store.select_tts_gateway",
+        lambda **_kwargs: SimpleNamespace(gateway=gateway, provider="local_qwen", options={}, preset=preset),
+    )
+
+    speaker = {"id": "spk_aff_2", "tts_voice_preset_id": "voice_local_qwen_dylan_debater"}
+    first = store._select_tts_for_speech("task_a", "speech_a", speaker)
+    second = store._select_tts_for_speech("task_a", "speech_a", speaker)
+    other_speaker = store._select_tts_for_speech(
+        "task_b",
+        "speech_b",
+        {"id": "spk_neg_2", "tts_voice_preset_id": "voice_local_qwen_dylan_debater"},
+    )
+
+    assert first.options["voice"] == "dylan"
+    assert first.options["model"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    assert first.options["seed"] == second.options["seed"]
+    assert first.options["temperature"] == 0.25
+    assert first.options["top_p"] == 0.8
+    assert first.options["seed"] != other_speaker.options["seed"]
+
+
 def test_production_auth_requires_read_token_and_keeps_vote_options_public(monkeypatch) -> None:
     monkeypatch.setenv("PHDEBATE_ENV", "production")
     monkeypatch.setenv("PHDEBATE_SCREEN_TOKEN", "screen-secret")
@@ -863,13 +911,21 @@ def test_xiaoqi_result_scene_requires_recorded_entry() -> None:
     ok = client.post("/api/matches/match_001/screen/scene", json={"scene": "xiaoqi_commentary"})
     assert ok.status_code == 200
 
-    # 完成小七结果录入（scope=xiaoqi）后即可切换。
+    formal = client.post("/api/matches/match_001/votes", json={"winner_side": "negative", "best_speaker_id": "spk_neg_1"})
+    assert formal.status_code == 200
+    assert formal.json()["data"]["vote_state"]["winner_side"] == "negative"
+
+    # 完成小七结果录入（scope=xiaoqi）后即可切换，且不覆盖正式评委结果。
     recorded = client.post(
         "/api/matches/match_001/votes",
         json={"winner_side": "affirmative", "best_speaker_id": "spk_aff_3", "scope": "xiaoqi"},
     )
     assert recorded.status_code == 200
-    assert recorded.json()["data"]["vote_state"]["xiaoqi_recorded"] is True
+    vote_state = recorded.json()["data"]["vote_state"]
+    assert vote_state["xiaoqi_recorded"] is True
+    assert vote_state["xiaoqi_summary"] == {"winner_side": "affirmative", "best_speaker_id": "spk_aff_3"}
+    assert vote_state["winner_side"] == "negative"
+    assert vote_state["best_speaker_id"] == "spk_neg_1"
 
     allowed = client.post("/api/matches/match_001/screen/scene", json={"scene": "xiaoqi_result"})
     assert allowed.status_code == 200
@@ -1471,6 +1527,34 @@ def test_mock_agent_speech_records_final_transcript(monkeypatch) -> None:
     assert data["free_debate"]["current_turn_side"] == "negative"
 
 
+def test_agent_playback_completion_stops_voice_agent(monkeypatch) -> None:
+    calls = []
+
+    async def fake_start_voice_agent(payload):
+        return {"ok": True, "payload": payload}
+
+    async def fake_stop_voice_agent(payload):
+        calls.append(payload)
+        return {"ok": True, "payload": payload}
+
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    monkeypatch.setenv("PHDEBATE_LIVEKIT_ENABLED", "1")
+    monkeypatch.setattr("app.services.match_store.start_voice_agent", fake_start_voice_agent)
+    monkeypatch.setattr("app.services.match_store.stop_voice_agent", fake_stop_voice_agent)
+    _use_embedded_mock_agent("spk_aff_2")
+
+    asyncio.run(store.run_agent_speech("spk_aff_2"))
+    mid = client.get("/api/matches/match_001").json()["data"]
+    if mid["current_speech"]:
+        asyncio.run(store.complete_agent_playback(mid["current_speech"]["id"], mid["current_speech"].get("tts_task_id") or ""))
+
+    assert calls
+    assert calls[-1]["match_id"] == "match_001"
+    assert calls[-1]["speaker_id"] == "spk_aff_2"
+    assert calls[-1]["speech_id"]
+    assert any(event["type"] == "voice_agent.stopped" for event in store.events)
+
+
 def test_xiaoqi_match_record_push(monkeypatch) -> None:
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
     _use_embedded_mock_agent("spk_aff_2")
@@ -1712,6 +1796,36 @@ def test_agent_gateway_parses_sse_delta_and_final() -> None:
     assert events[0]["delta"] == "第一句，"
     assert events[1]["type"] == "final"
     assert events[1]["content"] == "第一句，第二句。"
+
+
+def test_agent_gateway_health_accepts_speech_only_explicit_endpoint() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/debate/health"
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    gateway = AgentGateway(transport=httpx.MockTransport(handler))
+    result = asyncio.run(gateway.health("http://agent.local/api/debate"))
+
+    assert result["ok"] is True
+    assert result["status"] == "speech_only"
+    assert result["endpoint"] == "http://agent.local/api/debate"
+
+
+def test_agent_payload_sends_model_id_not_display_name() -> None:
+    speaker = next(item for item in store.snapshot["speakers"] if item["id"] == "spk_aff_2")
+    config = next(item for item in store.snapshot["agent_configs"] if item["id"] == speaker["agent_config_id"])
+    assert config["model_name"] == "Qwen-Max"
+    assert config["model_id"] == "qwen3.6-plus"
+
+    payload = store._build_agent_payload("task_model", "speech_model", speaker)
+    intro_payload = store._build_self_intro_payload("task_intro", "speech_intro", speaker)
+
+    assert payload["model_name"] == "qwen3.6-plus"
+    assert payload["request_model"] == "qwen3.6-plus"
+    assert payload["model_display_name"] == "Qwen-Max"
+    assert intro_payload["model_name"] == "qwen3.6-plus"
+    assert intro_payload["request_model"] == "qwen3.6-plus"
+    assert intro_payload["model_display_name"] == "Qwen-Max"
 
 
 def test_mock_agent_standard_endpoints() -> None:
@@ -2169,12 +2283,39 @@ def test_integration_config_get_patch_toggle_and_redacts_secrets() -> None:
         integration_config._apply_to_env()
 
 
-def test_free_debate_single_turn_defaults_to_30_seconds(monkeypatch) -> None:
+def test_free_debate_single_turn_defaults_to_15_seconds(monkeypatch) -> None:
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
     asyncio.run(store.start_phase("phase_free_debate"))
     snapshot = client.get("/api/matches/match_001").json()["data"]
     turn_clock = next(clock for clock in snapshot["clocks"] if clock["name"] == "turn")
-    assert turn_clock["total_seconds"] == 30
+    assert turn_clock["total_seconds"] == 15
+
+
+def test_free_debate_one_side_total_exhausted_other_side_continues(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    phase = client.post("/api/matches/match_001/phases/phase_free_debate/start")
+    assert phase.status_code == 200
+    start = client.post("/api/matches/match_001/speakers/spk_aff_3/start-speaking")
+    assert start.status_code == 200
+
+    adjusted = client.post(
+        "/api/matches/match_001/clocks/affirmative_total/adjust",
+        json={"remaining_ms": 0, "reason": "unit_total_timeout"},
+    )
+    assert adjusted.status_code == 200
+
+    emitted = asyncio.run(store.tick_timers())
+    assert [event["type"] for event in emitted] == ["clock.expired", "speech.timeout", "speech.ended"]
+
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["flow"]["awaiting_host_confirm"] is False
+    assert data["free_debate"]["current_turn_side"] == "negative"
+    assert next(clock for clock in data["clocks"] if clock["name"] == "affirmative_total")["remaining_ms"] == 0
+    assert next(clock for clock in data["clocks"] if clock["name"] == "negative_total")["remaining_ms"] > 0
+
+    next_start = client.post("/api/matches/match_001/speakers/spk_neg_2/start-speaking")
+    assert next_start.status_code == 200
+    assert next_start.json()["data"]["current_speech"]["speaker_id"] == "spk_neg_2"
 
 
 def test_free_debate_all_skip_triggers_random_agent(monkeypatch) -> None:
@@ -2412,12 +2553,12 @@ def test_clock_pause_resume_and_adjust_flow() -> None:
 
     adjusted = client.post(
         "/api/matches/match_001/clocks/turn/adjust",
-        json={"remaining_ms": 60000, "reason": "test_adjust"},
+        json={"remaining_ms": 12000, "reason": "test_adjust"},
     )
     assert adjusted.status_code == 200
     turn = next(item for item in adjusted.json()["data"]["clocks"] if item["name"] == "turn")
     assert turn["state"] == "running"
-    assert 59000 <= turn["remaining_ms"] <= 60000
+    assert 11000 <= turn["remaining_ms"] <= 12000
     assert turn["deadline_at"] is not None
 
 
@@ -3383,6 +3524,35 @@ def test_asr_partial_final_updates_live_speech_without_duplicate_segments() -> N
     assert sum(1 for item in data["recent_transcript"] if item.get("speech_id") == speech_id) == 1
     assert data["recent_transcript"][0]["text"] == "final text"
     assert data["speech_service"]["asr"]["active_sessions"] == 0
+
+
+def test_asr_pending_placeholder_is_excluded_from_agent_history_and_replaced() -> None:
+    active = store.snapshot["current_speech"]
+    assert active["speaker_id"] == "spk_aff_3"
+    active["content_partial"] = ""
+    active["content_final"] = ""
+    speech_id = active["id"]
+    store.snapshot["recent_transcript"] = [
+        segment for segment in store.snapshot["recent_transcript"] if segment.get("speech_id") != speech_id
+    ]
+
+    stopped = client.post("/api/matches/match_001/speakers/spk_aff_3/stop-speaking")
+    assert stopped.status_code == 200
+    data = stopped.json()["data"]
+    segment = data["recent_transcript"][0]
+    placeholder = "本次发言已结束，正式转写将在后续 ASR 链路中补齐。"
+    assert segment["text"] == placeholder
+    assert segment["exclude_from_history"] is True
+
+    # Defense in depth for already-existing snapshots written before this fix:
+    # even if the marker is absent, the system placeholder must never be sent to agents.
+    store.snapshot["recent_transcript"][0].pop("exclude_from_history", None)
+    history = store._build_debate_history()
+    assert all(msg["content"] != placeholder for stage in history for msg in stage["message"])
+
+    store._apply_archived_asr_text(speech_id, "正方三辩真实转写内容。")
+    history = store._build_debate_history()
+    assert any("正方三辩真实转写内容。" == msg["content"] for stage in history for msg in stage["message"])
 
 
 def test_audio_chunk_upload_archives_file_and_completes_asset() -> None:

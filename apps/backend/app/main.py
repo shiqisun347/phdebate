@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,10 +40,18 @@ from app.auth import (
     update_runtime_auth_config,
 )
 from app.services.match_store import MatchStateError, store
+from app.services.livekit_service import (
+    LiveKitConfigError,
+    LiveKitTokenRequest,
+    issue_livekit_token,
+    livekit_status,
+    voice_agent_identity,
+)
 from app.services.preflight_report import build_preflight_report
 from app.services.speech_gateway import select_asr_gateway, select_tts_gateway
 from app.services.speech_diagnostics import build_speech_diagnostics
 from app.services.tts_live import tts_live_manager
+from app.services.voice_agent_client import VoiceAgentClientError, start_voice_agent, stop_voice_agent, voice_agent_health
 from app.services.ruleset_store import ruleset_store, generate_flow, FLOW_TEMPLATE
 from app.services.xiaoqi_store import xiaoqi_store, COMMANDS as XIAOQI_COMMANDS
 
@@ -111,6 +120,16 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
 @app.get("/api/health")
 async def health() -> Dict[str, Any]:
     return {"ok": True, "service": "phdebate-api", "version": "0.1.0"}
+
+
+@app.get("/api/livekit/status")
+async def get_livekit_status(_principal: Principal = Depends(require_read_access)) -> Dict[str, Any]:
+    status = livekit_status()
+    try:
+        agent = await voice_agent_health()
+    except VoiceAgentClientError as exc:
+        agent = {"ok": False, "error": str(exc)}
+    return {"ok": True, "data": {**status, "voice_agent": agent}}
 
 
 async def start_timer_loop() -> None:
@@ -906,6 +925,114 @@ async def speech_diagnostics(match_id: str, _principal: Principal = Depends(requ
     return {"ok": True, "data": build_speech_diagnostics(store.audio_root_path())}
 
 
+@app.post("/api/matches/{match_id}/livekit/token")
+async def create_livekit_token(match_id: str, request: Request, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    snapshot = await store.get_snapshot()
+    resolved_match_id = snapshot["match"]["id"] if match_id == "current" else match_id
+    payload = body or {}
+    role = str(payload.get("role") or "screen").strip().lower()
+    speaker_id = str(payload.get("speaker_id") or "").strip()
+
+    if role == "speaker":
+        if not speaker_id:
+            raise HTTPException(status_code=422, detail={"code": "missing_speaker_id", "message": "speaker role requires speaker_id"})
+        principal = require_speaker_or_host(request, speaker_id)
+        identity = f"speaker-{speaker_id}"
+        name = _speaker_name(snapshot, speaker_id) or principal.actor_id or speaker_id
+    elif role in {"screen", "host", "admin"}:
+        principal = require_read_access(request)
+        identity = role
+        name = role
+        if role in {"host", "admin"} and principal.role not in {"admin", "host", "dev"}:
+            raise HTTPException(status_code=403, detail="当前 token 权限不足。")
+    elif role in {"voice-agent", "agent"}:
+        require_host(request)
+        identity = voice_agent_identity(resolved_match_id)
+        name = "phdebate voice-agent"
+        role = "voice-agent"
+    else:
+        raise HTTPException(status_code=422, detail={"code": "invalid_livekit_role", "message": "role must be screen/speaker/host/admin/voice-agent"})
+
+    try:
+        data = issue_livekit_token(
+            LiveKitTokenRequest(
+                match_id=resolved_match_id,
+                role=role,
+                identity=identity,
+                name=name,
+                speaker_id=speaker_id,
+                ttl_seconds=int(payload.get("ttl_seconds") or 3600),
+            )
+        )
+    except LiveKitConfigError as exc:
+        raise MatchStateError("livekit_not_configured", str(exc), livekit_status()) from exc
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/voice-agent/start")
+async def start_voice_agent_for_speech(
+    match_id: str,
+    speech_id: str,
+    request: Request,
+    body: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    require_host(request)
+    snapshot = await store.get_snapshot()
+    resolved_match_id = snapshot["match"]["id"] if match_id == "current" else match_id
+    speech = snapshot.get("current_speech") or {}
+    speaker_id = str((body or {}).get("speaker_id") or speech.get("speaker_id") or "").strip()
+    try:
+        token = issue_livekit_token(
+            LiveKitTokenRequest(
+                match_id=resolved_match_id,
+                role="voice-agent",
+                identity=voice_agent_identity(resolved_match_id),
+                name="phdebate voice-agent",
+                speaker_id=speaker_id,
+                ttl_seconds=6 * 3600,
+            )
+        )
+    except LiveKitConfigError as exc:
+        raise MatchStateError("livekit_not_configured", str(exc), livekit_status()) from exc
+    try:
+        agent = await start_voice_agent(
+            {
+                "match_id": resolved_match_id,
+                "speech_id": speech_id,
+                "speaker_id": speaker_id,
+                "livekit": token,
+                "asr_base_url": os.getenv("PHDEBATE_LOCAL_ASR_BASE_URL", "http://127.0.0.1:12301"),
+                "tts_base_url": os.getenv("PHDEBATE_LOCAL_TTS_BASE_URL", "http://127.0.0.1:12302"),
+            }
+        )
+    except VoiceAgentClientError as exc:
+        raise MatchStateError("voice_agent_unavailable", str(exc), {"base_url": os.getenv("PHDEBATE_VOICE_AGENT_BASE_URL", "http://127.0.0.1:6008")}) from exc
+    await store.emit("voice_agent.started", {"speech_id": speech_id, "speaker_id": speaker_id, "agent": agent}, "system", speaker_id)
+    return {"ok": True, "data": {"livekit": {k: v for k, v in token.items() if k != "token"}, "agent": agent}}
+
+
+@app.post("/api/matches/{match_id}/speeches/{speech_id}/voice-agent/stop")
+async def stop_voice_agent_for_speech(
+    match_id: str,
+    speech_id: str,
+    request: Request,
+    body: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    require_host(request)
+    snapshot = await store.get_snapshot()
+    resolved_match_id = snapshot["match"]["id"] if match_id == "current" else match_id
+    speaker_id = str((body or {}).get("speaker_id") or (snapshot.get("current_speech") or {}).get("speaker_id") or "").strip()
+    try:
+        agent = await stop_voice_agent({"match_id": resolved_match_id, "speech_id": speech_id, "speaker_id": speaker_id})
+    except VoiceAgentClientError as exc:
+        raise MatchStateError("voice_agent_unavailable", str(exc), {"base_url": os.getenv("PHDEBATE_VOICE_AGENT_BASE_URL", "http://127.0.0.1:6008")}) from exc
+    await store.emit("voice_agent.stopped", {"speech_id": speech_id, "speaker_id": speaker_id, "agent": agent}, "system", speaker_id)
+    return {"ok": True, "data": {"agent": agent}}
+
+
 @app.post("/api/matches/{match_id}/speech/tts/probe")
 async def probe_tts(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
@@ -1363,6 +1490,13 @@ def _frontend_index() -> FileResponse:
     # index.html must always revalidate so browsers pick up new content-hashed asset
     # bundles after a deploy; the /assets/* files themselves are immutable by hash.
     return FileResponse(FRONTEND_INDEX, headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
+def _speaker_name(snapshot: Dict[str, Any], speaker_id: str) -> str:
+    for speaker in snapshot.get("speakers", []):
+        if speaker.get("id") == speaker_id:
+            return str(speaker.get("name") or speaker_id)
+    return speaker_id
 
 
 if FRONTEND_ASSETS.exists():

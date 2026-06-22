@@ -36,8 +36,12 @@ function buildDynamicPayload(
   const ordered = [...phases].sort((a, b) => a.display_order - b.display_order);
   const idx = currentPhase ? ordered.findIndex((p) => p.id === currentPhase.id) : -1;
   const nextPhase = idx >= 0 ? ordered[idx + 1] : undefined;
+  const requestModel = config?.model_id || config?.model_name || speaker?.model_name || "";
+  const displayModel = config?.model_name || speaker?.model_name || "";
   return {
-    model_name: speaker?.model_name || config?.model_name || "",
+    model_name: requestModel,
+    request_model: requestModel,
+    model_display_name: displayModel,
     debater_name: speaker?.name || "测试辩手",
     debate_position: speaker ? seatLabel(speaker.seat) : "一辩",
     debate_topic: topic || "AI时代，我们应该培养编程思维/提问思维",
@@ -68,7 +72,7 @@ const EMPTY: Draft = {
   provider_type: "rest_api",
   request_method: "POST",
   model_name: "",
-  model_id: "",
+  model_id: "qwen3.6-plus",
   model_kind: "closed_source",
   endpoint: "http://localhost:8000/api/debate",
   base_url: "",
@@ -118,7 +122,9 @@ export function Agents() {
                     </div>
                     <div>
                       <p className="font-semibold text-foreground">{c.name}</p>
-                      <p className="text-xs text-muted-foreground">{c.model_name}{c.model_id ? ` · ${c.model_id}` : ""}</p>
+                      <p className="text-xs text-muted-foreground">
+                        展示：{c.model_name || "未命名"}{c.model_id ? ` · 请求：${c.model_id}` : ""}
+                      </p>
                     </div>
                   </div>
                   <Badge variant={c.enabled ? "success" : "muted"}>{c.enabled ? "启用" : "停用"}</Badge>
@@ -368,7 +374,7 @@ function toDraft(c: AgentConfig): Draft {
     provider_type: (c.provider_type as Draft["provider_type"]) ?? "rest_api",
     request_method: c.request_method ?? "POST",
     model_name: c.model_name ?? "",
-    model_id: c.model_id ?? "",
+    model_id: c.model_id || "qwen3.6-plus",
     model_kind: (c.model_kind as Draft["model_kind"]) ?? "closed_source",
     endpoint: c.endpoint ?? "",
     base_url: c.base_url ?? "",
@@ -438,8 +444,11 @@ function AgentDialog({
               <option value="open_source">开源</option>
             </Select>
           </Field>
-          <Field label="模型名称（展示）">
-            <Input value={d.model_name} onChange={(e) => set("model_name", e.target.value)} placeholder="如：qwen3.6-plus" />
+          <Field label="展示名称">
+            <Input value={d.model_name} onChange={(e) => set("model_name", e.target.value)} placeholder="如：墨辩 Agent / Qwen-Max" />
+          </Field>
+          <Field label="请求模型 ID" hint="真实请求中的 model_name 会使用该值，例如 qwen3.6-plus。">
+            <Input value={d.model_id} onChange={(e) => set("model_id", e.target.value)} placeholder="qwen3.6-plus" />
           </Field>
           {isRest ? (
             <Field label="接口地址 endpoint" required>
@@ -447,9 +456,6 @@ function AgentDialog({
             </Field>
           ) : (
             <>
-              <Field label="模型 ID（调用用）">
-                <Input value={d.model_id} onChange={(e) => set("model_id", e.target.value)} placeholder="qwen3.6-plus" />
-              </Field>
               <Field label="Base URL" required>
                 <Input value={d.base_url} onChange={(e) => set("base_url", e.target.value)} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
               </Field>

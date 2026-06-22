@@ -242,6 +242,10 @@ export interface VoteState {
   best_speaker_id: string;
   /** 小七结果录入（获胜方 + 最佳辩手）是否已完成；大屏切「小七评判」前必须为 true。 */
   xiaoqi_recorded: boolean;
+  xiaoqi_summary?: {
+    winner_side: Side;
+    best_speaker_id: string;
+  };
   judge_summary: {
     constructive: { affirmative: number; negative: number };
     process: { affirmative: number; negative: number };
@@ -552,7 +556,7 @@ export interface IntegrationSecretStatus {
   redacted: string;
 }
 
-export type SpeechProvider = "xfyun" | "alicloud";
+export type SpeechProvider = "xfyun" | "alicloud" | "local_qwen" | "funasr";
 
 export interface IntegrationSecretGroup {
   app_id?: IntegrationSecretStatus;
@@ -600,6 +604,17 @@ export interface IntegrationConfig {
   asr: IntegrationSection;
   tts: IntegrationSection;
   voice_presets: VoicePreset[];
+}
+
+export interface LiveKitToken {
+  enabled: boolean;
+  configured: boolean;
+  url: string;
+  room: string;
+  identity: string;
+  role: string;
+  token: string;
+  expires_at: number;
 }
 
 export interface MatchSnapshot {

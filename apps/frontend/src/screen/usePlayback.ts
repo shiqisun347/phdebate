@@ -27,13 +27,15 @@ import {
 const SILENCE_URL = "/assets/silence-24k-1s.mp3";
 const PLAYBACK_PROGRESS_EPSILON = 0.05;
 const PLAYBACK_HEARTBEAT_MS = 5000;
+const SCREEN_TTS_VOLUME = 0.86;
 
 export function usePlayback(
   matchId: string,
   snapshot: MatchSnapshot | null,
   lastEvent: RealtimeMessage | null,
   audioEnabled: boolean,
-  setAudioEnabled: (value: boolean) => void
+  setAudioEnabled: (value: boolean) => void,
+  onPlaybackBlocked?: () => void
 ): { unlock: () => void } {
   const positionRef = useRef<PlaybackPosition>(emptyPosition());
   const mediaRef = useRef<ActiveMediaState>("idle");
@@ -59,11 +61,27 @@ export function usePlayback(
   const eventChunksRef = useRef<{ key: string; map: Map<number, string> }>({ key: "", map: new Map() });
   const eventSkipsRef = useRef<{ key: string; set: Set<number> }>({ key: "", set: new Set() });
   const audioEnabledRef = useRef(audioEnabled);
+  const onPlaybackBlockedRef = useRef(onPlaybackBlocked);
   const snapshotRef = useRef<MatchSnapshot | null>(snapshot);
   const runnerRef = useRef<(now: number) => void>(() => {});
 
   audioEnabledRef.current = audioEnabled;
+  onPlaybackBlockedRef.current = onPlaybackBlocked;
   snapshotRef.current = snapshot;
+
+  const markPlaybackBlocked = useCallback(() => {
+    positionRef.current = {
+      ...positionRef.current,
+      activeIdx: null,
+      activeStartedMs: null,
+      waitingSinceMs: null,
+    };
+    mediaRef.current = "idle";
+    currentPlayRef.current = null;
+    urlRef.current = "";
+    clearActiveAudio(activeElRef, activeSegmentRef, playbackProgressRef);
+    onPlaybackBlockedRef.current?.();
+  }, []);
 
   // 单元素的一次性事件处理器：用 currentPlayRef/activeSegmentRef 读取"当前段"，不靠闭包捕获。
   function attachHandlers(el: HTMLAudioElement): void {
@@ -145,6 +163,7 @@ export function usePlayback(
     if (!el) {
       el = new Audio();
       el.preload = "auto";
+      el.volume = SCREEN_TTS_VOLUME;
       activeElRef.current = el;
       attachHandlers(el);
     }
@@ -271,6 +290,7 @@ export function usePlayback(
         const segment = `${sp.speechId}:${sp.taskId}:${idx}`;
         const el = ensureEl();
         currentPlayRef.current = { speechId: sp.speechId, taskId: sp.taskId, speakerId: sp.speakerId, idx };
+        el.volume = SCREEN_TTS_VOLUME;
         // 预热下一句，缩小句间空隙（命中后端可缓存的归档音频）。
         const nextUrl = sp.chunks.find((c) => c.sentenceIdx === idx + 1)?.audioUrl;
         if (nextUrl) preloadNext(nextUrl);
@@ -279,8 +299,7 @@ export function usePlayback(
           if (el.paused) {
             void el.play().catch((err: unknown) => {
               if (err && (err as { name?: string }).name === "NotAllowedError") {
-                mediaRef.current = "idle";
-                setAudioEnabled(false);
+                markPlaybackBlocked();
                 return;
               }
               mediaRef.current = "errored";
@@ -306,8 +325,7 @@ export function usePlayback(
         }
         void el.play().catch((err: unknown) => {
           if (err && (err as { name?: string }).name === "NotAllowedError") {
-            mediaRef.current = "idle";
-            setAudioEnabled(false);
+            markPlaybackBlocked();
             return;
           }
           mediaRef.current = "errored";
@@ -315,7 +333,7 @@ export function usePlayback(
         });
       }
     },
-    [matchId, setAudioEnabled]
+    [markPlaybackBlocked, matchId]
   );
 
   runnerRef.current = runReconcile;
@@ -337,9 +355,9 @@ export function usePlayback(
               /* ignore */
             }
           })
-          .catch(() => undefined);
+          .catch(() => onPlaybackBlockedRef.current?.());
       } catch {
-        /* ignore */
+        onPlaybackBlockedRef.current?.();
       }
     }
   }, []);

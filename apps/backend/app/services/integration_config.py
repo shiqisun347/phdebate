@@ -48,6 +48,51 @@ ALICLOUD_TTS_DEFAULTS = {
     },
 }
 
+LOCAL_QWEN_ASR_DEFAULTS = {
+    "provider": "local_qwen",
+    "enabled": True,
+    "endpoint": "http://127.0.0.1:12301",
+    "lang": "zh",
+    "settings": {
+        "model": "Qwen/Qwen3-ASR-1.7B",
+        "input_audio_format": "pcm",
+        "sample_rate": 16000,
+        "language": "zh",
+        "final_timeout": 30,
+    },
+}
+
+FUNASR_ASR_DEFAULTS = {
+    "provider": "funasr",
+    "enabled": True,
+    "endpoint": "ws://127.0.0.1:10095",
+    "lang": "zh",
+    "settings": {
+        "model": "FunAudioLLM/Fun-ASR-Nano-2512",
+        "input_audio_format": "pcm",
+        "sample_rate": 16000,
+        "language": "中文",
+        "frame_ms": 100,
+        "final_timeout": 8,
+        "archive_final_timeout": 90,
+    },
+}
+
+LOCAL_QWEN_TTS_DEFAULTS = {
+    "provider": "local_qwen",
+    "enabled": True,
+    "endpoint": "http://127.0.0.1:12302",
+    "voice": "dylan",
+    "settings": {
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "speech_rate": 1.0,
+        "volume": 70,
+        "pitch_rate": 1.0,
+    },
+}
+
 DEFAULT_VOICE_PRESETS = [
     {
         "id": "voice_alicloud_cherry_host",
@@ -121,6 +166,60 @@ DEFAULT_VOICE_PRESETS = [
         "is_default": False,
         "description": "温和清晰，适合总结陈词或稳健表达。",
     },
+    {
+        "id": "voice_local_qwen_dylan_debater",
+        "name": "本地 Qwen 男声 · Dylan",
+        "provider": "local_qwen",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice": "dylan",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "mode": "server_commit",
+        "language_type": "Chinese",
+        "speech_rate": 1.0,
+        "volume": 72,
+        "pitch_rate": 1.0,
+        "instructions": "平直、清晰、字正腔圆，适合正式辩论发言。",
+        "enabled": True,
+        "is_default": False,
+        "description": "本地 Qwen3-TTS 男声，适合 AI 辩手。",
+    },
+    {
+        "id": "voice_local_qwen_vivian_host",
+        "name": "本地 Qwen 女声 · Vivian",
+        "provider": "local_qwen",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice": "vivian",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "mode": "server_commit",
+        "language_type": "Chinese",
+        "speech_rate": 1.0,
+        "volume": 70,
+        "pitch_rate": 1.0,
+        "instructions": "播报清晰、语气稳健，适合作为辩论赛主持提示。",
+        "enabled": True,
+        "is_default": False,
+        "description": "本地 Qwen3-TTS 女声，适合主持提示和系统播报。",
+    },
+    {
+        "id": "voice_local_qwen_serena_summary",
+        "name": "本地 Qwen 女声 · Serena",
+        "provider": "local_qwen",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice": "serena",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "mode": "server_commit",
+        "language_type": "Chinese",
+        "speech_rate": 0.95,
+        "volume": 68,
+        "pitch_rate": 1.0,
+        "instructions": "语气温和、清晰、沉稳，适合总结陈词和稳健表达。",
+        "enabled": True,
+        "is_default": False,
+        "description": "本地 Qwen3-TTS 女声，适合总结陈词。",
+    },
 ]
 
 _XFYUN_SECRET_KEYS = ("app_id", "api_key", "api_secret")
@@ -161,11 +260,20 @@ class IntegrationConfigStore:
         }
         asr_url = os.getenv("XFYUN_ASR_URL", "").strip()
         tts_url = os.getenv("XFYUN_TTS_URL", "").strip()
+        local_asr_url = os.getenv("PHDEBATE_LOCAL_ASR_BASE_URL", "").strip()
+        local_tts_url = os.getenv("PHDEBATE_LOCAL_TTS_BASE_URL", "").strip()
+        funasr_url = os.getenv("PHDEBATE_FUNASR_ASR_URL", "").strip()
         config = {
             "asr": {**deepcopy(ALICLOUD_ASR_DEFAULTS), "secrets": {"xfyun": dict(xfyun_secrets), "alicloud": dict(alicloud_secrets)}},
             "tts": {**deepcopy(ALICLOUD_TTS_DEFAULTS), "secrets": {"xfyun": dict(xfyun_secrets), "alicloud": dict(alicloud_secrets)}},
             "voice_presets": deepcopy(DEFAULT_VOICE_PRESETS),
         }
+        if local_asr_url:
+            config["asr"].update({**deepcopy(LOCAL_QWEN_ASR_DEFAULTS), "endpoint": local_asr_url})
+        if funasr_url:
+            config["asr"].update({**deepcopy(FUNASR_ASR_DEFAULTS), "endpoint": funasr_url})
+        if local_tts_url:
+            config["tts"].update({**deepcopy(LOCAL_QWEN_TTS_DEFAULTS), "endpoint": local_tts_url})
         if asr_url:
             config["asr"].update(
                 {
@@ -243,14 +351,20 @@ class IntegrationConfigStore:
         return secrets
 
     def _normalize(self) -> None:
-        for kind, defaults in (("asr", ALICLOUD_ASR_DEFAULTS), ("tts", ALICLOUD_TTS_DEFAULTS)):
+        for kind, base_defaults in (("asr", ALICLOUD_ASR_DEFAULTS), ("tts", ALICLOUD_TTS_DEFAULTS)):
             section = self.config.setdefault(kind, {})
+            provider = self._normalize_provider(section.get("provider"))
+            defaults = self._provider_defaults(kind, provider) or base_defaults
             for key, value in defaults.items():
+                if key == "settings":
+                    continue
                 section.setdefault(key, deepcopy(value))
-            section["provider"] = self._normalize_provider(section.get("provider"))
+            section["provider"] = provider
             section["enabled"] = bool(section.get("enabled"))
             section["endpoint"] = str(section.get("endpoint") or "").strip()
             section.setdefault("settings", {})
+            for key, value in (defaults.get("settings") or {}).items():
+                section["settings"].setdefault(key, deepcopy(value))
             section["secrets"] = self._merge_secrets(section.get("secrets") or {}, {})
         presets = [self._normalize_voice_preset(item) for item in self.config.get("voice_presets", []) if isinstance(item, dict)]
         seen = {item["id"] for item in presets}
@@ -287,7 +401,18 @@ class IntegrationConfigStore:
 
     def _normalize_provider(self, value: Any) -> str:
         provider = str(value or "alicloud").strip().lower()
-        return provider if provider in {"xfyun", "alicloud"} else "alicloud"
+        return provider if provider in {"xfyun", "alicloud", "local_qwen", "funasr"} else "alicloud"
+
+    def _provider_defaults(self, kind: str, provider: str) -> Optional[Dict[str, Any]]:
+        if kind == "asr" and provider == "funasr":
+            return FUNASR_ASR_DEFAULTS
+        if kind == "asr" and provider == "local_qwen":
+            return LOCAL_QWEN_ASR_DEFAULTS
+        if kind == "tts" and provider == "local_qwen":
+            return LOCAL_QWEN_TTS_DEFAULTS
+        if provider == "alicloud":
+            return ALICLOUD_ASR_DEFAULTS if kind == "asr" else ALICLOUD_TTS_DEFAULTS
+        return None
 
     def _normalize_voice_preset(self, item: Dict[str, Any]) -> Dict[str, Any]:
         voice = str(item.get("voice") or "Ethan").strip() or "Ethan"

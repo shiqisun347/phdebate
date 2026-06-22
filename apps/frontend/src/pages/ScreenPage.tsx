@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
-import { Volume2, VolumeX } from "lucide-react";
+import { Volume2 } from "lucide-react";
 import { ClockTile } from "../components/ClockTile";
 import { AuthPrompt } from "../components/AuthPrompt";
 import { clockByName, seatLabel, sideClass, sideLabel, speakerLabel } from "../state/format";
 import { resolveAvatar, defaultAvatarDataUri } from "../state/avatar";
 import type { MatchInfo, MatchSnapshot, ScreenScene, Side, Speaker } from "../types/contracts";
+import { useLiveKitAudio } from "../livekit/useLiveKitAudio";
 import { useMatch } from "../realtime/useMatch";
 import { usePlayback } from "../screen/usePlayback";
 import { playBellCue } from "../utils/audioCue";
@@ -30,7 +31,7 @@ type RuntimeScreenScene =
 
 export function ScreenPage({ matchId }: ScreenPageProps) {
   const { snapshot, loadError, lastEvent } = useMatch(matchId, "screen");
-  const [audioEnabled, setAudioEnabled] = useState(() => window.localStorage.getItem("phdebate_screen_audio_enabled") === "1");
+  const [audioEnabled, setAudioEnabled] = useState(true);
   // 本次页面加载是否已通过「点击手势」解锁音频。浏览器自动播放策略要求每次加载都需一次手势，
   // localStorage 里的开关状态会跨刷新保留，但手势解锁不会 —— 因此用独立的会话级状态跟踪。
   const [audioUnlocked, setAudioUnlocked] = useState(false);
@@ -39,19 +40,17 @@ export function ScreenPage({ matchId }: ScreenPageProps) {
     window.localStorage.setItem("phdebate_screen_audio_enabled", audioEnabled ? "1" : "0");
   }, [audioEnabled]);
 
+  const livekitAudio = useLiveKitAudio({ matchId, role: "screen", enabled: audioEnabled });
+  const livekitHasAudio = livekitAudio.status === "connected" && livekitAudio.audioTrackCount > 0;
+
   // 大屏 TTS 播放：全部交给确定性的对账状态机（src/screen/playbackReducer.ts + usePlayback）。
   // 快照唯一真相、看门狗自愈、无 live MSE —— 历史上的卡死/超慢/停不下来在那里被单测覆盖。
-  const { unlock } = usePlayback(matchId, snapshot, lastEvent, audioEnabled, setAudioEnabled);
-
-  // 切换扬声器：开启时必须在「点击手势」内解锁音频（浏览器自动播放策略），否则程序化 play() 被拦。
-  const toggleAudio = () => {
-    const next = !audioEnabled;
-    setAudioEnabled(next);
-    if (next) {
-      unlock();
-      setAudioUnlocked(true);
-    }
-  };
+  // LiveKit 只有真正订阅到远端音轨时才接管声音；当前 voice-agent 若只连 room 但未发布 TTS 音轨，
+  // 仍继续用后端归档音频兜底播放。
+  const { unlock } = usePlayback(matchId, snapshot, lastEvent, audioEnabled && !livekitHasAudio, setAudioEnabled, () => {
+    setAudioEnabled(true);
+    setAudioUnlocked(false);
+  });
 
   // 全屏遮罩：开关为「开」但本次加载尚未手势解锁 → 引导操作员开赛前先点一次，避免第一段被浏览器拦截。
   const enableAudioFromGate = () => {
@@ -69,10 +68,26 @@ export function ScreenPage({ matchId }: ScreenPageProps) {
 
   if (!snapshot && loadError) return <AuthPrompt role="screen" message={loadError} />;
   if (!snapshot) return <div className="loading">正在连接大屏状态...</div>;
-  return <ScreenView snapshot={snapshot} audioEnabled={audioEnabled} onToggleAudio={toggleAudio} />;
+  return (
+    <>
+      <ScreenView snapshot={snapshot} />
+      {audioEnabled && !audioUnlocked && <AudioUnlockGate onEnable={enableAudioFromGate} />}
+    </>
+  );
 }
 
-function ScreenView({ snapshot, audioEnabled, onToggleAudio }: { snapshot: MatchSnapshot; audioEnabled: boolean; onToggleAudio: () => void }) {
+function AudioUnlockGate({ onEnable }: { onEnable: () => void }) {
+  return (
+    <div className="screen-audio-gate">
+      <button type="button" className="screen-audio-gate-btn" onClick={onEnable} autoFocus>
+        <Volume2 size={28} />
+        <span>启用现场声音</span>
+      </button>
+    </div>
+  );
+}
+
+function ScreenView({ snapshot }: { snapshot: MatchSnapshot }) {
   // 空白起步（无比赛）：大屏显示候场提示，不渲染空赛场。
   if (!snapshot.match.id) {
     return (
@@ -110,13 +125,6 @@ function ScreenView({ snapshot, audioEnabled, onToggleAudio }: { snapshot: Match
       {scene === "audience_result" && <AudienceResultScene snapshot={snapshot} />}
       {scene === "acknowledgment" && <AcknowledgmentScene snapshot={snapshot} />}
       {scene === "live" && <LiveScene snapshot={snapshot} />}
-      <button
-        className={`screen-audio-btn ${audioEnabled ? "active" : ""}`}
-        onClick={onToggleAudio}
-        title={audioEnabled ? "关闭扬声器（AI发言朗读）" : "开启扬声器（AI发言朗读）"}
-      >
-        {audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
-      </button>
     </main>
   );
 }
@@ -130,7 +138,7 @@ function ScreenChrome({ match }: { match: MatchInfo }) {
   return (
     <header className="screen-top">
       <div className="screen-event-title">
-        {titleLogo && <img className="screen-event-logo" src={titleLogo} alt={titleText || "比赛 logo"} />}
+        {titleLogo && <img className="screen-title-logo" src={titleLogo} alt={titleText || "比赛 logo"} />}
         {titleText ? (
           <div className="screen-event-wordmark">{titleText}</div>
         ) : (
@@ -138,7 +146,7 @@ function ScreenChrome({ match }: { match: MatchInfo }) {
         )}
       </div>
       {organizerImage ? (
-        <img className="screen-event-logo" src={organizerImage} alt={match.organizer || "主办机构"} />
+        <img className="screen-organizer-logo" src={organizerImage} alt={match.organizer || "主办机构"} />
       ) : match.organizer ? (
         <div className="screen-event-organizer">{match.organizer}</div>
       ) : (
@@ -174,12 +182,12 @@ function SpeakingAvatar({
         <span className="sa-ring two" />
         <img src={src} alt={name} />
       </div>
+      {caption && <div className="sa-caption">{caption}</div>}
       <div className="sa-wave" aria-hidden="true">
         {Array.from({ length: bars }).map((_, i) => (
           <i key={i} style={{ animationDelay: `${(i % bars) * 0.08}s` }} />
         ))}
       </div>
-      {caption && <div className="sa-caption">{caption}</div>}
     </div>
   );
 }
@@ -279,6 +287,7 @@ function LiveScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const phase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
   const currentSpeaker = snapshot.speakers.find((item) => item.id === snapshot.current_speech?.speaker_id);
   const liveMode = snapshot.match.live_mode;
+  const showPrepMode = liveMode === "prep" && currentSpeaker?.speaker_type === "agent";
   // 自由辩论里"单个辩手发言结束、等待主持确认下一轮"（free_turn_next）只是阶段内的小过渡，
   // 不应跳到整阶段的「发言结束」大页——那只在某一方总计时归零（next_action=phase_next）时才出现。
   // 因此这种过渡仍留在 FreeMode 内显示一个小的"xxx 发言结束"。
@@ -293,7 +302,7 @@ function LiveScene({ snapshot }: { snapshot: MatchSnapshot }) {
         <div className="live-center">
           {snapshot.flow.awaiting_host_confirm && !freeTurnHandoff ? (
             <FlowWaitMode snapshot={snapshot} />
-          ) : liveMode === "prep" ? (
+          ) : showPrepMode ? (
             <PrepMode speaker={currentSpeaker} phaseName={phase?.name ?? "AI 准备"} />
           ) : liveMode === "free" ? (
             <FreeMode snapshot={snapshot} currentSpeaker={currentSpeaker} />
@@ -348,9 +357,10 @@ function XiaoqiSpeakingScene({ snapshot, kicker, title }: { snapshot: MatchSnaps
 /* ----------------------------- 小七评判（获胜方 + 最佳辩手，无理由） ----------------------------- */
 function XiaoqiResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const vs = snapshot.vote_state;
-  const published = vs.judge_published;
-  const winner = snapshot.teams.find((team) => team.side === vs.winner_side);
-  const best = snapshot.speakers.find((speaker) => speaker.id === vs.best_speaker_id);
+  const summary = vs.xiaoqi_summary ?? { winner_side: vs.winner_side, best_speaker_id: vs.best_speaker_id };
+  const published = vs.xiaoqi_recorded;
+  const winner = snapshot.teams.find((team) => team.side === summary.winner_side);
+  const best = snapshot.speakers.find((speaker) => speaker.id === summary.best_speaker_id);
   return (
     <section className="screen-scene official-result-scene">
       <ScreenChrome match={snapshot.match} />
@@ -359,9 +369,9 @@ function XiaoqiResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
           <img className="xiaoqi-result-avatar" src={xiaoqiAvatar(snapshot)} alt={snapshot.xiaoqi?.name || "小七"} />
           <span>{snapshot.xiaoqi?.name || "小七"} 评判结果</span>
         </div>
-        {published && vs.winner_side ? (
+        {published && summary.winner_side ? (
           <>
-            <h1>{sideLabel(vs.winner_side)} · {winner?.name}</h1>
+            <h1>{sideLabel(summary.winner_side)} · {winner?.name}</h1>
             <div className="best-speaker-award">
               <div className="best-speaker-label">最佳辩手</div>
               <div className="best-speaker-name">{speakerLabel(best)}</div>
@@ -752,7 +762,7 @@ function FlowWaitMode({ snapshot }: { snapshot: MatchSnapshot }) {
 function SingleMode({ snapshot, currentSpeaker, phaseName, phaseSide }: { snapshot: MatchSnapshot; currentSpeaker?: Speaker; phaseName: string; phaseSide?: Side }) {
   const completedSpeaker = !currentSpeaker ? lastCompletedSpeaker(snapshot) : undefined;
   const tone = (currentSpeaker?.side ?? completedSpeaker?.side ?? phaseSide) === "negative" ? "neg" : "aff";
-  const thinking = Boolean(currentSpeaker && snapshot.current_speech?.state === "thinking");
+  const thinking = Boolean(currentSpeaker?.speaker_type === "agent" && snapshot.current_speech?.state === "thinking");
   return (
     <div className="mode-panel single-mode">
       {currentSpeaker && (
@@ -763,6 +773,7 @@ function SingleMode({ snapshot, currentSpeaker, phaseName, phaseSide }: { snapsh
           lively={currentSpeaker.speaker_type === "agent"}
           active={isSpeakingNow(snapshot)}
           size="md"
+          caption={`${sideLabel(currentSpeaker.side)}${seatLabel(currentSpeaker.seat)}`}
         />
       )}
       <div className="phase-name">{phaseName}</div>
@@ -773,7 +784,7 @@ function SingleMode({ snapshot, currentSpeaker, phaseName, phaseSide }: { snapsh
 }
 
 function FreeMode({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; currentSpeaker?: Speaker }) {
-  const thinking = Boolean(currentSpeaker && snapshot.current_speech?.state === "thinking");
+  const thinking = Boolean(currentSpeaker?.speaker_type === "agent" && snapshot.current_speech?.state === "thinking");
   // 轮间空档（无人发言、2 秒窗口/等待对方开始）：显示上一位刚说完的小「xxx 发言结束」，保留双方计时
   // 与轮次信息（阶段仍在继续）。自由辩论轮内已全自动、不再 awaiting_host_confirm，故改用「本阶段
   // 最近一段定稿」来判断刚结束的发言人；本阶段还没人说过则显示「等待开始」（不串到上一环节）。
@@ -794,6 +805,7 @@ function FreeMode({ snapshot, currentSpeaker }: { snapshot: MatchSnapshot; curre
           lively={currentSpeaker.speaker_type === "agent"}
           active={isSpeakingNow(snapshot)}
           size="sm"
+          caption={`${sideLabel(currentSpeaker.side)}${seatLabel(currentSpeaker.seat)}`}
         />
       )}
       <div className="phase-name">自由辩论</div>
@@ -825,6 +837,7 @@ function lastCompletedSpeaker(snapshot: MatchSnapshot): Speaker | undefined {
 }
 
 function PrepMode({ speaker, phaseName }: { speaker?: Speaker; phaseName: string }) {
+  const isAgent = speaker?.speaker_type === "agent";
   return (
     <div className="mode-panel prep-mode">
       <div className="phase-name">{phaseName}</div>
@@ -836,12 +849,13 @@ function PrepMode({ speaker, phaseName }: { speaker?: Speaker; phaseName: string
           lively={speaker.speaker_type === "agent"}
           active={false}
           size="md"
+          caption={`${sideLabel(speaker.side)}${seatLabel(speaker.seat)}`}
         />
       ) : (
         <div className="prep-orb"><i /><i /></div>
       )}
-      <h3>AI 思考中</h3>
-      <p>{speakerLabel(speaker)} · 生成完成后开始播报并计时</p>
+      <h3>{isAgent ? "AI 思考中" : "等待发言"}</h3>
+      <p>{speakerLabel(speaker)} · {isAgent ? "生成完成后开始播报并计时" : "请等待辩手开始发言"}</p>
     </div>
   );
 }

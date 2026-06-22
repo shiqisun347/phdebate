@@ -1,4 +1,4 @@
-import type { AgentConfigTestResult, ApiResponse, ASRArchiveRecognitionResult, ASRProbeResult, AudioChunkUploadResult, AuditLog, AudienceVotePayload, CurrentMatchSummary, DataSummary, ExportBundle, GeneratedFlow, IntegrationConfig, MatchList, MatchSnapshot, PreflightReport, RequestLogDetail, RequestLogKind, RequestLogs, Ruleset, RulesetList, RuntimeAuthStatus, SpeechDiagnostics, TTSProbeResult, VoteOptions, XiaoqiCommandResult, XiaoqiConfig } from "../types/contracts";
+import type { AgentConfigTestResult, ApiResponse, ASRArchiveRecognitionResult, ASRProbeResult, AudioChunkUploadResult, AuditLog, AudienceVotePayload, CurrentMatchSummary, DataSummary, ExportBundle, GeneratedFlow, IntegrationConfig, LiveKitToken, MatchList, MatchSnapshot, PreflightReport, RequestLogDetail, RequestLogKind, RequestLogs, Ruleset, RulesetList, RuntimeAuthStatus, SpeechDiagnostics, TTSProbeResult, VoteOptions, XiaoqiCommandResult, XiaoqiConfig } from "../types/contracts";
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
@@ -101,6 +101,18 @@ export function deleteMatch(matchId: string): Promise<MatchList> {
 
 export function getIntegrationConfig(matchId: string): Promise<IntegrationConfig> {
   return request<IntegrationConfig>(`/api/matches/${matchId}/integration-config`);
+}
+
+export function createLiveKitToken(matchId: string, body: { role: string; speaker_id?: string; ttl_seconds?: number }): Promise<LiveKitToken> {
+  return post<LiveKitToken>(`/api/matches/${matchId}/livekit/token`, body);
+}
+
+export function startVoiceAgent(matchId: string, speechId: string, speakerId?: string): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>(`/api/matches/${matchId}/speeches/${speechId}/voice-agent/start`, speakerId ? { speaker_id: speakerId } : {});
+}
+
+export function stopVoiceAgent(matchId: string, speechId: string, speakerId?: string): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>(`/api/matches/${matchId}/speeches/${speechId}/voice-agent/stop`, speakerId ? { speaker_id: speakerId } : {});
 }
 
 export function patchIntegrationConfig(matchId: string, body: Partial<Record<"asr" | "tts" | "voice_presets", unknown>>): Promise<IntegrationConfig> {

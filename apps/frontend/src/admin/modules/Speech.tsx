@@ -39,6 +39,28 @@ const XFYUN_TTS_DEFAULTS = {
   settings: { model: "xfyun-super-tts", response_format: "mp3", sample_rate: 24000, mode: "server_commit", language_type: "Chinese" },
 };
 
+const FUNASR_ASR_DEFAULTS = {
+  endpoint: "ws://127.0.0.1:10095",
+  settings: {
+    model: "FunAudioLLM/Fun-ASR-Nano-2512",
+    input_audio_format: "pcm",
+    sample_rate: 16000,
+    language: "中文",
+    frame_ms: 100,
+    final_timeout: 8,
+  },
+};
+
+const LOCAL_QWEN_ASR_DEFAULTS = {
+  endpoint: "http://127.0.0.1:12301",
+  settings: { model: "Qwen/Qwen3-ASR-1.7B", input_audio_format: "pcm", sample_rate: 16000, language: "zh", final_timeout: 30 },
+};
+
+const LOCAL_QWEN_TTS_DEFAULTS = {
+  endpoint: "http://127.0.0.1:12302",
+  settings: { model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", response_format: "mp3", sample_rate: 24000, speech_rate: 1 },
+};
+
 const ALICLOUD_VOICES = [
   { voice: "Neil", label: "Neil · 阿闻 · 清晰男声辩手" },
   { voice: "Ethan", label: "Ethan · 晨煦 · 备用男声" },
@@ -49,6 +71,12 @@ const ALICLOUD_VOICES = [
 const XFYUN_VOICES = [
   { voice: "x6_lingfeiyi_pro", label: "x6_lingfeiyi_pro" },
   { voice: "x6_lingxiaoxuan_pro", label: "x6_lingxiaoxuan_pro" },
+];
+
+const LOCAL_QWEN_VOICES = [
+  { voice: "dylan", label: "Dylan · 本地男声" },
+  { voice: "vivian", label: "Vivian · 本地女声" },
+  { voice: "serena", label: "Serena · 本地女声" },
 ];
 
 type SecretDraft = {
@@ -69,7 +97,7 @@ type SectionDraft = {
 };
 
 function toDraft(section: IntegrationSection, kind: "asr" | "tts"): SectionDraft {
-  const provider = (section.provider === "xfyun" ? "xfyun" : "alicloud") as SpeechProvider;
+  const provider = normalizeProvider(section.provider, kind);
   const defaults = providerDefaults(kind, provider);
   return {
     enabled: section.enabled,
@@ -88,8 +116,17 @@ function toDraft(section: IntegrationSection, kind: "asr" | "tts"): SectionDraft
   };
 }
 
+function normalizeProvider(value: unknown, kind: "asr" | "tts"): SpeechProvider {
+  const provider = String(value || "").trim().toLowerCase();
+  if (provider === "xfyun" || provider === "alicloud" || provider === "local_qwen") return provider;
+  if (provider === "funasr" && kind === "asr") return "funasr";
+  return "alicloud";
+}
+
 function providerDefaults(kind: "asr" | "tts", provider: SpeechProvider) {
   if (provider === "xfyun") return kind === "asr" ? XFYUN_ASR_DEFAULTS : XFYUN_TTS_DEFAULTS;
+  if (provider === "funasr") return kind === "asr" ? FUNASR_ASR_DEFAULTS : ALICLOUD_TTS_DEFAULTS;
+  if (provider === "local_qwen") return kind === "asr" ? LOCAL_QWEN_ASR_DEFAULTS : LOCAL_QWEN_TTS_DEFAULTS;
   return kind === "asr" ? ALICLOUD_ASR_DEFAULTS : ALICLOUD_TTS_DEFAULTS;
 }
 
@@ -253,7 +290,7 @@ function SectionEditor({
         if (draft.secrets.xfyun_api_key.trim()) xfyun.api_key = draft.secrets.xfyun_api_key.trim();
         if (draft.secrets.xfyun_api_secret.trim()) xfyun.api_secret = draft.secrets.xfyun_api_secret.trim();
         if (Object.keys(xfyun).length) Object.assign(secrets, xfyun, { xfyun });
-      } else {
+      } else if (draft.provider === "alicloud") {
         const alicloud: Record<string, string> = {};
         if (draft.secrets.alicloud_api_key.trim()) alicloud.api_key = draft.secrets.alicloud_api_key.trim();
         if (draft.secrets.alicloud_workspace_id.trim()) alicloud.workspace_id = draft.secrets.alicloud_workspace_id.trim();
@@ -271,6 +308,8 @@ function SectionEditor({
   }
 
   const alicloud = draft.provider === "alicloud";
+  const xfyun = draft.provider === "xfyun";
+  const localProvider = draft.provider === "funasr" || draft.provider === "local_qwen";
   const modelDefault = kind === "asr" ? "qwen3-asr-flash-realtime" : "qwen3-tts-flash-realtime";
   const vad = (draft.settings.turn_detection as Record<string, unknown>) ?? {};
 
@@ -298,6 +337,8 @@ function SectionEditor({
             >
               <option value="alicloud">阿里云百炼 Qwen</option>
               <option value="xfyun">讯飞</option>
+              {kind === "asr" && <option value="funasr">本机 FunASR streaming</option>}
+              <option value="local_qwen">本机 Qwen</option>
             </Select>
           </div>
           <div className="space-y-1.5">
@@ -347,13 +388,17 @@ function SectionEditor({
             <SecretInput label="DashScope API Key" configured={configured(section, "alicloud", "api_key")} value={draft.secrets.alicloud_api_key} onChange={(value) => setSecret("alicloud_api_key", value)} />
             <SecretInput label="Workspace ID" configured={configured(section, "alicloud", "workspace_id")} value={draft.secrets.alicloud_workspace_id} onChange={(value) => setSecret("alicloud_workspace_id", value)} />
           </div>
-        ) : (
+        ) : xfyun ? (
           <div className="grid gap-3 sm:grid-cols-3">
             <SecretInput label="APP ID" configured={configured(section, "xfyun", "app_id")} value={draft.secrets.xfyun_app_id} onChange={(value) => setSecret("xfyun_app_id", value)} />
             <SecretInput label="API Key" configured={configured(section, "xfyun", "api_key")} value={draft.secrets.xfyun_api_key} onChange={(value) => setSecret("xfyun_api_key", value)} />
             <SecretInput label="API Secret" configured={configured(section, "xfyun", "api_secret")} value={draft.secrets.xfyun_api_secret} onChange={(value) => setSecret("xfyun_api_secret", value)} />
           </div>
-        )}
+        ) : localProvider ? (
+          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            本机服务通过 127.0.0.1 访问，无需云端密钥；请确认服务器进程和端口健康。
+          </div>
+        ) : null}
 
         <div className="flex justify-end pt-1">
           <Button onClick={save} loading={saving}>
@@ -414,7 +459,7 @@ function VoicePresetManager({
   const [customVoice, setCustomVoice] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const visiblePresets = config.voice_presets.filter((preset) => preset.provider === config.tts.provider);
-  const baseVoices = config.tts.provider === "xfyun" ? XFYUN_VOICES : ALICLOUD_VOICES;
+  const baseVoices = config.tts.provider === "xfyun" ? XFYUN_VOICES : config.tts.provider === "local_qwen" ? LOCAL_QWEN_VOICES : ALICLOUD_VOICES;
   const isBaseVoice = (voice: string) => baseVoices.some((item) => item.voice === voice);
 
   function openEditor(preset: VoicePreset | null) {
@@ -434,7 +479,14 @@ function VoicePresetManager({
         ...editing,
         id: editing.id || `voice_${config.tts.provider}_${Date.now()}`,
         provider: config.tts.provider,
-        model: String(config.tts.settings?.model ?? (config.tts.provider === "xfyun" ? "xfyun-super-tts" : "qwen3-tts-flash-realtime")),
+        model: String(
+          config.tts.settings?.model ??
+            (config.tts.provider === "xfyun"
+              ? "xfyun-super-tts"
+              : config.tts.provider === "local_qwen"
+                ? "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+                : "qwen3-tts-flash-realtime")
+        ),
         response_format: String(config.tts.settings?.response_format ?? "mp3"),
         sample_rate: Number(config.tts.settings?.sample_rate ?? 24000),
         mode: String(config.tts.settings?.mode ?? "server_commit"),
@@ -552,13 +604,19 @@ function VoicePresetManager({
                   <Input
                     value={editing.voice}
                     onChange={(event) => setEditing({ ...editing, voice: event.target.value })}
-                    placeholder={config.tts.provider === "xfyun" ? "讯飞发音人 ID，如 x4_xxx" : "阿里云音色 ID，如 voice-xxxx（含复刻音色）"}
+                    placeholder={
+                      config.tts.provider === "xfyun"
+                        ? "讯飞发音人 ID，如 x4_xxx"
+                        : config.tts.provider === "local_qwen"
+                          ? "本地 Qwen 音色，如 dylan"
+                          : "阿里云音色 ID，如 voice-xxxx（含复刻音色）"
+                    }
                   />
                 )}
               </div>
               <div className="space-y-1.5">
                 <Label>服务商</Label>
-                <Input value={config.tts.provider === "xfyun" ? "讯飞" : "阿里云百炼 Qwen"} disabled />
+                <Input value={config.tts.provider === "xfyun" ? "讯飞" : config.tts.provider === "local_qwen" ? "本机 Qwen" : "阿里云百炼 Qwen"} disabled />
               </div>
             </div>
             <div className="grid gap-3 md:grid-cols-4">

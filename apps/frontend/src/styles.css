@@ -783,7 +783,12 @@ textarea {
   font-size: clamp(24px, 1.8vw, 34px);
 }
 
-.screen-top img.screen-event-logo {
+.screen-top img.screen-title-logo {
+  height: clamp(48px, 4.4vw, 76px);
+  object-fit: contain;
+}
+
+.screen-top img.screen-organizer-logo {
   height: clamp(36px, 3.4vw, 56px);
   object-fit: contain;
 }
@@ -7126,9 +7131,9 @@ textarea {
   display: grid;
   place-items: center;
 }
-.speaking-avatar.sm .sa-portrait { width: 132px; height: 132px; }
-.speaking-avatar.md .sa-portrait { width: 200px; height: 200px; }
-.speaking-avatar.lg .sa-portrait { width: 300px; height: 300px; }
+.speaking-avatar.sm .sa-portrait { width: 148px; height: 148px; }
+.speaking-avatar.md .sa-portrait { width: 220px; height: 220px; }
+.speaking-avatar.lg .sa-portrait { width: 318px; height: 318px; }
 .speaking-avatar .sa-portrait img {
   width: 78%;
   height: 78%;
@@ -7180,7 +7185,13 @@ textarea {
 }
 .speaking-avatar.is-idle .sa-wave i { height: 22%; opacity: 0.5; }
 
-.speaking-avatar .sa-caption { color: #dce6f4; font-size: 18px; font-weight: 700; }
+.speaking-avatar .sa-caption {
+  color: #f5f9ff;
+  font-size: clamp(20px, 1.35vw, 28px);
+  font-weight: 850;
+  line-height: 1;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.5);
+}
 
 @keyframes sa-wave {
   0%, 100% { height: 22%; }
@@ -7340,32 +7351,35 @@ textarea {
   color: #ffe9a0;
 }
 
-/* 大屏扬声器切换按钮（右下角不起眼） */
-.screen-audio-btn {
+.screen-audio-gate {
   position: fixed;
-  bottom: 14px;
-  right: 18px;
-  z-index: 100;
-  display: flex;
+  inset: 0;
+  z-index: 140;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 9, 20, 0.66);
+  backdrop-filter: blur(6px);
+}
+.screen-audio-gate-btn {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
+  gap: 14px;
+  min-height: 76px;
+  padding: 0 30px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: rgba(255, 255, 255, 0.35);
+  border: 1px solid rgba(133, 202, 255, 0.58);
+  background: rgba(16, 35, 68, 0.92);
+  color: #f5fbff;
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.36), 0 0 36px rgba(74, 163, 255, 0.24);
+  font-size: 24px;
+  font-weight: 800;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s;
 }
-.screen-audio-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
-  color: rgba(255, 255, 255, 0.7);
-}
-.screen-audio-btn.active {
-  background: rgba(74, 163, 255, 0.22);
-  border-color: rgba(133, 202, 255, 0.4);
-  color: #85caff;
+.screen-audio-gate-btn:hover,
+.screen-audio-gate-btn:focus-visible {
+  outline: none;
+  border-color: rgba(160, 219, 255, 0.9);
+  background: rgba(24, 50, 92, 0.96);
 }
 
 /* ===================== 观众投票：移动端投票页（点选排序，参考 image.png 深色科技风） ===================== */

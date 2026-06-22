@@ -19,9 +19,17 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.services.agent_gateway import AgentGateway, AgentGatewayError
 from app.services.integration_config import integration_config
-from app.services.speech_gateway import SpeechGatewayError, normalize_tts_text, select_asr_gateway, select_tts_gateway
+from app.services.livekit_service import LiveKitConfigError, LiveKitTokenRequest, issue_livekit_token, voice_agent_identity
+from app.services.speech_gateway import (
+    SpeechGatewayError,
+    SpeechGatewaySelection,
+    normalize_tts_text,
+    select_asr_gateway,
+    select_tts_gateway,
+)
 from app.services.sqlite_repo import SQLiteRepository, project_root
 from app.services.tts_live import tts_live_manager
+from app.services.voice_agent_client import publish_tts_sentence, start_voice_agent, stop_voice_agent
 from app.services.xfyun_gateway import TTSResult, XfyunASRGateway, XfyunGatewayError, XfyunTTSGateway
 
 
@@ -44,6 +52,13 @@ def _recent_transcript_limit() -> int:
 
 
 _RECENT_TRANSCRIPT_LIMIT = _recent_transcript_limit()
+ASR_PENDING_TRANSCRIPT_TEXT = "本次发言已结束，正式转写将在后续 ASR 链路中补齐。"
+ASR_UNAVAILABLE_TRANSCRIPT_TEXT = "转写不可用，请以现场发言为准。"
+HUMAN_SYSTEM_TRANSCRIPT_TEXTS = {
+    ASR_PENDING_TRANSCRIPT_TEXT,
+    ASR_UNAVAILABLE_TRANSCRIPT_TEXT,
+    "时间到，本次发言结束。",
+}
 
 
 def _speech_error_message(exc: Exception) -> str:
@@ -57,6 +72,10 @@ def _speech_error_code(exc: Exception, fallback: str) -> str:
 
 def _speech_error_provider(exc: Exception, fallback: str = "") -> str:
     return str(getattr(exc, "provider", "") or fallback)
+
+
+def _is_human_system_transcript_text(text: str) -> bool:
+    return text.strip() in HUMAN_SYSTEM_TRANSCRIPT_TEXTS
 
 
 class MatchStateError(Exception):
@@ -110,6 +129,7 @@ class MatchStore:
         self._prepared_speeches: Dict[str, Dict[str, Any]] = {}
         self._prefetch_inflight: Set[str] = set()
         self._prefetch_counter = 0
+        self._voice_agent_closed_speeches: Set[str] = set()
         self.repo = SQLiteRepository()
         self.agent_gateway = AgentGateway()
         loaded = self.repo.load_snapshot()
@@ -134,6 +154,7 @@ class MatchStore:
         self.events: List[Dict[str, Any]] = []
         self._asr_streams = {}
         self._clear_prepared_speeches()
+        self._voice_agent_closed_speeches.clear()
         self.repo.clear_match_history("match_001")
         # 需求3：重置 demo 时清理多比赛注册表与非活动槽位，保证起点干净
         try:
@@ -297,6 +318,11 @@ class MatchStore:
                 "audience_published": False,
                 "winner_side": "affirmative",
                 "best_speaker_id": "spk_neg_2",
+                "xiaoqi_recorded": False,
+                "xiaoqi_summary": {
+                    "winner_side": "affirmative",
+                    "best_speaker_id": "spk_neg_2",
+                },
                 "judge_summary": {
                     "constructive": {"affirmative": 2, "negative": 1},
                     "process": {"affirmative": 1, "negative": 2},
@@ -377,6 +403,8 @@ class MatchStore:
                 "audience_published": False,
                 "winner_side": "affirmative",
                 "best_speaker_id": "",
+                "xiaoqi_recorded": False,
+                "xiaoqi_summary": self._empty_xiaoqi_summary(),
                 "judge_summary": self._empty_judge_summary(),
                 "audience_summary": self._empty_audience_summary(),
                 "audience_votes": [],
@@ -469,7 +497,7 @@ class MatchStore:
             ("phase_neg_statement_2", "neg_statement_2", "反方二辩陈词", "statement", "negative", 2, 90),
             ("phase_aff_statement_3", "aff_statement_3", "正方三辩陈词", "statement", "affirmative", 3, 90),
             ("phase_neg_statement_3", "neg_statement_3", "反方三辩陈词", "statement", "negative", 3, 90),
-            ("phase_free_debate", "free_debate", "自由辩论", "free_debate", "neutral", None, 480),
+            ("phase_free_debate", "free_debate", "自由辩论", "free_debate", "neutral", None, 240),
             ("phase_neg_summary_4", "neg_summary_4", "反方四辩总结", "summary", "negative", 4, 180),
             ("phase_aff_summary_4", "aff_summary_4", "正方四辩总结", "summary", "affirmative", 4, 180),
             ("phase_commentary_vote", "commentary_vote", "点评与评委合票", "commentary", "neutral", None, 1020),
@@ -477,20 +505,22 @@ class MatchStore:
         phases: List[Dict[str, Any]] = []
         for index, (phase_id, key, name, phase_type, side, seat, duration) in enumerate(rows, start=1):
             status = "completed" if index < 7 else "active" if index == 7 else "pending"
-            phases.append(
-                {
-                    "id": phase_id,
-                    "phase_key": key,
-                    "name": name,
-                    "phase_type": phase_type,
-                    "display_order": index,
-                    "side": side,
-                    "speaker_seat": seat,
-                    "duration_seconds": duration,
-                    "speaker_selector": "free_debate" if phase_type == "free_debate" else "fixed_seat",
-                    "status": status,
-                }
-            )
+            phase = {
+                "id": phase_id,
+                "phase_key": key,
+                "name": name,
+                "phase_type": phase_type,
+                "display_order": index,
+                "side": side,
+                "speaker_seat": seat,
+                "duration_seconds": duration,
+                "speaker_selector": "free_debate" if phase_type == "free_debate" else "fixed_seat",
+                "status": status,
+            }
+            if phase_type == "free_debate":
+                phase["side_total_seconds"] = 120
+                phase["turn_seconds"] = 15
+            phases.append(phase)
         return phases
 
     @staticmethod
@@ -509,20 +539,25 @@ class MatchStore:
             side = node.get("side") or "neutral"
             seat = self._seat_from_speaker_text(node.get("speaker", "")) if phase_type != "free_debate" else None
             key = node.get("key") or f"phase_{index}"
-            phases.append(
-                {
-                    "id": f"phase_{index}_{key}",
-                    "phase_key": key,
-                    "name": node.get("name") or f"环节{index}",
-                    "phase_type": phase_type,
-                    "display_order": index,
-                    "side": side,
-                    "speaker_seat": seat,
-                    "duration_seconds": int(node.get("duration_seconds") or 180),
-                    "speaker_selector": "free_debate" if phase_type == "free_debate" else "fixed_seat",
-                    "status": "pending",
-                }
-            )
+            duration = int(node.get("duration_seconds") or (240 if phase_type == "free_debate" else 180))
+            phase = {
+                "id": f"phase_{index}_{key}",
+                "phase_key": key,
+                "name": node.get("name") or f"环节{index}",
+                "phase_type": phase_type,
+                "display_order": index,
+                "side": side,
+                "speaker_seat": seat,
+                "duration_seconds": duration,
+                "speaker_selector": "free_debate" if phase_type == "free_debate" else "fixed_seat",
+                "status": "pending",
+            }
+            if phase_type == "free_debate":
+                side_total = int(node.get("side_total_seconds") or max(1, duration // 2))
+                phase["side_total_seconds"] = side_total
+                phase["turn_seconds"] = int(node.get("turn_seconds") or 15)
+                phase["duration_seconds"] = side_total * 2
+            phases.append(phase)
         return phases
 
     async def get_snapshot(self) -> Dict[str, Any]:
@@ -801,6 +836,7 @@ class MatchStore:
             self.events = []
             self._asr_streams = {}
             self._clear_prepared_speeches()
+            self._voice_agent_closed_speeches.clear()
             self.snapshot = new_snapshot
             self._persist_snapshot()
 
@@ -1441,6 +1477,9 @@ class MatchStore:
         if speech.get("kind") == "self_intro":
             segment["exclude_from_history"] = True
             segment["kind"] = "self_intro"
+        elif source == "human_asr" and _is_human_system_transcript_text(text):
+            segment["exclude_from_history"] = True
+            segment["system_placeholder"] = "asr_pending"
 
     async def start_phase(self, phase_id: str) -> Dict[str, Any]:
         async with self._lock:
@@ -1546,6 +1585,7 @@ class MatchStore:
             speaker = self._find_speaker(speaker_id)
             self._ensure_speaker_allowed_for_current_phase(speaker)
             phase_id = self.snapshot["match"]["current_phase_id"]
+            phase = self._current_phase()
             self._clear_flow_state()
             self.snapshot["current_speech"] = {
                 "id": f"speech_{self.seq + 1}",
@@ -1559,7 +1599,7 @@ class MatchStore:
                 "started_at": None,
                 "state": "thinking" if speaker["speaker_type"] == "agent" else "ready",
             }
-            self.snapshot["match"]["live_mode"] = "prep" if speaker["speaker_type"] == "agent" else self.snapshot["match"]["live_mode"]
+            self.snapshot["match"]["live_mode"] = "prep" if speaker["speaker_type"] == "agent" else ("free" if phase["phase_type"] == "free_debate" else "single")
             self._persist_snapshot()
         return await self.emit(
             "speaker.activated",
@@ -1661,6 +1701,12 @@ class MatchStore:
         agent_started_at = iso_now()
         agent_started_time = time.perf_counter()
         tts_enabled = self._tts_formal_enabled()
+        tts_selection: Optional[SpeechGatewaySelection] = None
+        if tts_enabled:
+            try:
+                tts_selection = self._select_tts_for_speech(task_id, speech_id, speaker)
+            except SpeechProviderError:
+                tts_enabled = False
         self.repo.save_agent_request_started(
             match_id=payload["match_id"],
             task_id=task_id,
@@ -1716,6 +1762,7 @@ class MatchStore:
             {"speaker_id": speaker_id, "side": speaker["side"], "speaker_type": "agent"},
             "system",
         )
+        asyncio.create_task(self._start_livekit_voice_agent(task_id, speech_id, speaker_id))
 
         full_text = ""
         tts_sent_chars = 0
@@ -1725,7 +1772,7 @@ class MatchStore:
 
         async def synthesize_sentence(sentence: str, sentence_idx: int) -> bool:
             async with tts_semaphore:
-                return await self._synthesize_sentence_tts_with_timeout(sentence, sentence_idx, task_id, speech_id, speaker)
+                return await self._synthesize_sentence_tts_with_timeout(sentence, sentence_idx, task_id, speech_id, speaker, tts_selection)
 
         try:
             async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
@@ -2033,13 +2080,41 @@ class MatchStore:
                         "speaker_id": None,
                         "detail": "browser playback completed",
                     }
-                ended_payload = {"speaker_id": speaker_id, "side": speaker["side"], "speech_id": speech_id}
+                ended_payload = {
+                    "match_id": self.snapshot["match"]["id"],
+                    "speaker_id": speaker_id,
+                    "side": speaker["side"],
+                    "speech_id": speech_id,
+                }
                 self._persist_snapshot()
 
         if ignored_payload:
             await self.emit("tts.playback_complete_ignored", ignored_payload, "screen")
             return await self.get_snapshot()
         await self.emit("speech.ended", ended_payload or {"speech_id": speech_id}, "agent", (ended_payload or {}).get("speaker_id"))
+        if ended_payload and os.getenv("PHDEBATE_LIVEKIT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+            self._voice_agent_closed_speeches.add(f"{ended_payload['match_id']}:{speech_id}")
+            try:
+                agent = await stop_voice_agent(
+                    {
+                        "match_id": ended_payload["match_id"],
+                        "speech_id": speech_id,
+                        "speaker_id": ended_payload["speaker_id"],
+                    }
+                )
+                await self.emit(
+                    "voice_agent.stopped",
+                    {"speech_id": speech_id, "speaker_id": ended_payload["speaker_id"], "agent": agent},
+                    "system",
+                    ended_payload["speaker_id"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self.emit(
+                    "voice_agent.stop_failed",
+                    {"speech_id": speech_id, "speaker_id": ended_payload["speaker_id"], "reason": str(exc)},
+                    "system",
+                    ended_payload["speaker_id"],
+                )
         return await self.get_snapshot()
 
     async def run_mock_agent_speech(self, speaker_id: str) -> None:
@@ -2138,6 +2213,12 @@ class MatchStore:
         endpoint = self.agent_gateway.endpoint_for(speaker)
         config = self._agent_config_for_speaker(speaker)
         tts_enabled = self._tts_formal_enabled()
+        tts_selection: Optional[SpeechGatewaySelection] = None
+        if tts_enabled:
+            try:
+                tts_selection = self._select_tts_for_speech(task_id, speech_id, speaker)
+            except SpeechProviderError:
+                tts_enabled = False
         # 占位（pending），避免并发重复预取同一键。
         self._prepared_speeches[key] = {
             "speech_id": speech_id,
@@ -2161,7 +2242,7 @@ class MatchStore:
 
         async def synth(sentence: str, idx: int) -> bool:
             async with tts_semaphore:
-                return await self._synthesize_sentence_tts_with_timeout(sentence, idx, task_id, speech_id, speaker)
+                return await self._synthesize_sentence_tts_with_timeout(sentence, idx, task_id, speech_id, speaker, tts_selection)
 
         try:
             async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
@@ -2227,6 +2308,60 @@ class MatchStore:
             return None
         return self._prepared_speeches.pop(key)
 
+    async def _start_livekit_voice_agent(self, task_id: str, speech_id: str, speaker_id: str) -> None:
+        if os.getenv("PHDEBATE_LIVEKIT_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
+        async with self._lock:
+            match_id = self.snapshot["match"]["id"]
+            task_key = f"{match_id}:{speech_id}"
+            current = self.snapshot.get("current_speech") or {}
+            if task_key in self._voice_agent_closed_speeches or current.get("id") != speech_id:
+                return
+        try:
+            token = issue_livekit_token(
+                LiveKitTokenRequest(
+                    match_id=match_id,
+                    role="voice-agent",
+                    identity=voice_agent_identity(match_id),
+                    name="phdebate voice-agent",
+                    speaker_id=speaker_id,
+                    ttl_seconds=6 * 3600,
+                )
+            )
+            result = await start_voice_agent(
+                {
+                    "match_id": match_id,
+                    "task_id": task_id,
+                    "speech_id": speech_id,
+                    "speaker_id": speaker_id,
+                    "livekit": token,
+                    "asr_base_url": os.getenv("PHDEBATE_LOCAL_ASR_BASE_URL", "http://127.0.0.1:12301"),
+                    "tts_base_url": os.getenv("PHDEBATE_LOCAL_TTS_BASE_URL", "http://127.0.0.1:12302"),
+                }
+            )
+            async with self._lock:
+                current = self.snapshot.get("current_speech") or {}
+                should_stop_immediately = task_key in self._voice_agent_closed_speeches or current.get("id") != speech_id
+            if should_stop_immediately:
+                await stop_voice_agent({"match_id": match_id, "speech_id": speech_id, "speaker_id": speaker_id})
+                await self.emit(
+                    "voice_agent.stopped",
+                    {
+                        "task_id": task_id,
+                        "speech_id": speech_id,
+                        "speaker_id": speaker_id,
+                        "agent": {"ok": True, "status": "late_start_stopped"},
+                    },
+                    "system",
+                    speaker_id,
+                )
+                return
+            await self.emit("voice_agent.started", {"task_id": task_id, "speech_id": speech_id, "speaker_id": speaker_id, "agent": result}, "system", speaker_id)
+        except LiveKitConfigError as exc:
+            await self.emit("voice_agent.failed", {"task_id": task_id, "speech_id": speech_id, "speaker_id": speaker_id, "reason": str(exc)}, "system", speaker_id)
+        except Exception as exc:  # noqa: BLE001
+            await self.emit("voice_agent.failed", {"task_id": task_id, "speech_id": speech_id, "speaker_id": speaker_id, "reason": str(exc)}, "system", speaker_id)
+
     async def _activate_prepared_speech(self, prepared: Dict[str, Any], speaker: Dict[str, Any], is_self_intro: bool) -> None:
         """用缓存数据复刻 run_agent_speech 的状态落点（不调 agent/TTS）。音频已在预取时归档。"""
         speaker_id = speaker["id"]
@@ -2291,6 +2426,7 @@ class MatchStore:
             {"speaker_id": speaker_id, "side": speaker["side"], "speaker_type": "agent"},
             "system",
         )
+        asyncio.create_task(self._start_livekit_voice_agent(task_id, speech_id, speaker_id))
         await self.emit(
             "agent.speech.final",
             {"task_id": task_id, "speech_id": speech_id, "speaker_id": speaker_id, "content": full_text},
@@ -2587,12 +2723,15 @@ class MatchStore:
                     "只能结束当前发言人的发言。",
                     {"active_speaker_id": speech.get("speaker_id")},
                 )
-            text = speech.get("content_partial") or "本次发言已结束，正式转写将在后续 ASR 链路中补齐。"
+            text = speech.get("content_partial") or ASR_PENDING_TRANSCRIPT_TEXT
             speech["content_final"] = text
             speech["state"] = "ended"
             speech["ended_at"] = iso_now()
             speech["ended_reason"] = "speaker_stop"
-            self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
+            segment = self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
+            if speech.get("source") == "human_asr" and _is_human_system_transcript_text(text):
+                segment["exclude_from_history"] = True
+                segment["system_placeholder"] = "asr_pending"
             self.snapshot["current_speech"] = None
             self._pause_running_clocks()
             self._advance_free_debate_turn_if_needed(speaker["side"])
@@ -3132,7 +3271,7 @@ class MatchStore:
                 asset["asr_realtime_error"] = reason
             active = self.snapshot.get("current_speech") if (self.snapshot.get("current_speech") or {}).get("id") == speech_id else None
             if active and active.get("source") == "human_asr" and not active.get("content_partial"):
-                active["content_partial"] = "转写不可用，请以现场发言为准。"
+                active["content_partial"] = ASR_UNAVAILABLE_TRANSCRIPT_TEXT
             self.snapshot["speech_service"]["asr"] = {
                 "status": "failed",
                 "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
@@ -3544,7 +3683,10 @@ class MatchStore:
                 speech["state"] = "ended"
                 speech["ended_at"] = to_iso(now)
                 speech["ended_reason"] = "timeout"
-                self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
+                segment = self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
+                if speech.get("source") == "human_asr" and _is_human_system_transcript_text(text):
+                    segment["exclude_from_history"] = True
+                    segment["system_placeholder"] = "asr_pending"
                 self.snapshot["current_speech"] = None
                 self._pause_running_clocks()
                 self._advance_free_debate_turn_if_needed(speaker["side"])
@@ -3680,13 +3822,17 @@ class MatchStore:
                     )
                     self._append_audience_summary(body)
             else:
-                judge_summary = self._build_judge_summary(body)
-                self.snapshot["vote_state"]["judge_summary"] = judge_summary
-                self.snapshot["vote_state"]["winner_side"] = judge_summary["winner_side"]
-                self.snapshot["vote_state"]["best_speaker_id"] = judge_summary["best_speaker_id"]
-                # 小七结果录入（获胜方 + 最佳辩手）完成标记：大屏切「小七评判」前必须先录入。
                 if str(body.get("scope") or "") == "xiaoqi":
+                    self.snapshot["vote_state"]["xiaoqi_summary"] = {
+                        "winner_side": body["winner_side"],
+                        "best_speaker_id": body["best_speaker_id"],
+                    }
                     self.snapshot["vote_state"]["xiaoqi_recorded"] = True
+                else:
+                    judge_summary = self._build_judge_summary(body)
+                    self.snapshot["vote_state"]["judge_summary"] = judge_summary
+                    self.snapshot["vote_state"]["winner_side"] = judge_summary["winner_side"]
+                    self.snapshot["vote_state"]["best_speaker_id"] = judge_summary["best_speaker_id"]
             if duplicate_error is None:
                 self._persist_snapshot()
         if duplicate_error is not None:
@@ -4250,6 +4396,8 @@ class MatchStore:
         first_speaker = next((speaker["id"] for speaker in speakers if speaker.get("side") in {"affirmative", "negative"}), "")
         judge_summary = self._empty_judge_summary()
         judge_summary["best_speaker_id"] = first_speaker
+        xiaoqi_summary = self._empty_xiaoqi_summary()
+        xiaoqi_summary["best_speaker_id"] = first_speaker
         return {
             "window_status": "closed",
             "audience_count": 0,
@@ -4258,6 +4406,7 @@ class MatchStore:
             "winner_side": "affirmative",
             "best_speaker_id": first_speaker,
             "xiaoqi_recorded": False,
+            "xiaoqi_summary": xiaoqi_summary,
             "judge_summary": judge_summary,
             "audience_summary": self._empty_audience_summary(),
             "audience_votes": [],
@@ -4359,10 +4508,11 @@ class MatchStore:
         if not model_name:
             model_name = "未配置模型"
 
-        # model_id is the actual id passed to the OpenAI-compatible API (openai_sdk mode).
-        # Defaults to the 需求 2.md test model so demo agents stream out of the box.
+        # model_name is the label shown on screen/admin; model_id is always the request model.
         model_id = str(fields.get("model_id", source.get("model_id", "")) or "").strip()
-        if not model_id and provider_type == "openai_sdk":
+        if not model_id:
+            model_id = str(fields.get("request_model", source.get("request_model", "")) or "").strip()
+        if not model_id:
             model_id = "qwen3.6-plus"
 
         model_kind = fields.get("model_kind", source.get("model_kind", "closed_source"))
@@ -4499,6 +4649,8 @@ class MatchStore:
                 "audience_published": False,
                 "winner_side": "affirmative",
                 "best_speaker_id": "",
+                "xiaoqi_recorded": False,
+                "xiaoqi_summary": self._empty_xiaoqi_summary(),
                 "judge_summary": self._empty_judge_summary(),
                 "audience_summary": self._empty_audience_summary(),
                 "audience_votes": [],
@@ -4512,6 +4664,13 @@ class MatchStore:
         self.snapshot["vote_state"].setdefault("audience_vote_keys", [])
         self.snapshot["vote_state"].setdefault("used_audience_tokens", [])
         self.snapshot["vote_state"].setdefault("xiaoqi_recorded", False)
+        self.snapshot["vote_state"].setdefault(
+            "xiaoqi_summary",
+            {
+                "winner_side": self.snapshot["vote_state"].get("winner_side", "affirmative"),
+                "best_speaker_id": self.snapshot["vote_state"].get("best_speaker_id", ""),
+            },
+        )
         audience_summary = self.snapshot["vote_state"]["audience_summary"]
         if not self.snapshot["vote_state"]["audience_votes"] and audience_summary.get("total", 0) == 0 and self.snapshot["vote_state"].get("audience_count", 0) > 0:
             count = int(self.snapshot["vote_state"]["audience_count"])
@@ -4563,6 +4722,22 @@ class MatchStore:
             if speaker.get("speaker_type") == "agent":
                 self._apply_agent_config_to_speaker(speaker)
         current_phase_id = self.snapshot.get("match", {}).get("current_phase_id")
+        current_phase: Optional[Dict[str, Any]] = None
+        for phase in self.snapshot.get("phases", []):
+            if phase.get("id") == current_phase_id:
+                current_phase = phase
+            if phase.get("phase_type") != "free_debate":
+                continue
+            duration = int(phase.get("duration_seconds") or 240)
+            if "side_total_seconds" not in phase:
+                side_total = 120 if duration in {240, 480} else max(1, duration // 2)
+                phase["side_total_seconds"] = side_total
+            else:
+                side_total = int(phase.get("side_total_seconds") or 120)
+            phase["duration_seconds"] = side_total * 2
+            phase.setdefault("turn_seconds", 15)
+        if current_phase:
+            self._sync_current_phase_clocks_after_config(current_phase)
         for segment in self.snapshot.get("recent_transcript", []):
             segment.setdefault("phase_id", current_phase_id)
             segment.setdefault("speech_id", segment.get("id"))
@@ -4685,6 +4860,12 @@ class MatchStore:
             "total": 0,
             "winner": {"affirmative": 0, "negative": 0},
             "best_speaker": [],
+        }
+
+    def _empty_xiaoqi_summary(self) -> Dict[str, Any]:
+        return {
+            "winner_side": "affirmative",
+            "best_speaker_id": "",
         }
 
     def _public_vote_state(self) -> Dict[str, Any]:
@@ -5059,6 +5240,8 @@ class MatchStore:
                 continue
             if segment.get("exclude_from_history"):
                 continue
+            if segment.get("source") == "human_asr" and _is_human_system_transcript_text(str(segment.get("text") or "")):
+                continue
             pid = segment.get("phase_id", "")
             if pid not in groups:
                 groups[pid] = []
@@ -5096,9 +5279,13 @@ class MatchStore:
         holder = "正方" if speaker["side"] == "affirmative" else "反方"
         speech_rate = self._speaker_speech_rate(speaker)
         budget = self._agent_output_budget(time_limit, speech_rate)
+        model_id = str(config.get("model_id") or config.get("model_name") or "").strip()
+        model_display_name = str(config.get("model_name") or speaker.get("model_name") or "").strip()
         return {
             # 结构化辩论格式（Agent 接口核心字段，与 请求体(1).json 对齐）
-            "model_name": config.get("model_name", ""),
+            "model_name": model_id,
+            "request_model": model_id,
+            "model_display_name": model_display_name,
             "debater_name": speaker["name"],
             "debate_position": self._seat_label(speaker["seat"]),
             "debate_topic": match["topic"],
@@ -5118,6 +5305,8 @@ class MatchStore:
                 "speech_rate": budget["speech_rate"],
                 "chars_per_second": budget["chars_per_second"],
                 "char_budget": budget["char_budget"],
+                "request_model": model_id,
+                "model_display_name": model_display_name,
             },
             # 内部路由字段
             "match_id": match["id"],
@@ -5143,8 +5332,12 @@ class MatchStore:
         speech_rate = self._speaker_speech_rate(speaker)
         budget = self._agent_output_budget(time_limit, speech_rate)
         holder = "正方" if speaker["side"] == "affirmative" else "反方"
+        model_id = str(config.get("model_id") or config.get("model_name") or "").strip()
+        model_display_name = str(config.get("model_name") or speaker.get("model_name") or "").strip()
         return {
-            "model_name": config.get("model_name", ""),
+            "model_name": model_id,
+            "request_model": model_id,
+            "model_display_name": model_display_name,
             "debater_name": speaker["name"],
             "debate_position": self._seat_label(speaker["seat"]),
             "debate_topic": match["topic"],
@@ -5164,6 +5357,8 @@ class MatchStore:
                 "speech_rate": budget["speech_rate"],
                 "chars_per_second": budget["chars_per_second"],
                 "char_budget": budget["char_budget"],
+                "request_model": model_id,
+                "model_display_name": model_display_name,
             },
             "match_id": match["id"],
             "task_id": task_id,
@@ -5487,11 +5682,15 @@ class MatchStore:
 
         复用 run_agent_speech 流式路径里的同一套分句逻辑（_next_tts_sentence）与单句合成
         （_synthesize_sentence_tts），但输入是完整文本——供「重新合成」复用。"""
+        try:
+            tts_selection = self._select_tts_for_speech(task_id, speech_id, speaker)
+        except SpeechProviderError:
+            return 0
         semaphore = asyncio.Semaphore(self._tts_sentence_concurrency())
 
         async def synth(sentence: str, idx: int) -> bool:
             async with semaphore:
-                return await self._synthesize_sentence_tts_with_timeout(sentence, idx, task_id, speech_id, speaker)
+                return await self._synthesize_sentence_tts_with_timeout(sentence, idx, task_id, speech_id, speaker, tts_selection)
 
         tasks: List[asyncio.Task] = []
         sent_chars = 0
@@ -5549,7 +5748,7 @@ class MatchStore:
         request_id = f"tts_{task_id}"
         request_started_time = time.perf_counter()
         try:
-            selection = select_tts_gateway(speaker=speaker)
+            selection = self._select_tts_for_speech(task_id, speech_id, speaker)
         except SpeechProviderError as exc:
             return {
                 "task_id": task_id,
@@ -5793,6 +5992,7 @@ class MatchStore:
         task_id: str,
         speech_id: str,
         speaker: Dict[str, Any],
+        selection: Optional[SpeechGatewaySelection] = None,
     ) -> bool:
         """Synthesize a single sentence's TTS and emit tts.sentence_ready for screen playback.
 
@@ -5810,11 +6010,12 @@ class MatchStore:
         if not normalized_text:
             await _emit_skip("empty_sentence")
             return False
-        try:
-            selection = select_tts_gateway(speaker=speaker)
-        except SpeechProviderError:
-            await _emit_skip("tts_config_failed")
-            return False
+        if selection is None:
+            try:
+                selection = self._select_tts_for_speech(task_id, speech_id, speaker)
+            except SpeechProviderError:
+                await _emit_skip("tts_config_failed")
+                return False
         async with self._lock:
             match_id = self.snapshot["match"]["id"]
             phase_id = (self.snapshot.get("current_speech") or {}).get("phase_id") or self.snapshot["match"]["current_phase_id"]
@@ -5844,6 +6045,21 @@ class MatchStore:
             )
 
         request_started_time = time.perf_counter()
+        asyncio.create_task(
+            publish_tts_sentence(
+                {
+                    "match_id": match_id,
+                    "task_id": task_id,
+                    "speech_id": speech_id,
+                    "speaker_id": speaker_id,
+                    "sentence_idx": sentence_idx,
+                    "text": normalized_text,
+                    "provider": selection.provider,
+                    "voice_preset_id": (selection.preset or {}).get("id"),
+                    "voice": (selection.preset or {}).get("voice") or speaker.get("tts_voice_preset_id") or "",
+                }
+            )
+        )
         try:
             live_key = (match_id, speech_id, task_id, sentence_idx)
             live_mime_type = self._tts_live_mime_type(selection)
@@ -6158,11 +6374,12 @@ class MatchStore:
         task_id: str,
         speech_id: str,
         speaker: Dict[str, Any],
+        selection: Optional[SpeechGatewaySelection] = None,
     ) -> bool:
         started = time.perf_counter()
         try:
             return await asyncio.wait_for(
-                self._synthesize_sentence_tts(text, sentence_idx, task_id, speech_id, speaker),
+                self._synthesize_sentence_tts(text, sentence_idx, task_id, speech_id, speaker, selection),
                 timeout=self._tts_sentence_timeout_seconds(),
             )
         except asyncio.TimeoutError:
@@ -6229,9 +6446,68 @@ class MatchStore:
             return True
         return self._speech_section_ready("tts")
 
+    def _select_tts_for_speech(self, task_id: str, speech_id: str, speaker: Dict[str, Any]) -> SpeechGatewaySelection:
+        """Resolve one immutable TTS profile for a speech.
+
+        Qwen TTS is generative: if each sentence resolves parameters independently,
+        adjacent segments can drift in voice/prosody. We lock the selected preset and
+        stable sampling hints once per speech while still keeping per-speaker voices.
+        """
+        selection = select_tts_gateway(speaker=speaker)
+        provider = str(getattr(selection, "provider", "") or "")
+        options = dict(getattr(selection, "options", {}) or {})
+        preset = dict(getattr(selection, "preset", {}) or {})
+        if provider == "local_qwen":
+            section = integration_config.active_section("tts")
+            settings = dict(section.get("settings") or {})
+            for key in (
+                "voice",
+                "response_format",
+                "sample_rate",
+                "model",
+                "speech_rate",
+                "volume",
+                "pitch_rate",
+                "instructions",
+                "temperature",
+                "top_p",
+            ):
+                if options.get(key) is None or options.get(key) == "":
+                    value = preset.get(key)
+                    if value is None or value == "":
+                        value = settings.get(key)
+                    if value is not None and value != "":
+                        options[key] = value
+            if options.get("seed") is None or options.get("seed") == "":
+                options["seed"] = self._tts_consistency_seed(provider, speaker, preset)
+            if options.get("temperature") is None or options.get("temperature") == "":
+                options["temperature"] = 0.25
+            if options.get("top_p") is None or options.get("top_p") == "":
+                options["top_p"] = 0.8
+        return SpeechGatewaySelection(
+            gateway=getattr(selection, "gateway"),
+            provider=provider,
+            options=options,
+            preset=getattr(selection, "preset", None),
+        )
+
+    def _tts_consistency_seed(self, provider: str, speaker: Dict[str, Any], preset: Dict[str, Any]) -> int:
+        raw = "|".join(
+            [
+                str(self.snapshot.get("match", {}).get("id") or ""),
+                str(provider or ""),
+                str(speaker.get("id") or ""),
+                str(speaker.get("tts_voice_preset_id") or ""),
+                str(preset.get("id") or ""),
+                str(preset.get("voice") or ""),
+            ]
+        )
+        return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8], 16)
+
     def _tts_sentence_concurrency(self) -> int:
-        # Synthesize several sentences in parallel so the next archived file is ready
-        # before playback reaches it (keeps the archived-file path from sounding slow).
+        # Keep sentence synthesis parallel by default. Consistency for generative
+        # local Qwen TTS is handled by a locked per-speech profile plus stable
+        # sampling hints, not by serializing every segment.
         raw = os.getenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "4").strip()
         try:
             value = int(raw)
@@ -6864,6 +7140,8 @@ class MatchStore:
         if provider == "alicloud":
             secrets = (section.get("secrets") or {}).get("alicloud") or {}
             return bool(str(secrets.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")).strip())
+        if provider in {"funasr", "local_qwen"}:
+            return bool(str(section.get("endpoint") or "").strip())
         return False
 
     def _safe_path_part(self, value: str) -> str:
@@ -7013,7 +7291,10 @@ class MatchStore:
         if active and active.get("id") == speech_id:
             active["content_partial"] = text
             active["content_final"] = text
-            self._upsert_transcript_segment(active, active["speaker_id"], text, True, "human_asr")
+            segment = self._upsert_transcript_segment(active, active["speaker_id"], text, True, "human_asr")
+            if not _is_human_system_transcript_text(text):
+                segment.pop("exclude_from_history", None)
+                segment.pop("system_placeholder", None)
             return
 
         for segment in self.snapshot.setdefault("recent_transcript", []):
@@ -7023,6 +7304,9 @@ class MatchStore:
                 segment["is_final"] = True
                 segment["source"] = "human_asr"
                 segment["updated_at"] = iso_now()
+                if not _is_human_system_transcript_text(text):
+                    segment.pop("exclude_from_history", None)
+                    segment.pop("system_placeholder", None)
                 self.snapshot.setdefault("speech_revisions", []).insert(
                     0,
                     {
@@ -7055,13 +7339,27 @@ class MatchStore:
         }
         self._upsert_transcript_segment(speech, speaker_id, text, True, "human_asr")
 
+    def _free_debate_side_has_time(self, side: str) -> bool:
+        clock = self._clock(f"{side}_total")
+        if not clock:
+            return True
+        return int(clock.get("remaining_ms", 0)) > 0
+
+    def _free_debate_both_sides_exhausted(self) -> bool:
+        return not self._free_debate_side_has_time("affirmative") and not self._free_debate_side_has_time("negative")
+
     def _advance_free_debate_turn_if_needed(self, side: str) -> None:
         phase = self._current_phase()
         if phase["phase_type"] != "free_debate":
             return
+        if self._free_debate_both_sides_exhausted():
+            return
         old_turn_index = int(self.snapshot["free_debate"]["turn_index"])
         old_turn_key = f"{side}_{old_turn_index}"
-        next_side = "negative" if side == "affirmative" else "affirmative"
+        opposite_side = "negative" if side == "affirmative" else "affirmative"
+        next_side = opposite_side if self._free_debate_side_has_time(opposite_side) else side
+        if not self._free_debate_side_has_time(next_side):
+            return
         new_turn_index = old_turn_index + 1
         self.snapshot["free_debate"]["current_turn_side"] = next_side
         self.snapshot["free_debate"]["turn_index"] = new_turn_index
@@ -7106,6 +7404,8 @@ class MatchStore:
                 return
             auto_handled = fd.setdefault("auto_handled", {})
             if auto_handled.get(turn_key):
+                return
+            if not self._free_debate_side_has_time(side):
                 return
             agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
             if not agents_on_side:
@@ -7154,6 +7454,8 @@ class MatchStore:
                 return
             total_clock = self._clock(f"{side}_total")
             if total_clock and int(total_clock.get("remaining_ms", 0)) <= 0:
+                self._advance_free_debate_turn_if_needed(side)
+                self._persist_snapshot()
                 return
             agents_on_side = [s for s in self.snapshot["speakers"] if s["side"] == side and s["speaker_type"] == "agent"]
             if not agents_on_side:
@@ -7209,10 +7511,8 @@ class MatchStore:
         speaker_id: Optional[str],
         now: datetime,
     ) -> Dict[str, Any]:
-        total_expired = any(name in {"affirmative_total", "negative_total", "main"} for name in expired_clock_names)
-        if phase.get("phase_type") == "free_debate" and not total_expired:
-            # 自由辩论单轮钟到点也属于"轮内切换"，全自动进入对方 2s 窗口，不需主持确认。
-            # 只有某方 total 钟归零（total_expired）才是阶段结束，走下面的 phase_next + 主持确认。
+        if phase.get("phase_type") == "free_debate" and not self._free_debate_both_sides_exhausted():
+            # 自由辩论只有双方总时间都归零才结束；单轮钟到点或单方总时间耗尽都继续让有时间的一方发言。
             self._clear_flow_state()
             return deepcopy(self.snapshot["flow"])
         if self._next_phase(phase):
@@ -7457,8 +7757,8 @@ class MatchStore:
         return int(phase.get("side_total_seconds") or max(1, int(phase["duration_seconds"]) // 2))
 
     def _free_turn_seconds(self, phase: Dict[str, Any]) -> int:
-        # 需求 2.md：自由辩论单次发言不超过 30s。
-        return int(phase.get("turn_seconds") or 30)
+        # 自由辩论单次发言默认 15s，可由环节配置覆盖。
+        return int(phase.get("turn_seconds") or 15)
 
     def _free_debate_decision_seconds(self, phase: Optional[Dict[str, Any]] = None) -> float:
         # 一方说完后，本方人类有 5s 抢麦窗口（点开始发言），超时（或全部预跳过）则随机 AI 接管。
