@@ -2941,8 +2941,30 @@ class MatchStore:
             self._persist_snapshot()
 
         result = await self.emit("audio.archive_completed", payload, "speech", asset["speaker_id"])
-        await self._finish_live_asr_stream(speech_id, asset["speaker_id"])
+        # ASR 收尾要等服务商返回 final 转写(还叠加发送限速的 send_budget)，慢时可能数秒。给一个短上限：
+        # 常态(ASR 很快返回)仍同步拿到 final；一旦超过上限就转后台继续(shield 保护不被取消)，
+        # 不让 /audio/complete 长时间挂起——否则人类辩手点「结束发言」后会长时间转圈。
+        finish_task = asyncio.create_task(self._finish_live_asr_stream_bg(speech_id, asset["speaker_id"]))
+        try:
+            await asyncio.wait_for(asyncio.shield(finish_task), timeout=self._asr_finish_grace_seconds())
+        except asyncio.TimeoutError:
+            pass  # finish_task 仍在后台跑，final 转写就绪后异步写回快照并广播
         return result
+
+    async def _finish_live_asr_stream_bg(self, speech_id: str, speaker_id: str) -> None:
+        """ASR 收尾：吞掉一切异常，绝不把未捕获异常抛进 event loop。"""
+        try:
+            await self._finish_live_asr_stream(speech_id, speaker_id)
+        except Exception:  # noqa: BLE001 — 收尾失败不应影响主流程
+            pass
+
+    def _asr_finish_grace_seconds(self) -> float:
+        raw = os.getenv("PHDEBATE_ASR_FINISH_GRACE_S", "2.5").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 2.5
+        return max(0.5, min(15.0, value))
 
     async def should_auto_recognize_audio_archive(self, speech_id: str) -> bool:
         if not self._asr_auto_recognize_enabled():

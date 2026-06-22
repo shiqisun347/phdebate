@@ -45,6 +45,10 @@ export function usePlayback(
   const activeSegmentRef = useRef<string>("");
   const urlRef = useRef<string>("");
   const currentPlayRef = useRef<{ speechId: string; taskId: string; speakerId: string; idx: number } | null>(null);
+  // 预加载下一句（双缓冲，仅预热缓存，绝不播放）：当前句播放时把下一句 MP3 预取进浏览器缓存，
+  // onended 切到下一句时 el.src 命中缓存→秒开，消除「单 <audio> 换 src 才取流+解码」的句间停顿。
+  const preloaderRef = useRef<HTMLAudioElement | null>(null);
+  const preloadedUrlRef = useRef<string>("");
   const playbackProgressRef = useRef<{ segment: string; currentTime: number; atMs: number }>({
     segment: "",
     currentTime: 0,
@@ -145,6 +149,25 @@ export function usePlayback(
       attachHandlers(el);
     }
     return el;
+  }
+
+  // 预热下一句的音频缓存（不播放）。配合后端可缓存的归档音频，主元素切到该 url 时直接命中缓存。
+  function preloadNext(url: string): void {
+    if (!url || preloadedUrlRef.current === url) return;
+    try {
+      let p = preloaderRef.current;
+      if (!p) {
+        p = new Audio();
+        p.preload = "auto";
+        p.muted = true;
+        preloaderRef.current = p;
+      }
+      preloadedUrlRef.current = url;
+      p.src = url;
+      p.load();
+    } catch {
+      /* 预加载失败无所谓：主播放仍会自行取流，只是少了这点提速 */
+    }
   }
 
   const runReconcile = useCallback(
@@ -248,6 +271,9 @@ export function usePlayback(
         const segment = `${sp.speechId}:${sp.taskId}:${idx}`;
         const el = ensureEl();
         currentPlayRef.current = { speechId: sp.speechId, taskId: sp.taskId, speakerId: sp.speakerId, idx };
+        // 预热下一句，缩小句间空隙（命中后端可缓存的归档音频）。
+        const nextUrl = sp.chunks.find((c) => c.sentenceIdx === idx + 1)?.audioUrl;
+        if (nextUrl) preloadNext(nextUrl);
         if (activeSegmentRef.current === segment && urlRef.current === url && !el.ended) {
           mediaRef.current = el.paused ? "idle" : "playing";
           if (el.paused) {
@@ -327,6 +353,17 @@ export function usePlayback(
   useEffect(() => {
     return () => {
       clearActiveAudio(activeElRef, activeSegmentRef, playbackProgressRef);
+      const p = preloaderRef.current;
+      if (p) {
+        try {
+          p.removeAttribute("src");
+          p.load();
+        } catch {
+          /* ignore */
+        }
+        preloaderRef.current = null;
+        preloadedUrlRef.current = "";
+      }
     };
   }, []);
 

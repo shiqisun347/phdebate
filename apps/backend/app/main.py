@@ -509,7 +509,9 @@ async def serve_tts_audio(match_id: str, path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="audio file not found")
     suffix = target.suffix.lower()
     media_type = {"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "pcm": "audio/pcm"}.get(suffix.lstrip("."), "audio/mpeg")
-    return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-cache"})
+    # 归档音频是内容寻址、写一次（文件名含 task_id + 句序号，重合成会换新 task_id→新 URL），可安全缓存。
+    # 设为可缓存后，大屏「播当前句时预取下一句」能命中缓存→切换秒开，消除句间停顿。
+    return FileResponse(target, media_type=media_type, headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.patch("/api/matches/{match_id}/phases/{phase_id}")
