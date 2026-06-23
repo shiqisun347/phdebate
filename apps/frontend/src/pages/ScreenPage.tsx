@@ -20,6 +20,7 @@ type RuntimeScreenScene =
   | "opening"
   | "teams"
   | "live"
+  | "debate_process"
   | "paused"
   | "audience_vote"
   | "xiaoqi_commentary"
@@ -45,8 +46,8 @@ export function ScreenPage({ matchId }: ScreenPageProps) {
 
   // 大屏 TTS 播放：全部交给确定性的对账状态机（src/screen/playbackReducer.ts + usePlayback）。
   // 快照唯一真相、看门狗自愈、无 live MSE —— 历史上的卡死/超慢/停不下来在那里被单测覆盖。
-  // LiveKit 只有真正订阅到远端音轨时才接管声音；当前 voice-agent 若只连 room 但未发布 TTS 音轨，
-  // 仍继续用后端归档音频兜底播放。
+  // LiveKit 只有真正订阅到 voice-agent/AI TTS 音轨时才接管声音；人类辩手麦克风不会在大屏外放，
+  // 也不会关闭后端归档音频兜底播放。
   const { unlock } = usePlayback(matchId, snapshot, lastEvent, audioEnabled && !livekitHasAudio, setAudioEnabled, () => {
     setAudioEnabled(true);
     setAudioUnlocked(false);
@@ -124,6 +125,7 @@ function ScreenView({ snapshot }: { snapshot: MatchSnapshot }) {
       {scene === "judge_result" && <JudgeResultScene snapshot={snapshot} />}
       {scene === "audience_result" && <AudienceResultScene snapshot={snapshot} />}
       {scene === "acknowledgment" && <AcknowledgmentScene snapshot={snapshot} />}
+      {scene === "debate_process" && <DebateProcessScene snapshot={snapshot} />}
       {scene === "live" && <LiveScene snapshot={snapshot} />}
     </main>
   );
@@ -316,6 +318,49 @@ function LiveScene({ snapshot }: { snapshot: MatchSnapshot }) {
   );
 }
 
+function DebateProcessScene({ snapshot }: { snapshot: MatchSnapshot }) {
+  const phase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
+  const items = snapshot.recent_transcript
+    .filter((item) => item.valid !== false && item.text.trim())
+    .slice(0, 14)
+    .reverse();
+
+  return (
+    <section className="screen-scene debate-process-scene">
+      <ScreenChrome match={snapshot.match} />
+      <Topic snapshot={snapshot} />
+      <div className="debate-process-shell">
+        <div className="debate-process-head">
+          <span>当前辩论过程</span>
+          <strong>{phase?.name ?? "实时记录"}</strong>
+        </div>
+        <div className="debate-process-list">
+          {items.length > 0 ? (
+            items.map((item) => {
+              const speaker = snapshot.speakers.find((entry) => entry.id === item.speaker_id);
+              const side = speaker?.side ?? "neutral";
+              return (
+                <article className={`debate-process-item ${sideClass(side)} ${item.is_final ? "final" : "partial"}`} key={item.id}>
+                  <img src={speaker ? resolveAvatar(speaker) : defaultAvatarDataUri("human", "neutral", item.speaker_label)} alt={item.speaker_label} />
+                  <div>
+                    <header>
+                      <strong>{speaker ? speakerLabel(speaker) : item.speaker_label}</strong>
+                      <span>{item.is_final ? "定稿" : "实时"}</span>
+                    </header>
+                    <p>{item.text}</p>
+                  </div>
+                </article>
+              );
+            })
+          ) : (
+            <div className="debate-process-empty">暂无辩论记录，开始发言后会在这里滚动展示。</div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function PausedScene({ snapshot }: { snapshot: MatchSnapshot }) {
   const phase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
   return (
@@ -461,18 +506,24 @@ function AudienceVoteScene({ snapshot }: { snapshot: MatchSnapshot }) {
     <section className="screen-scene audience-vote-scene">
       <ScreenChrome match={snapshot.match} />
       <Topic snapshot={snapshot} />
-      <div className="av-body">
-        <div className="av-kicker">观众投票</div>
-        <h1 className="av-title">扫码为你心中的胜方与最佳辩手投票</h1>
-        <div className="av-qr-wrap">
-          <VoteQr url={voteUrl} size={360} />
-          <div className={`av-status ${open ? "open" : "closed"}`}>{open ? "投票进行中" : "投票即将开启"}</div>
+      <div className="live-grid audience-vote-grid">
+        <RosterPanel snapshot={snapshot} side="affirmative" />
+        <div className="live-center audience-vote-center">
+          <div className="av-body">
+            <div className="av-kicker">观众投票</div>
+            <h1 className="av-title">扫码为你心中的胜方与最佳辩手投票</h1>
+            <div className="av-qr-wrap">
+              <VoteQr url={voteUrl} size={360} />
+              <div className={`av-status ${open ? "open" : "closed"}`}>{open ? "投票进行中" : "投票即将开启"}</div>
+            </div>
+            <div className="av-url">{voteUrl}</div>
+            <div className="av-count">
+              已收到 <strong>{snapshot.vote_state.audience_count}</strong> 票
+            </div>
+            {!open && <div className="av-hint">请等待主持人点击「开始观众投票」后即可提交</div>}
+          </div>
         </div>
-        <div className="av-url">{voteUrl}</div>
-        <div className="av-count">
-          已收到 <strong>{snapshot.vote_state.audience_count}</strong> 票
-        </div>
-        {!open && <div className="av-hint">请等待主持人点击「开始观众投票」后即可提交</div>}
+        <RosterPanel snapshot={snapshot} side="negative" />
       </div>
     </section>
   );
@@ -615,7 +666,7 @@ function DebaterRow({ item, rank, champion }: { item: ArRankItem; rank: number; 
         <span className="ar-name">{sp.name}</span>
         <span className={`ar-seat ar-seat-${sp.side}`}>{sideLabel(sp.side)}{seatLabel(sp.seat)}</span>
       </div>
-      <span className="ar-votes">{item.count} 票</span>
+      <span className="ar-votes">{item.count} 分</span>
     </div>
   );
 }
@@ -730,10 +781,12 @@ function RosterPanel({
       <div className="roster-list">
         {speakers.map((speaker) => (
           <div className={`roster-row ${activeSpeaker?.id === speaker.id ? "speaking" : ""}`} key={speaker.id}>
-            <img className="roster-avatar" src={resolveAvatar(speaker)} alt={speaker.name} />
+            <div className="roster-avatar-block">
+              <img className="roster-avatar" src={resolveAvatar(speaker)} alt={speaker.name} />
+              <span className="roster-seat-badge">{seatLabel(speaker.seat)}</span>
+            </div>
             <div className="roster-person">
               <div className="roster-person-header">
-                <span className="roster-seat-badge">{seatLabel(speaker.seat)}</span>
                 <strong>{speaker.name}</strong>
               </div>
               <span className={`roster-meta ${speaker.speaker_type}`}>
@@ -925,6 +978,8 @@ function normalizeScreenScene(scene: ScreenScene): RuntimeScreenScene {
       return "opening";
     case "teams":
       return "teams";
+    case "debate_process":
+      return "debate_process";
     case "idle":
       return "idle";
     case "paused":

@@ -13,6 +13,7 @@ export const SCENE_LABELS: Record<string, string> = {
   opening: "辩题介绍",
   teams: "阵容介绍",
   live: "比赛实况",
+  debate_process: "当前辩论过程",
   paused: "暂停",
   intermission: "中场",
   audience_vote: "观众投票",

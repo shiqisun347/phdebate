@@ -18,7 +18,24 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.services.agent_gateway import AgentGateway, AgentGatewayError
-from app.services.integration_config import integration_config
+from app.services.fallback_plan import (
+    FallbackPlan,
+    label_for_speaker,
+    load_fallback_plan,
+    speaker_for_label,
+    speaker_for_phase,
+    text_for_phase,
+)
+from app.services.integration_config import (
+    FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
+    FORMAL_DEBATE_TTS_INSTRUCTIONS,
+    FORMAL_DEBATE_TTS_PITCH_RATE,
+    FORMAL_DEBATE_TTS_SPEECH_RATE,
+    FORMAL_DEBATE_TTS_TEMPERATURE,
+    FORMAL_DEBATE_TTS_TOP_P,
+    FORMAL_DEBATE_TTS_VOLUME,
+    integration_config,
+)
 from app.services.livekit_service import LiveKitConfigError, LiveKitTokenRequest, issue_livekit_token, voice_agent_identity
 from app.services.speech_gateway import (
     SpeechGatewayError,
@@ -54,11 +71,14 @@ def _recent_transcript_limit() -> int:
 _RECENT_TRANSCRIPT_LIMIT = _recent_transcript_limit()
 ASR_PENDING_TRANSCRIPT_TEXT = "本次发言已结束，正式转写将在后续 ASR 链路中补齐。"
 ASR_UNAVAILABLE_TRANSCRIPT_TEXT = "转写不可用，请以现场发言为准。"
+ASR_SILENT_INPUT_TEXT = "麦克风输入没有检测到有效声音，请以现场发言为准。"
 HUMAN_SYSTEM_TRANSCRIPT_TEXTS = {
     ASR_PENDING_TRANSCRIPT_TEXT,
     ASR_UNAVAILABLE_TRANSCRIPT_TEXT,
+    ASR_SILENT_INPUT_TEXT,
     "时间到，本次发言结束。",
 }
+PCM_SILENCE_PEAK_THRESHOLD = 1
 
 
 def _speech_error_message(exc: Exception) -> str:
@@ -130,6 +150,7 @@ class MatchStore:
         self._prefetch_inflight: Set[str] = set()
         self._prefetch_counter = 0
         self._voice_agent_closed_speeches: Set[str] = set()
+        self._abandoned_speech_ids: Set[str] = set()
         self.repo = SQLiteRepository()
         self.agent_gateway = AgentGateway()
         loaded = self.repo.load_snapshot()
@@ -155,6 +176,7 @@ class MatchStore:
         self._asr_streams = {}
         self._clear_prepared_speeches()
         self._voice_agent_closed_speeches.clear()
+        self._abandoned_speech_ids.clear()
         self.repo.clear_match_history("match_001")
         # 需求3：重置 demo 时清理多比赛注册表与非活动槽位，保证起点干净
         try:
@@ -837,6 +859,7 @@ class MatchStore:
             self._asr_streams = {}
             self._clear_prepared_speeches()
             self._voice_agent_closed_speeches.clear()
+            self._abandoned_speech_ids.clear()
             self.snapshot = new_snapshot
             self._persist_snapshot()
 
@@ -959,6 +982,7 @@ class MatchStore:
             self.seq = 0
             self.events = []
             self._asr_streams = {}
+            self._abandoned_speech_ids.clear()
             self._clear_prepared_speeches()
             self.snapshot = new_snapshot
             self._persist_snapshot()
@@ -981,6 +1005,7 @@ class MatchStore:
                 self._ensure_runtime_fields()
                 self.events = self.repo.load_events(target_id)
                 self._asr_streams = {}
+                self._abandoned_speech_ids.clear()
                 self._persist_snapshot()
                 # 已成为活动比赛，移除非活动槽位副本
                 self.repo.delete_app_state(self._match_slot_key(target_id))
@@ -1011,6 +1036,7 @@ class MatchStore:
                     self._ensure_runtime_fields()
                     self.events = self.repo.load_events(str(nxt["id"]))
                     self._asr_streams = {}
+                    self._abandoned_speech_ids.clear()
                     self._persist_snapshot()
                     self.repo.delete_app_state(self._match_slot_key(str(nxt["id"])))
                     self._upsert_registry(self.snapshot)
@@ -1018,6 +1044,7 @@ class MatchStore:
                     self.seq = 0
                     self.events = []
                     self._asr_streams = {}
+                    self._abandoned_speech_ids.clear()
                     self.snapshot = self._empty_snapshot()
                     self._ensure_runtime_fields()
                     self._persist_snapshot()
@@ -1453,9 +1480,6 @@ class MatchStore:
                 self.snapshot["match"]["live_mode"] = live_mode
             self.snapshot["match"]["updated_at"] = iso_now()
             self._persist_snapshot()
-        # 进入「辩题介绍」即后台预取全部 agent 自我介绍，等到自我介绍阶段可直接促活播放。
-        if normalized_scene == "opening" and self._prefetch_enabled():
-            asyncio.create_task(self._prefetch_all_self_intros())
         return await self.emit("screen.scene_changed", {"scene": normalized_scene, "requested_scene": scene, "live_mode": live_mode}, "host")
 
     def _finalize_current_speech_for_history(self) -> None:
@@ -1778,8 +1802,14 @@ class MatchStore:
             async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
                 event_type = event.get("type")
                 if event_type == "delta":
-                    delta = event.get("delta", "")
-                    full_text += delta
+                    incoming_delta = str(event.get("delta", ""))
+                    next_text, clamped = self._clamp_agent_text_to_budget(full_text + incoming_delta, payload)
+                    delta = next_text[len(full_text) :]
+                    full_text = next_text
+                    if not delta and clamped:
+                        break
+                    if not delta:
+                        continue
                     async with self._lock:
                         cs = self.snapshot.get("current_speech")
                         # Stop if this speech was cleared OR replaced by another speech
@@ -1847,9 +1877,11 @@ class MatchStore:
                                         }
                                     )
                                     self._persist_snapshot()
+                    if clamped:
+                        break
                     continue
                 if event_type == "final":
-                    full_text = event.get("content", full_text)
+                    full_text, _ = self._clamp_agent_text_to_budget(event.get("content") or full_text, payload)
                     break
         except AgentGatewayError as exc:
             self.repo.finish_agent_request(
@@ -1998,6 +2030,62 @@ class MatchStore:
 
         task.add_done_callback(_forget)
 
+    def _cancel_tts_grace_tasks(self) -> int:
+        cancelled = 0
+        for task in list(self._tts_grace_tasks.values()):
+            if not task.done():
+                task.cancel()
+                cancelled += 1
+        self._tts_grace_tasks.clear()
+        return cancelled
+
+    def _abandon_active_realtime_for_takeover(self, *, preserve_speech_id: str = "") -> Dict[str, Any]:
+        """Drop any in-flight speech state before a host emergency takeover.
+
+        The abandoned ids are kept process-local so late ASR callbacks or retrying
+        browser uploads cannot re-create the transcript/state that the host just
+        replaced with fallback audio.
+        """
+        current = self.snapshot.get("current_speech") or {}
+        current_id = str(current.get("id") or "")
+        abandoned_ids: Set[str] = set()
+        if current_id and current_id != preserve_speech_id:
+            abandoned_ids.add(current_id)
+        for speech_id in list(self._asr_streams.keys()):
+            if speech_id != preserve_speech_id:
+                abandoned_ids.add(speech_id)
+        asr_sessions = list(self._asr_streams.values())
+        self._asr_streams.clear()
+        for speech_id in abandoned_ids:
+            self._abandoned_speech_ids.add(speech_id)
+        if current_id:
+            self.snapshot["recent_transcript"] = [
+                segment
+                for segment in self.snapshot.get("recent_transcript", [])
+                if not (segment.get("speech_id") == current_id or segment.get("id") == current_id)
+            ]
+        self.snapshot["current_speech"] = None
+        cancelled_tts_tasks = self._cancel_tts_grace_tasks()
+        return {
+            "current_speech_id": current_id,
+            "abandoned_speech_ids": sorted(abandoned_ids),
+            "asr_sessions": asr_sessions,
+            "cancelled_tts_tasks": cancelled_tts_tasks,
+        }
+
+    def _close_asr_sessions_soon(self, sessions: List[Any]) -> None:
+        for session in sessions:
+            try:
+                asyncio.create_task(self._close_abandoned_asr_session(session))
+            except RuntimeError:
+                pass
+
+    async def _close_abandoned_asr_session(self, session: Any) -> None:
+        try:
+            await asyncio.wait_for(session.finish(), timeout=2.0)
+        except Exception:
+            pass
+
     async def _complete_agent_playback_after_grace(self, speech_id: str, task_id: str, expected_sentence_count: int) -> None:
         # 进度感知的兜底：TTS 已经全部归档后，如果大屏从未开始播放，快速收尾，避免现场
         # 长时间卡在"播放中"；一旦大屏开始播放，则依赖前端真实 currentTime heartbeat 刷新
@@ -2116,6 +2204,853 @@ class MatchStore:
                     ended_payload["speaker_id"],
                 )
         return await self.get_snapshot()
+
+    def _load_fallback_plan(self) -> FallbackPlan:
+        try:
+            return load_fallback_plan()
+        except FileNotFoundError as exc:
+            raise MatchStateError("fallback_history_missing", str(exc)) from exc
+
+    def _fallback_speech_id(self, phase_id: str, speaker_id: str, *, kind: str = "speech", turn_index: Optional[int] = None) -> str:
+        if turn_index is not None:
+            return f"fallback_{kind}_{self._safe_path_part(phase_id)}_{self._safe_path_part(speaker_id)}_{turn_index}"
+        return f"fallback_{kind}_{self._safe_path_part(phase_id)}_{self._safe_path_part(speaker_id)}"
+
+    def _fallback_task_id(self, speech_id: str) -> str:
+        return f"task_{speech_id}"
+
+    def _fallback_manifest_path(self) -> Path:
+        raw = os.getenv("PHDEBATE_FALLBACK_AUDIO_MANIFEST", "").strip()
+        if raw:
+            path = Path(raw)
+            return path if path.is_absolute() else project_root() / path
+        return self.repo.db_path.parent / "fallback_audio_manifest.json"
+
+    def _load_fallback_manifest(self) -> Dict[str, Any]:
+        path = self._fallback_manifest_path()
+        if not path.is_file():
+            return {"version": 1, "assets": []}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"version": 1, "assets": []}
+        if not isinstance(data, dict):
+            return {"version": 1, "assets": []}
+        assets = data.get("assets")
+        if not isinstance(assets, list):
+            data["assets"] = []
+        return data
+
+    def _save_fallback_manifest(self, manifest: Dict[str, Any]) -> None:
+        path = self._fallback_manifest_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _fallback_manifest_asset_for_speech(self, speech_id: str) -> Optional[Dict[str, Any]]:
+        for asset in self._load_fallback_manifest().get("assets", []):
+            if isinstance(asset, dict) and asset.get("speech_id") == speech_id:
+                return deepcopy(asset)
+        return None
+
+    def _save_fallback_asset_to_manifest(self, asset: Dict[str, Any]) -> None:
+        manifest = self._load_fallback_manifest()
+        assets = [item for item in manifest.get("assets", []) if isinstance(item, dict) and item.get("speech_id") != asset.get("speech_id")]
+        stored = deepcopy(asset)
+        stored["match_id"] = "__fallback_package__"
+        stored["package_locked"] = True
+        stored["updated_at"] = iso_now()
+        assets.insert(0, stored)
+        manifest.update(
+            {
+                "version": 1,
+                "updated_at": iso_now(),
+                "history_path": stored.get("fallback_history_path") or manifest.get("history_path") or "",
+                "assets": assets,
+            }
+        )
+        self._save_fallback_manifest(manifest)
+
+    def _attach_fallback_manifest_asset(self, speech_id: str) -> Optional[Dict[str, Any]]:
+        existing = self._audio_asset_for_speech(speech_id)
+        if existing:
+            return existing
+        stored = self._fallback_manifest_asset_for_speech(speech_id)
+        if not stored:
+            return None
+        stored["match_id"] = self.snapshot["match"]["id"]
+        stored["package_locked"] = True
+        stored["updated_at"] = iso_now()
+        self.snapshot.setdefault("audio_assets", []).insert(0, stored)
+        self._persist_snapshot()
+        return stored
+
+    def _fallback_asset_ready(self, asset: Optional[Dict[str, Any]], expected_text: Optional[str] = None) -> bool:
+        if not asset or asset.get("status") != "completed":
+            return False
+        chunks = asset.get("chunks") or []
+        try:
+            declared_count = int(asset.get("chunk_count") or 0)
+        except (TypeError, ValueError):
+            declared_count = 0
+        if declared_count <= 0 or len(chunks) <= 0 or declared_count != len(chunks):
+            return False
+        if expected_text is not None:
+            stored_text = str(asset.get("fallback_text") or "").strip()
+            if stored_text and stored_text != str(expected_text or "").strip():
+                return False
+        for chunk in chunks:
+            try:
+                size = int(chunk.get("size_bytes") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size < 1024:
+                return False
+            path = Path(str(chunk.get("file_path") or ""))
+            if not path.is_file():
+                return False
+        return True
+
+    def _fallback_text_for_timing(
+        self,
+        phase: Dict[str, Any],
+        speaker: Dict[str, Any],
+        text: str,
+        *,
+        kind: str = "speech",
+    ) -> tuple[str, Dict[str, Any]]:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return "", {"target_chars": 0, "text_clamped": False, "original_text_length": 0}
+        if kind == "self_intro":
+            return raw_text, {
+                "target_chars": len(raw_text),
+                "text_clamped": False,
+                "original_text_length": len(raw_text),
+            }
+        time_limit = self._free_turn_seconds(phase) if phase.get("phase_type") == "free_debate" else int(phase.get("duration_seconds") or 60)
+        budget = self._agent_output_budget(time_limit, self._speaker_speech_rate(speaker))
+        clamped, was_clamped = self._clamp_agent_text_to_budget(raw_text, {"target_chars": budget["target_chars"]})
+        meta = {
+            "target_chars": budget["target_chars"],
+            "max_token": budget["max_token"],
+            "chars_per_second": budget["chars_per_second"],
+            "screen_playback_rate": budget["screen_playback_rate"],
+            "text_clamped": was_clamped,
+            "original_text_length": len(raw_text),
+            "text_length": len(clamped),
+        }
+        return clamped, meta
+
+    def _fallback_agent_phase_items(self, plan: Optional[FallbackPlan] = None) -> List[Dict[str, Any]]:
+        plan = plan or self._load_fallback_plan()
+        items: List[Dict[str, Any]] = []
+        for phase in sorted(self.snapshot.get("phases", []), key=lambda item: int(item.get("display_order") or 0)):
+            if phase.get("phase_type") == "free_debate":
+                continue
+            speaker = speaker_for_phase(phase, self.snapshot.get("speakers", []))
+            if not speaker or speaker.get("speaker_type") != "agent":
+                continue
+            text = text_for_phase(plan, phase)
+            timed_text, timing = self._fallback_text_for_timing(phase, speaker, text)
+            speech_id = self._fallback_speech_id(phase["id"], speaker["id"])
+            asset = self._audio_asset_for_speech(speech_id) or self._fallback_manifest_asset_for_speech(speech_id)
+            items.append(
+                {
+                    "phase_id": phase["id"],
+                    "phase_name": phase["name"],
+                    "phase_type": phase["phase_type"],
+                    "speaker_id": speaker["id"],
+                    "speaker_label": label_for_speaker(speaker),
+                    "speaker_name": speaker.get("name", ""),
+                    "voice_preset_id": speaker.get("tts_voice_preset_id"),
+                    "speech_id": speech_id,
+                    "task_id": self._fallback_task_id(speech_id),
+                    "text": timed_text,
+                    "original_text_length": timing["original_text_length"],
+                    "text_clamped": timing["text_clamped"],
+                    "target_chars": timing["target_chars"],
+                    "text_loaded": bool(text),
+                    "audio_ready": self._fallback_asset_ready(asset, timed_text),
+                    "chunk_count": int((asset or {}).get("chunk_count") or 0),
+                }
+            )
+        return items
+
+    def _fallback_free_turn_items(self, plan: Optional[FallbackPlan] = None) -> List[Dict[str, Any]]:
+        plan = plan or self._load_fallback_plan()
+        phase = next((item for item in self.snapshot.get("phases", []) if item.get("phase_type") == "free_debate"), None)
+        if not phase:
+            return []
+        items: List[Dict[str, Any]] = []
+        for turn in plan.free_turns:
+            speaker = speaker_for_label(turn.speaker_label, self.snapshot.get("speakers", []))
+            speech_id = self._fallback_speech_id(phase["id"], (speaker or {}).get("id") or turn.speaker_label, kind="free", turn_index=turn.index)
+            asset = self._audio_asset_for_speech(speech_id) or self._fallback_manifest_asset_for_speech(speech_id)
+            timed_text = turn.text
+            timing = {"original_text_length": len(turn.text), "text_clamped": False, "target_chars": len(turn.text)}
+            if speaker and speaker.get("speaker_type") == "agent":
+                timed_text, timing = self._fallback_text_for_timing(phase, speaker, turn.text, kind="free")
+            items.append(
+                {
+                    "index": turn.index,
+                    "phase_id": phase["id"],
+                    "speaker_id": (speaker or {}).get("id"),
+                    "speaker_label": turn.speaker_label,
+                    "speaker_type": (speaker or {}).get("speaker_type"),
+                    "side": (speaker or {}).get("side"),
+                    "text": timed_text,
+                    "original_text_length": timing["original_text_length"],
+                    "text_clamped": timing["text_clamped"],
+                    "target_chars": timing["target_chars"],
+                    "speech_id": speech_id,
+                    "task_id": self._fallback_task_id(speech_id),
+                    "text_loaded": bool(turn.text),
+                    "audio_required": bool(speaker and speaker.get("speaker_type") == "agent"),
+                    "audio_ready": self._fallback_asset_ready(asset, timed_text) if speaker and speaker.get("speaker_type") == "agent" else False,
+                    "chunk_count": int((asset or {}).get("chunk_count") or 0),
+                }
+            )
+        return items
+
+    def _fallback_self_intro_items(self) -> List[Dict[str, Any]]:
+        phase = next(iter(sorted(self.snapshot.get("phases", []), key=lambda item: int(item.get("display_order") or 0))), None)
+        if not phase:
+            return []
+        items: List[Dict[str, Any]] = []
+        for speaker in sorted(self.snapshot.get("speakers", []), key=lambda item: (str(item.get("side") or ""), int(item.get("seat") or 0))):
+            if speaker.get("speaker_type") != "agent":
+                continue
+            label = label_for_speaker(speaker)
+            speech_id = self._fallback_speech_id(phase["id"], speaker["id"], kind="self_intro")
+            asset = self._audio_asset_for_speech(speech_id) or self._fallback_manifest_asset_for_speech(speech_id)
+            speaker_name = str(speaker.get("name") or label or "Agent").strip()
+            intro_tail_by_id = {
+                "spk_aff_2": "我会清晰回应对方观点。",
+                "spk_neg_2": "我会稳健展开反方论证。",
+                "spk_aff_4": "我会认真完成正方总结。",
+                "spk_neg_4": "我会准确梳理反方立场。",
+            }
+            intro_tail = intro_tail_by_id.get(str(speaker.get("id") or ""), "我会认真完成本场发言。")
+            text = f"大家好，我是{label}{speaker_name}，{intro_tail}"
+            items.append(
+                {
+                    "phase_id": phase["id"],
+                    "phase_name": "自我介绍",
+                    "phase_type": "self_intro",
+                    "speaker_id": speaker["id"],
+                    "speaker_label": label,
+                    "speaker_name": speaker_name,
+                    "voice_preset_id": speaker.get("tts_voice_preset_id"),
+                    "speech_id": speech_id,
+                    "task_id": self._fallback_task_id(speech_id),
+                    "text": text,
+                    "text_loaded": True,
+                    "audio_ready": self._fallback_asset_ready(asset, text),
+                    "chunk_count": int((asset or {}).get("chunk_count") or 0),
+                }
+            )
+        return items
+
+    def fallback_status(self) -> Dict[str, Any]:
+        try:
+            plan = self._load_fallback_plan()
+            history_loaded = True
+            load_error = ""
+        except MatchStateError as exc:
+            plan = None
+            history_loaded = False
+            load_error = exc.message
+        phase_items = self._fallback_agent_phase_items(plan) if plan else []
+        self_intro_items = self._fallback_self_intro_items()
+        free_items = self._fallback_free_turn_items(plan) if plan else []
+        free_audio_items = [item for item in free_items if item.get("audio_required")]
+        ai_items = self_intro_items + phase_items + free_audio_items
+        free_phase = next((item for item in self.snapshot.get("phases", []) if item.get("phase_type") == "free_debate"), None)
+        checks = {
+            "history_loaded": history_loaded,
+            "self_intro_audio_ready": bool(self_intro_items) and all(item["audio_ready"] for item in self_intro_items),
+            "non_free_agent_audio_ready": bool(phase_items) and all(item["text_loaded"] and item["audio_ready"] for item in phase_items),
+            "free_debate_audio_ready": bool(free_items) and all(item.get("audio_ready") for item in free_audio_items),
+            "free_debate_numbering_ready": bool(free_items),
+            "free_debate_rules_ready": bool(free_phase and self._free_side_total_seconds(free_phase) == 120 and self._free_turn_seconds(free_phase) == 15),
+            "agent_voice_bound": all(bool(item.get("voice_preset_id")) for item in self_intro_items + phase_items),
+            "audio_unlocked": bool(self.snapshot.get("audio_output", {}).get("mode") != "off"),
+        }
+        return {
+            "history_loaded": history_loaded,
+            "history_path": plan.path if plan else "",
+            "load_error": load_error,
+            "checks": checks,
+            "overall_ready": history_loaded and all(checks.values()),
+            "self_intro_items": self_intro_items,
+            "agent_phase_items": phase_items,
+            "free_debate_items": free_items,
+            "missing_audio_count": len([item for item in ai_items if not item.get("audio_ready")]),
+        }
+
+    async def prepare_fallback_audio(self, *, force: bool = False) -> Dict[str, Any]:
+        plan = self._load_fallback_plan()
+        items = self._fallback_self_intro_items()
+        items.extend(self._fallback_agent_phase_items(plan))
+        items.extend([item for item in self._fallback_free_turn_items(plan) if item.get("audio_required")])
+        prepared: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        for item in items:
+            if not item.get("text_loaded"):
+                failed.append({**item, "reason": "missing_text"})
+                continue
+            if item.get("audio_ready") and not force:
+                self._lock_fallback_asset_metadata(item)
+                skipped.append({**item, "reason": "already_ready"})
+                continue
+            try:
+                speaker = self._find_speaker(str(item["speaker_id"]))
+                phase = self._find_phase(str(item["phase_id"]))
+                asset = await self._generate_fallback_audio_asset(
+                    phase=phase,
+                    speaker=speaker,
+                    speech_id=str(item["speech_id"]),
+                    task_id=str(item["task_id"]),
+                    text=str(item["text"]),
+                    force=force,
+                )
+                prepared.append({**item, "audio_ready": True, "chunk_count": int(asset.get("chunk_count") or 0)})
+            except Exception as exc:  # noqa: BLE001
+                failed.append({**item, "reason": str(exc)})
+        status = self.fallback_status()
+        await self.emit(
+            "fallback.audio_prepared",
+            {"prepared": len(prepared), "skipped": len(skipped), "failed": len(failed)},
+            "host",
+        )
+        return {**status, "prepared": prepared, "skipped": skipped, "failed": failed}
+
+    async def _generate_fallback_audio_asset(
+        self,
+        *,
+        phase: Dict[str, Any],
+        speaker: Dict[str, Any],
+        speech_id: str,
+        task_id: str,
+        text: str,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        text, timing = self._fallback_text_for_timing(phase, speaker, text, kind="self_intro" if speech_id.startswith("fallback_self_intro_") else "free" if speech_id.startswith("fallback_free_") else "speech")
+        existing = self._audio_asset_for_speech(speech_id) or self._attach_fallback_manifest_asset(speech_id)
+        existing_ready = self._fallback_asset_ready(existing, text)
+        if existing and existing_ready and not force:
+            return existing
+        if existing:
+            self.snapshot["audio_assets"] = [asset for asset in self.snapshot.get("audio_assets", []) if asset.get("speech_id") != speech_id]
+        selection = self._select_tts_for_speech(task_id, speech_id, speaker)
+        match_id = self.snapshot["match"]["id"]
+        phase_key = self._phase_key_or_default(phase["id"])
+        archive_dir = self._audio_archive_dir(match_id, phase_key, speech_id)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        sentences = self._split_tts_text_for_fallback(text)
+        if not sentences:
+            raise MatchStateError("fallback_empty_text", "兜底文本为空。", {"speech_id": speech_id})
+        concurrency = self._tts_sentence_concurrency()
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def synthesize_one(idx: int, sentence: str) -> tuple[int, TTSResult]:
+            async with semaphore:
+                return idx, await self._synthesize_tts_with_retry(selection, sentence)
+
+        synthesized = await asyncio.gather(
+            *(synthesize_one(idx, sentence) for idx, sentence in enumerate(sentences))
+        )
+        for idx, result in sorted(synthesized, key=lambda item: item[0]):
+            ext = self._audio_extension(result.mime_type)
+            file_path = archive_dir / f"tts_{self._safe_path_part(task_id)}_s{idx}.{ext}"
+            file_path.write_bytes(result.audio)
+            self._upsert_audio_asset(
+                speech_id=speech_id,
+                speaker_id=speaker["id"],
+                phase_id=phase["id"],
+                mime_type=result.mime_type,
+                archive_dir=archive_dir,
+                chunk_path=file_path,
+                chunk_index=idx,
+                size_bytes=len(result.audio),
+                duration_ms=None,
+            )
+        asset = self._audio_asset_for_speech(speech_id)
+        if not asset:
+            raise MatchStateError("fallback_audio_missing", "兜底音频生成后未归档。", {"speech_id": speech_id})
+        now = iso_now()
+        asset["status"] = "completed"
+        asset["source"] = "fallback_tts"
+        asset["fallback"] = True
+        asset["tts_task_id"] = task_id
+        asset["text_length"] = len(text)
+        asset["fallback_text"] = text
+        asset["fallback_kind"] = "free" if speech_id.startswith("fallback_free_") else "self_intro" if speech_id.startswith("fallback_self_intro_") else "speech"
+        asset["fallback_speaker_label"] = label_for_speaker(speaker)
+        asset["fallback_voice_preset_id"] = speaker.get("tts_voice_preset_id")
+        asset["fallback_history_path"] = str(self._load_fallback_plan().path if not speech_id.startswith("fallback_self_intro_") else "")
+        asset["fallback_text_original_length"] = timing.get("original_text_length")
+        asset["fallback_text_clamped"] = timing.get("text_clamped")
+        asset["fallback_target_chars"] = timing.get("target_chars")
+        asset["screen_playback_rate"] = timing.get("screen_playback_rate")
+        asset["completed_at"] = now
+        asset["updated_at"] = now
+        self._persist_snapshot()
+        self._save_fallback_asset_to_manifest(asset)
+        return asset
+
+    def _lock_fallback_asset_metadata(self, item: Dict[str, Any]) -> None:
+        asset = self._audio_asset_for_speech(str(item.get("speech_id") or "")) or self._attach_fallback_manifest_asset(str(item.get("speech_id") or ""))
+        if not asset:
+            return
+        changed = False
+        updates = {
+            "fallback": True,
+            "source": asset.get("source") or "fallback_tts",
+            "fallback_text": str(item.get("text") or ""),
+            "fallback_kind": "free" if item.get("index") is not None else str(item.get("phase_type") or "speech"),
+            "fallback_speaker_label": str(item.get("speaker_label") or ""),
+            "fallback_voice_preset_id": item.get("voice_preset_id"),
+        }
+        for key, value in updates.items():
+            if value and asset.get(key) != value:
+                asset[key] = value
+                changed = True
+        if changed:
+            asset["updated_at"] = iso_now()
+            self._persist_snapshot()
+        self._save_fallback_asset_to_manifest(asset)
+
+    def _split_tts_text_for_fallback(self, text: str) -> List[str]:
+        sentences: List[str] = []
+        sent_chars = 0
+        guard = 0
+        while True:
+            guard += 1
+            if guard > 10000:
+                break
+            sentence, new_pos = self._next_tts_sentence(text, sent_chars, allow_soft_break=(len(sentences) == 0))
+            if new_pos <= sent_chars and not sentence:
+                break
+            sent_chars = new_pos
+            if sentence:
+                sentences.append(sentence)
+        tail = text[sent_chars:].strip()
+        if tail:
+            sentences.append(tail)
+        return sentences
+
+    async def select_phase_with_fallback(self, phase_id: str) -> Dict[str, Any]:
+        plan = self._load_fallback_plan()
+        async with self._lock:
+            self._ensure_match_allows_control("fallback_select_phase")
+            phase = self._find_phase(phase_id)
+            self._finalize_current_speech_for_history()
+            self.snapshot["current_speech"] = None
+            self._clear_flow_state()
+            self._pause_running_clocks()
+            for item in self.snapshot.get("phases", []):
+                if int(item.get("display_order") or 0) < int(phase.get("display_order") or 0):
+                    item["status"] = "completed"
+                elif item.get("id") == phase_id:
+                    item["status"] = "active"
+                else:
+                    item["status"] = "pending"
+            self.snapshot["match"]["current_phase_id"] = phase_id
+            self.snapshot["match"]["screen_scene"] = "live"
+            self.snapshot["match"]["live_mode"] = "free" if phase["phase_type"] == "free_debate" else "single"
+            if phase["phase_type"] == "free_debate":
+                self.snapshot["free_debate"] = {
+                    "current_turn_side": "affirmative",
+                    "turn_index": 1,
+                    "assignment_mode": "fallback_numbered",
+                    "fallback_mode": False,
+                    "fallback_index": 0,
+                }
+            self._reset_clocks_for_phase(phase)
+            added = self._fill_fallback_history_before_order(plan, int(phase.get("display_order") or 0))
+            self._persist_snapshot()
+        await self.emit("fallback.phase_selected", {"phase_id": phase_id, "history_segments_added": added}, "host")
+        return await self.get_snapshot()
+
+    def _fill_fallback_history_before_order(self, plan: FallbackPlan, target_order: int) -> int:
+        added = 0
+        for phase in sorted(self.snapshot.get("phases", []), key=lambda item: int(item.get("display_order") or 0)):
+            if int(phase.get("display_order") or 0) >= target_order:
+                continue
+            if phase.get("phase_type") == "free_debate":
+                continue
+            if self._phase_has_history_content(str(phase.get("id") or "")):
+                continue
+            speaker = speaker_for_phase(phase, self.snapshot.get("speakers", []))
+            text = text_for_phase(plan, phase)
+            if not speaker or not text:
+                continue
+            speech = {
+                "id": f"fallback_history_{phase['id']}_{speaker['id']}",
+                "phase_id": phase["id"],
+                "speaker_id": speaker["id"],
+                "side": speaker["side"],
+                "turn_index": 0,
+            }
+            segment = self._upsert_transcript_segment(speech, speaker["id"], text, True, "fallback_history")
+            segment["fallback"] = True
+            segment["fallback_source"] = plan.path
+            added += 1
+        return added
+
+    async def play_fallback_speech(self, phase_id: str, speaker_id: str, *, free_turn_index: Optional[int] = None) -> Dict[str, Any]:
+        plan = self._load_fallback_plan()
+        phase = self._find_phase(phase_id)
+        speaker = self._find_speaker(speaker_id)
+        text = ""
+        kind = "speech"
+        if free_turn_index is not None:
+            kind = "free"
+            turn = next((item for item in plan.free_turns if item.index == free_turn_index), None)
+            text = turn.text if turn else ""
+        else:
+            text = text_for_phase(plan, phase)
+        text, _timing = self._fallback_text_for_timing(phase, speaker, text, kind=kind)
+        speech_id = self._fallback_speech_id(phase_id, speaker_id, kind=kind, turn_index=free_turn_index)
+        task_id = self._fallback_task_id(speech_id)
+        asset = self._audio_asset_for_speech(speech_id) or self._attach_fallback_manifest_asset(speech_id)
+        if not self._fallback_asset_ready(asset, text):
+            raise MatchStateError(
+                "fallback_audio_not_ready",
+                "兜底音频尚未生成，现场替代不能临时合成。",
+                {"phase_id": phase_id, "speaker_id": speaker_id, "speech_id": speech_id},
+            )
+        locked_text = str(asset.get("fallback_text") or "").strip()
+        if locked_text:
+            text = locked_text
+        asr_sessions: List[Any] = []
+        takeover: Dict[str, Any] = {}
+        async with self._lock:
+            status = self.snapshot["match"].get("status")
+            if status in {"finished", "archived"}:
+                raise MatchStateError(
+                    "invalid_state",
+                    "比赛已结束，不能播放兜底音频。",
+                    {"command": "play_fallback_speech", "status": status},
+                )
+            takeover = self._abandon_active_realtime_for_takeover(preserve_speech_id=speech_id)
+            asr_sessions = list(takeover.get("asr_sessions") or [])
+            self._abandoned_speech_ids.discard(speech_id)
+            self.snapshot["match"]["status"] = "running"
+            self.snapshot["match"].pop("resume_clock_ids", None)
+            for item in self.snapshot.get("phases", []):
+                if int(item.get("display_order") or 0) < int(phase.get("display_order") or 0):
+                    item["status"] = "completed"
+                elif item.get("id") == phase_id:
+                    item["status"] = "active"
+                else:
+                    item["status"] = "pending"
+            self.snapshot["match"]["current_phase_id"] = phase_id
+            self.snapshot["match"]["screen_scene"] = "live"
+            self.snapshot["match"]["live_mode"] = "free" if phase.get("phase_type") == "free_debate" else "single"
+            if phase.get("phase_type") == "free_debate" and self.snapshot.get("free_debate", {}).get("fallback_mode"):
+                self._refresh_clocks()
+            else:
+                self._reset_clocks_for_phase(phase)
+            self.snapshot["current_speech"] = {
+                "id": speech_id,
+                "phase_id": phase_id,
+                "speaker_id": speaker_id,
+                "side": speaker["side"],
+                "turn_index": free_turn_index or self._current_turn_index(),
+                "source": "fallback_history",
+                "kind": "fallback_free" if free_turn_index is not None else "fallback_speech",
+                "content_final": text,
+                "content_partial": text,
+                "started_at": iso_now(),
+                "state": "speaking",
+                "fallback": True,
+                "fallback_source": plan.path,
+                "tts_task_id": task_id,
+                "tts_expected_sentences": int(asset.get("chunk_count") or 0),
+                "tts_created_sentences": int(asset.get("chunk_count") or 0),
+                "tts_ready_sentences": int(asset.get("chunk_count") or 0),
+                "tts_played_sentences": 0,
+                "tts_played_sentence_indices": [],
+                "tts_skipped_sentences": [],
+                "started_clock_remaining_ms": {
+                    clock["name"]: int(clock.get("remaining_ms", 0))
+                    for clock in self.snapshot.get("clocks", [])
+                },
+            }
+            self._clear_flow_state()
+            self._start_relevant_clocks(speaker["side"])
+            self.snapshot["speech_service"]["asr"] = {
+                "status": "ok",
+                "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                "active_sessions": 0,
+                "detail": "fallback takeover; previous ASR streams abandoned",
+            }
+            self.snapshot["speech_service"]["tts"] = {
+                "status": "playing",
+                "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                "queue_size": int(asset.get("chunk_count") or 0),
+                "speaker_id": speaker_id,
+                "detail": "fallback audio playback pending",
+            }
+            for item in self.snapshot.get("agent_status", []):
+                if item.get("speaker_id") != speaker_id and item.get("status") in {"thinking", "streaming"}:
+                    item["status"] = "ready"
+                    item["detail"] = "fallback takeover cleared stale task"
+            self._set_agent_status(speaker_id, "streaming", "fallback audio playing")
+            self._persist_snapshot()
+        self._close_asr_sessions_soon(asr_sessions)
+        chunk_count = int(asset.get("chunk_count") or 0)
+        await self.emit(
+            "fallback.speech_started",
+            {
+                "phase_id": phase_id,
+                "speaker_id": speaker_id,
+                "speech_id": speech_id,
+                "task_id": task_id,
+                "free_turn_index": free_turn_index,
+                "takeover": {key: value for key, value in takeover.items() if key != "asr_sessions"},
+            },
+            "host",
+            speaker_id,
+        )
+        self._arm_tts_playback_grace(speech_id, task_id, chunk_count)
+        return await self.get_snapshot()
+
+    async def play_fallback_self_intro(self, speaker_id: str) -> Dict[str, Any]:
+        speaker = self._find_speaker(speaker_id)
+        if speaker.get("speaker_type") != "agent":
+            raise MatchStateError("invalid_speaker", "只有 Agent 辩手可以播放固定自我介绍。", {"speaker_id": speaker_id})
+        if self.snapshot["match"].get("status") in {"finished", "archived"}:
+            raise MatchStateError(
+                "invalid_state",
+                "比赛已结束，不能播放自我介绍。",
+                {"command": "self_introduction", "status": self.snapshot["match"].get("status")},
+            )
+
+        item = next((entry for entry in self._fallback_self_intro_items() if entry.get("speaker_id") == speaker_id), None)
+        if not item:
+            raise MatchStateError("fallback_self_intro_missing", "未找到该 Agent 的固定自我介绍配置。", {"speaker_id": speaker_id})
+        speech_id = str(item["speech_id"])
+        task_id = str(item["task_id"])
+        asset = self._audio_asset_for_speech(speech_id) or self._attach_fallback_manifest_asset(speech_id)
+        expected_text = str(item.get("text") or "").strip()
+        if not self._fallback_asset_ready(asset, expected_text):
+            raise MatchStateError(
+                "fallback_audio_not_ready",
+                "自我介绍固定音频尚未就绪；现场播放不会临时请求 Agent 或 TTS。",
+                {"speaker_id": speaker_id, "speech_id": speech_id},
+            )
+        text = str(asset.get("fallback_text") or expected_text).strip()
+        chunk_count = int(asset.get("chunk_count") or 0)
+
+        async with self._lock:
+            self._finalize_current_speech_for_history()
+            self.snapshot["current_speech"] = {
+                "id": speech_id,
+                "phase_id": str(item["phase_id"]),
+                "speaker_id": speaker_id,
+                "side": speaker["side"],
+                "turn_index": 0,
+                "source": "fallback_history",
+                "kind": "self_intro",
+                "content_final": text,
+                "content_partial": text,
+                "started_at": iso_now(),
+                "state": "speaking",
+                "fallback": True,
+                "fallback_source": "fixed_self_intro_audio",
+                "tts_task_id": task_id,
+                "tts_expected_sentences": chunk_count,
+                "tts_created_sentences": chunk_count,
+                "tts_ready_sentences": chunk_count,
+                "tts_played_sentences": 0,
+                "tts_played_sentence_indices": [],
+                "tts_skipped_sentences": [],
+            }
+            self.snapshot["match"]["live_mode"] = "prep"
+            self._clear_flow_state()
+            self.snapshot["speech_service"]["tts"] = {
+                "status": "playing",
+                "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                "queue_size": chunk_count,
+                "speaker_id": speaker_id,
+                "detail": "fixed self-introduction audio playback pending",
+                "last_progress_at": iso_now(),
+            }
+            self._set_agent_status(speaker_id, "streaming", "fixed self-introduction audio playing")
+            self._persist_snapshot()
+
+        await self.emit(
+            "fallback.self_intro_started",
+            {"speaker_id": speaker_id, "speech_id": speech_id, "task_id": task_id, "chunk_count": chunk_count},
+            "host",
+            speaker_id,
+        )
+        self._arm_tts_playback_grace(speech_id, task_id, chunk_count)
+        return await self.get_snapshot()
+
+    async def start_fallback_free_debate(self) -> Dict[str, Any]:
+        plan = self._load_fallback_plan()
+        phase = self._current_phase()
+        if phase.get("phase_type") != "free_debate":
+            raise MatchStateError("not_free_debate", "兜底自由辩论只能在自由辩论阶段启动。", {"phase_id": phase.get("id")})
+        if not plan.free_turns:
+            raise MatchStateError("fallback_free_debate_missing", "兜底历史中没有自由辩论编号。")
+        async with self._lock:
+            self._ensure_match_allows_control("fallback_free_debate")
+            fd = self.snapshot["free_debate"]
+            fd["assignment_mode"] = "fallback_numbered"
+            fd["fallback_mode"] = True
+            fd["fallback_index"] = 0
+            fd["fallback_total"] = len(plan.free_turns)
+            fd["current_fallback_speaker_id"] = None
+            fd["current_fallback_label"] = ""
+            self._clear_flow_state()
+            self._pause_running_clocks()
+            self._persist_snapshot()
+        await self.emit("fallback.free_debate_started", {"turn_count": len(plan.free_turns)}, "host")
+        return await self._advance_fallback_free_debate_turn("start")
+
+    async def _advance_fallback_free_debate_turn(self, reason: str) -> Dict[str, Any]:
+        plan = self._load_fallback_plan()
+        phase = self._current_phase()
+        if phase.get("phase_type") != "free_debate":
+            return await self.get_snapshot()
+        chosen: Optional[Dict[str, Any]] = None
+        previous_speaker_type = ""
+        ai_gap_seconds = 0.0
+        should_return_snapshot = False
+        async with self._lock:
+            fd = self.snapshot["free_debate"]
+            if not fd.get("fallback_mode"):
+                should_return_snapshot = True
+            else:
+                previous_speaker = None
+                previous_speaker_id = str(fd.get("current_fallback_speaker_id") or "")
+                if previous_speaker_id:
+                    previous_speaker = next(
+                        (item for item in self.snapshot.get("speakers", []) if item.get("id") == previous_speaker_id),
+                        None,
+                    )
+                previous_speaker_type = str((previous_speaker or {}).get("speaker_type") or "")
+                start_index = int(fd.get("fallback_index") or 0)
+                for turn in plan.free_turns[start_index:]:
+                    speaker = speaker_for_label(turn.speaker_label, self.snapshot.get("speakers", []))
+                    if not speaker:
+                        continue
+                    if not self._free_debate_side_has_time(str(speaker.get("side"))):
+                        fd["fallback_index"] = turn.index
+                        continue
+                    fd["fallback_index"] = turn.index
+                    fd["current_turn_side"] = speaker["side"]
+                    fd["turn_index"] = turn.index
+                    fd["current_fallback_speaker_id"] = speaker["id"]
+                    fd["current_fallback_label"] = turn.speaker_label
+                    fd["current_fallback_text"] = turn.text
+                    turn_clock = self._clock("turn")
+                    if turn_clock:
+                        turn_clock["remaining_ms"] = turn_clock["total_seconds"] * 1000
+                        turn_clock["state"] = "paused"
+                        turn_clock["deadline_at"] = None
+                        turn_clock.pop("expired_notified_at", None)
+                    chosen = {"turn": turn, "speaker": speaker}
+                    break
+                if not chosen:
+                    fd["fallback_mode"] = False
+                    fd["current_fallback_speaker_id"] = None
+                    fd["current_fallback_label"] = ""
+                    fd.pop("ai_gap_until", None)
+                    fd.pop("ai_gap_seconds", None)
+                    for clock_name in ("affirmative_total", "negative_total", "turn"):
+                        clock = self._clock(clock_name)
+                        if clock:
+                            clock["remaining_ms"] = 0
+                            clock["state"] = "expired"
+                            clock["deadline_at"] = None
+                    self._set_flow_waiting_for_timeout(
+                        phase=phase,
+                        expired_clock_names=["affirmative_total", "negative_total"],
+                        speech_id=None,
+                        speaker_id=None,
+                        now=utc_now(),
+                    )
+                elif (
+                    reason == "speech_end"
+                    and previous_speaker_type == "agent"
+                    and str(chosen["speaker"].get("speaker_type") or "") == "agent"
+                ):
+                    ai_gap_seconds = self._fallback_free_ai_gap_seconds()
+                    if ai_gap_seconds > 0:
+                        fd["ai_gap_seconds"] = ai_gap_seconds
+                        fd["ai_gap_until"] = to_iso(utc_now() + timedelta(seconds=ai_gap_seconds))
+                        self.snapshot["speech_service"]["tts"] = {
+                            "status": "idle",
+                            "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                            "queue_size": 0,
+                            "speaker_id": None,
+                            "detail": f"fallback free debate AI gap {ai_gap_seconds:.1f}s",
+                        }
+                else:
+                    fd.pop("ai_gap_until", None)
+                    fd.pop("ai_gap_seconds", None)
+                self._persist_snapshot()
+        if should_return_snapshot or not chosen:
+            return await self.get_snapshot()
+        turn = chosen["turn"]
+        speaker = chosen["speaker"]
+        await self.emit(
+            "fallback.free_debate_turn_ready",
+            {
+                "index": turn.index,
+                "speaker_id": speaker["id"],
+                "speaker_label": turn.speaker_label,
+                "speaker_type": speaker["speaker_type"],
+                "reason": reason,
+            },
+            "host",
+            speaker["id"],
+        )
+        if speaker.get("speaker_type") == "agent":
+            if ai_gap_seconds > 0:
+                await self.emit(
+                    "fallback.free_debate_ai_gap",
+                    {
+                        "seconds": ai_gap_seconds,
+                        "index": turn.index,
+                        "speaker_id": speaker["id"],
+                        "speaker_label": turn.speaker_label,
+                    },
+                    "host",
+                    speaker["id"],
+                )
+                await asyncio.sleep(ai_gap_seconds)
+                async with self._lock:
+                    fd = self.snapshot.get("free_debate", {})
+                    still_current = (
+                        fd.get("fallback_mode")
+                        and int(fd.get("turn_index") or 0) == int(turn.index)
+                        and fd.get("current_fallback_speaker_id") == speaker["id"]
+                        and not self.snapshot.get("current_speech")
+                    )
+                    if still_current:
+                        fd.pop("ai_gap_until", None)
+                        fd.pop("ai_gap_seconds", None)
+                        self._persist_snapshot()
+                if not still_current:
+                    return await self.get_snapshot()
+            return await self.play_fallback_speech(phase["id"], speaker["id"], free_turn_index=turn.index)
+        return await self.get_snapshot()
+
+    def _fallback_free_ai_gap_seconds(self) -> float:
+        raw = os.getenv("PHDEBATE_FALLBACK_FREE_AI_GAP_SECONDS", "3").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 3.0
+        return max(0.0, min(15.0, value))
 
     async def run_mock_agent_speech(self, speaker_id: str) -> None:
         await self.run_agent_speech(speaker_id)
@@ -2248,7 +3183,13 @@ class MatchStore:
             async for event in self.agent_gateway.stream_speech(endpoint, payload, self._mock_agent_chunks(speaker), config=config):
                 et = event.get("type")
                 if et == "delta":
-                    full_text += event.get("delta", "")
+                    next_text, clamped = self._clamp_agent_text_to_budget(full_text + str(event.get("delta", "")), payload)
+                    delta = next_text[len(full_text) :]
+                    full_text = next_text
+                    if not delta and clamped:
+                        break
+                    if not delta:
+                        continue
                     if tts_enabled:
                         while True:
                             sentence, new_chars = self._next_tts_sentence(
@@ -2259,8 +3200,10 @@ class MatchStore:
                                 break
                             tts_sentence_tasks.append(asyncio.create_task(synth(sentence, tts_sentence_idx)))
                             tts_sentence_idx += 1
+                    if clamped:
+                        break
                 elif et == "final":
-                    full_text = event.get("content", full_text)
+                    full_text, _ = self._clamp_agent_text_to_budget(event.get("content") or full_text, payload)
                     break
         except AgentGatewayError:
             entry = self._prepared_speeches.get(key)
@@ -2486,6 +3429,8 @@ class MatchStore:
                 "seat": speaker["seat"],
                 "speech_rate": cmd_budget["speech_rate"],
                 "chars_per_second": cmd_budget["chars_per_second"],
+                "raw_chars_per_second": cmd_budget["raw_chars_per_second"],
+                "screen_playback_rate": cmd_budget["screen_playback_rate"],
                 "char_budget": cmd_budget["char_budget"],
             },
             "match_id": match["id"],
@@ -2723,7 +3668,7 @@ class MatchStore:
                     "只能结束当前发言人的发言。",
                     {"active_speaker_id": speech.get("speaker_id")},
                 )
-            text = speech.get("content_partial") or ASR_PENDING_TRANSCRIPT_TEXT
+            text = speech.get("content_partial") or self._pending_human_transcript_text(speech)
             speech["content_final"] = text
             speech["state"] = "ended"
             speech["ended_at"] = iso_now()
@@ -2731,7 +3676,7 @@ class MatchStore:
             segment = self._upsert_transcript_segment(speech, speaker_id, text, True, speech.get("source", "human_asr"))
             if speech.get("source") == "human_asr" and _is_human_system_transcript_text(text):
                 segment["exclude_from_history"] = True
-                segment["system_placeholder"] = "asr_pending"
+                segment["system_placeholder"] = "asr_pending" if text == ASR_PENDING_TRANSCRIPT_TEXT else "asr_unavailable"
             self.snapshot["current_speech"] = None
             self._pause_running_clocks()
             self._advance_free_debate_turn_if_needed(speaker["side"])
@@ -2985,6 +3930,19 @@ class MatchStore:
             speaker = self._find_speaker(speaker_id)
             if speaker["speaker_type"] != "human":
                 raise MatchStateError("invalid_speaker", "只有人类辩手控制台可以上传录音分片。", {"speaker_id": speaker_id})
+            if speech_id in self._abandoned_speech_ids:
+                existing = self._audio_asset_for_speech(speech_id)
+                return {
+                    "audio_asset_id": (existing or {}).get("id") or f"audio_{speech_id}",
+                    "speech_id": speech_id,
+                    "speaker_id": speaker_id,
+                    "chunk_index": chunk_index,
+                    "chunk_count": int((existing or {}).get("chunk_count") or 0),
+                    "size_bytes": int((existing or {}).get("size_bytes") or 0),
+                    "file_path": "",
+                    "pcm_ready": False,
+                    "ignored_after_takeover": True,
+                }
             # stop 后补传/网络重试：该发言音频已归档完成时，迟到分片不能把资产状态打回 recording、
             # 更不能重开一路对已结束发言的实时 ASR。良性忽略（返回当前资产摘要，不报错、不污染状态）。
             existing = self._audio_asset_for_speech(speech_id)
@@ -3016,6 +3974,7 @@ class MatchStore:
                     {"speech_id": speech_id, "reason": str(exc)},
                 ) from exc
 
+            pcm_stats = self._pcm_audio_stats(content, mime_type)
             asset = self._upsert_audio_asset(
                 speech_id=speech_id,
                 speaker_id=speaker_id,
@@ -3026,15 +3985,25 @@ class MatchStore:
                 chunk_index=chunk_index,
                 size_bytes=len(content),
                 duration_ms=duration_ms,
+                pcm_stats=pcm_stats,
             )
             pcm_ready = self._asr_supported_audio_mime(mime_type)
+            silent_pcm = bool(pcm_stats and pcm_stats.get("silent"))
             if pcm_ready and (self.snapshot.get("current_speech") or {}).get("id") == speech_id:
-                self.snapshot["speech_service"]["asr"] = {
-                    "status": "streaming",
-                    "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
-                    "active_sessions": 1,
-                    "detail": f"receiving PCM/L16 · {asset['chunk_count']} chunks · {asset['size_bytes']} bytes",
-                }
+                if self._audio_asset_is_silent(asset):
+                    self.snapshot["speech_service"]["asr"] = {
+                        "status": "failed",
+                        "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                        "active_sessions": 0,
+                        "detail": f"microphone input is silent · {asset['chunk_count']} chunks · {asset['size_bytes']} bytes",
+                    }
+                else:
+                    self.snapshot["speech_service"]["asr"] = {
+                        "status": "streaming",
+                        "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                        "active_sessions": 1,
+                        "detail": f"receiving PCM/L16 · {asset['chunk_count']} chunks · {asset['size_bytes']} bytes",
+                    }
             else:
                 self.snapshot["speech_service"]["asr"]["detail"] = f"audio archived {asset['chunk_count']} chunks"
             payload = {
@@ -3046,11 +4015,14 @@ class MatchStore:
                 "size_bytes": asset["size_bytes"],
                 "file_path": str(chunk_path),
                 "pcm_ready": pcm_ready,
+                "silent": silent_pcm,
+                "peak_level": pcm_stats.get("peak") if pcm_stats else None,
+                "rms_level": pcm_stats.get("rms") if pcm_stats else None,
             }
             self._persist_snapshot()
 
         await self.emit("audio.chunk_archived", payload, "speech", speaker_id)
-        if payload["pcm_ready"]:
+        if payload["pcm_ready"] and (not silent_pcm or speech_id in self._asr_streams):
             await self.emit("asr.audio_chunk_received", payload, "speech", speaker_id)
             await self._send_live_asr_chunk(speech_id, speaker_id, content, mime_type)
         return payload
@@ -3058,6 +4030,23 @@ class MatchStore:
     async def complete_audio_archive(self, speech_id: str, speaker_id: Optional[str] = None) -> Dict[str, Any]:
         async with self._lock:
             asset = self._audio_asset_for_speech(speech_id)
+            if speech_id in self._abandoned_speech_ids:
+                if asset:
+                    asset["status"] = "completed"
+                    asset["completed_at"] = iso_now()
+                    asset["updated_at"] = asset["completed_at"]
+                self.snapshot["speech_service"]["asr"] = {
+                    "status": "ok",
+                    "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                    "active_sessions": 0,
+                    "detail": "abandoned speech archive ignored after fallback takeover",
+                }
+                self._persist_snapshot()
+                return {
+                    "audio_asset_id": (asset or {}).get("id") or f"audio_{speech_id}",
+                    "speech_id": speech_id,
+                    "ignored_after_takeover": True,
+                }
             if not asset:
                 raise MatchStateError("audio_asset_not_found", "未找到该发言的音频归档。", {"speech_id": speech_id})
             if speaker_id and asset.get("speaker_id") != speaker_id:
@@ -3069,6 +4058,16 @@ class MatchStore:
             asset["status"] = "completed"
             asset["completed_at"] = iso_now()
             asset["updated_at"] = asset["completed_at"]
+            if self._audio_asset_is_silent(asset):
+                asset["asr_realtime_status"] = "failed"
+                asset["asr_realtime_error"] = "microphone input is silent"
+                self.snapshot["speech_service"]["asr"] = {
+                    "status": "failed",
+                    "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                    "active_sessions": 0,
+                    "detail": "microphone input is silent; ASR skipped",
+                }
+                self._apply_archived_asr_text(speech_id, ASR_SILENT_INPUT_TEXT)
             payload = {
                 "audio_asset_id": asset["id"],
                 "speech_id": speech_id,
@@ -3080,6 +4079,19 @@ class MatchStore:
             self._persist_snapshot()
 
         result = await self.emit("audio.archive_completed", payload, "speech", asset["speaker_id"])
+        if self._audio_asset_is_silent(asset):
+            await self.emit(
+                "asr.failed",
+                {
+                    "speech_id": speech_id,
+                    "speaker_id": asset["speaker_id"],
+                    "reason": "microphone input is silent",
+                    "code": "silent_input",
+                },
+                "speech",
+                asset["speaker_id"],
+            )
+            return result
         # ASR 收尾要等服务商返回 final 转写(还叠加发送限速的 send_budget)，慢时可能数秒。给一个短上限：
         # 常态(ASR 很快返回)仍同步拿到 final；一旦超过上限就转后台继续(shield 保护不被取消)，
         # 不让 /audio/complete 长时间挂起——否则人类辩手点「结束发言」后会长时间转圈。
@@ -3106,6 +4118,8 @@ class MatchStore:
         return max(0.5, min(15.0, value))
 
     async def should_auto_recognize_audio_archive(self, speech_id: str) -> bool:
+        if speech_id in self._abandoned_speech_ids:
+            return False
         if not self._asr_auto_recognize_enabled():
             return False
         async with self._lock:
@@ -3115,6 +4129,8 @@ class MatchStore:
             # 导致实时转写只覆盖一部分内容（现场反馈"只转录一部分"）。归档批量识别按序拼接整段
             # 音频一次性识别，最稳，故不再因"实时流已完成"而跳过。仅 PCM/L16 可直接识别；
             # webm 回退（少数浏览器无 PCM 采集）保持实时结果，不在此重识别。
+            if asset and self._audio_asset_is_silent(asset):
+                return False
             return bool(asset and self._asr_supported_audio_mime(str(asset.get("mime_type") or "")))
 
     async def auto_recognize_audio_archive(self, speech_id: str) -> None:
@@ -3128,6 +4144,8 @@ class MatchStore:
             )
 
     async def _send_live_asr_chunk(self, speech_id: str, speaker_id: str, content: bytes, mime_type: str) -> None:
+        if speech_id in self._abandoned_speech_ids:
+            return
         if not self._asr_realtime_enabled() or not self._asr_supported_audio_mime(mime_type):
             return
         session = self._asr_streams.get(speech_id)
@@ -3222,6 +4240,8 @@ class MatchStore:
         latency_ms: int,
         chunk_count: int,
     ) -> None:
+        if speech_id in self._abandoned_speech_ids:
+            return
         async with self._lock:
             active = self.snapshot.get("current_speech") if (self.snapshot.get("current_speech") or {}).get("id") == speech_id else None
             if active:
@@ -3255,6 +4275,8 @@ class MatchStore:
         )
 
     async def _record_live_asr_failed(self, speech_id: str, speaker_id: str, reason: str, code: Optional[int] = None) -> None:
+        if speech_id in self._abandoned_speech_ids:
+            return
         async with self._lock:
             self.repo.finish_speech_service_request(
                 match_id=self.snapshot["match"]["id"],
@@ -3282,6 +4304,8 @@ class MatchStore:
         await self.emit("asr.failed", {"speech_id": speech_id, "speaker_id": speaker_id, "reason": reason, "code": code}, "speech", speaker_id)
 
     async def recognize_audio_archive(self, speech_id: str) -> Dict[str, Any]:
+        if speech_id in self._abandoned_speech_ids:
+            raise MatchStateError("speech_abandoned", "该发言已被兜底接管，归档 ASR 结果会被忽略。", {"speech_id": speech_id})
         request_id = self._new_speech_service_request_id("asr", "archive_recognition")
         request_started_time = time.perf_counter()
         async with self._lock:
@@ -3989,16 +5013,19 @@ class MatchStore:
             health = await self.agent_gateway.health(endpoint)
             status = str(health.get("status") or ("ready" if health.get("ok", True) else "unavailable"))
             ok = bool(health.get("ok", True)) and status != "unavailable"
+            stored_status = "ready" if ok and status == "speech_only" else status
             model = str(health.get("model") or speaker.get("model_name") or "unknown")
             latency_ms = int(health.get("latency_ms") or 0)
-            detail = f"health {status} · {latency_ms}ms"
+            detail_status = "发言接口可用" if status == "speech_only" else status
+            detail = f"health {detail_status} · {latency_ms}ms"
             event_type = "agent.health_checked" if ok else "agent.failed"
             payload = {
                 "speaker_id": speaker_id,
                 "agent_config_id": speaker.get("agent_config_id"),
                 "endpoint": endpoint or "embedded://mock",
                 "ok": ok,
-                "status": status,
+                "status": stored_status,
+                "raw_status": status,
                 "model": model,
                 "latency_ms": latency_ms,
                 "version": health.get("version"),
@@ -4026,7 +5053,7 @@ class MatchStore:
             }
 
         async with self._lock:
-            self._update_agent_health_status(speaker_id, status if ok else "failed", detail, payload)
+            self._update_agent_health_status(speaker_id, stored_status if ok else "failed", detail, payload)
             self._persist_snapshot()
 
         await self.emit(event_type, payload, "admin", speaker_id)
@@ -5223,24 +6250,39 @@ class MatchStore:
         label = str(segment.get("speaker_label", ""))
         return label.split(" · ", 1)[0] if " · " in label else label
 
-    def _build_debate_history(self) -> list:
+    def _segment_has_history_content(self, segment: Dict[str, Any]) -> bool:
+        if not segment.get("valid", True) or not segment.get("is_final"):
+            return False
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            return False
+        if segment.get("exclude_from_history"):
+            return False
+        if segment.get("source") == "human_asr" and _is_human_system_transcript_text(text):
+            return False
+        return True
+
+    def _phase_has_history_content(self, phase_id: str) -> bool:
+        return any(
+            segment.get("phase_id") == phase_id and self._segment_has_history_content(segment)
+            for segment in self.snapshot.get("recent_transcript", [])
+        )
+
+    def _build_debate_history(self, *, target_phase: Optional[Dict[str, Any]] = None, fill_missing_human_fallback: bool = False) -> list:
         """Group final+valid transcript segments by phase, return ordered list.
 
         Shape matches 请求体(1).json: ``[{"stage": ..., "message": [{"speaker", "content"}]}]``.
         Self-introductions (`exclude_from_history`) are recorded/displayed but never sent
         back to the agent as conversation history.
         """
-        phase_by_id = {p["id"]: p["name"] for p in self.snapshot["phases"]}
-        ordered_phase_ids = [p["id"] for p in sorted(self.snapshot["phases"], key=lambda x: x["display_order"])]
+        phases = sorted(self.snapshot["phases"], key=lambda x: x["display_order"])
+        phase_by_id = {p["id"]: p["name"] for p in phases}
+        ordered_phase_ids = [p["id"] for p in phases]
         groups: Dict[str, list] = {}
         # recent_transcript 以"最新在前"存储；按时间正序（最早在前）分组，否则同一环节内多条发言
         # （目前只有自由辩论会出现多条）会被倒序，导致 agent 收到的对话顺序反了——最新一句跑到最前。
         for segment in reversed(self.snapshot.get("recent_transcript", [])):
-            if not segment.get("valid", True) or not segment.get("is_final"):
-                continue
-            if segment.get("exclude_from_history"):
-                continue
-            if segment.get("source") == "human_asr" and _is_human_system_transcript_text(str(segment.get("text") or "")):
+            if not self._segment_has_history_content(segment):
                 continue
             pid = segment.get("phase_id", "")
             if pid not in groups:
@@ -5249,11 +6291,48 @@ class MatchStore:
                 "speaker": self._history_speaker_label(segment),
                 "content": segment["text"],
             })
+        if fill_missing_human_fallback:
+            self._fill_missing_human_history_for_payload(groups, target_phase=target_phase)
         return [
             {"stage": phase_by_id.get(pid, pid), "message": groups[pid]}
             for pid in ordered_phase_ids
             if pid in groups
         ]
+
+    def _fill_missing_human_history_for_payload(self, groups: Dict[str, list], *, target_phase: Optional[Dict[str, Any]]) -> None:
+        """Only for agent request payloads: if a prior human speech has no usable ASR,
+        include fallback-history text as context without mutating the live transcript.
+
+        We intentionally do not fill missing Agent phases here. Missing AI output is
+        a model/TTS/process failure and should stay visible unless the host explicitly
+        performs a fallback phase jump, which writes fallback_history segments.
+        """
+        try:
+            plan = self._load_fallback_plan()
+        except MatchStateError:
+            return
+        phase = target_phase or self._current_phase()
+        try:
+            target_order = int(phase.get("display_order") or 0)
+        except (TypeError, ValueError):
+            return
+        for item in sorted(self.snapshot.get("phases", []), key=lambda x: int(x.get("display_order") or 0)):
+            try:
+                order = int(item.get("display_order") or 0)
+            except (TypeError, ValueError):
+                continue
+            if order >= target_order or item.get("phase_type") == "free_debate":
+                continue
+            phase_id = str(item.get("id") or "")
+            if not phase_id or phase_id in groups:
+                continue
+            speaker = speaker_for_phase(item, self.snapshot.get("speakers", []))
+            if not speaker or speaker.get("speaker_type") != "human":
+                continue
+            text = text_for_phase(plan, item).strip()
+            if not text:
+                continue
+            groups[phase_id] = [{"speaker": label_for_speaker(speaker), "content": text}]
 
     def build_match_record(self) -> list:
         """Public accessor for the 小七 `match_record/update` payload.
@@ -5292,9 +6371,11 @@ class MatchStore:
             "current_stage": phase["name"],
             "next_stage": next_phase["name"] if next_phase else "比赛结束",
             "holder": holder,
-            "debate_history": self._build_debate_history(),
+            "debate_history": self._build_debate_history(target_phase=phase, fill_missing_human_fallback=True),
             # 输出预算：由本次发言限时 + TTS 语速确定性推导，约束 Agent 回复不超时
             "max_token": budget["max_token"],
+            "max_len": budget["target_chars"],
+            "max_length": budget["target_chars"],
             "other_info": {
                 "match_id": match["id"],
                 "speaker_id": speaker["id"],
@@ -5304,7 +6385,13 @@ class MatchStore:
                 "time_limit_seconds": time_limit,
                 "speech_rate": budget["speech_rate"],
                 "chars_per_second": budget["chars_per_second"],
+                "raw_chars_per_second": budget["raw_chars_per_second"],
+                "screen_playback_rate": budget["screen_playback_rate"],
                 "char_budget": budget["char_budget"],
+                "usable_seconds": budget["usable_seconds"],
+                "speech_time_factor": budget["speech_time_factor"],
+                "tts_volume": self._formal_tts_volume(),
+                "tts_pitch_rate": self._formal_tts_pitch_rate(),
                 "request_model": model_id,
                 "model_display_name": model_display_name,
             },
@@ -5328,9 +6415,10 @@ class MatchStore:
         match = self.snapshot["match"]
         config = self._agent_config_for_speaker(speaker) or {}
         first_phase = next(iter(sorted(self.snapshot["phases"], key=lambda x: x["display_order"])), None)
-        time_limit = 40
+        time_limit = 20
         speech_rate = self._speaker_speech_rate(speaker)
         budget = self._agent_output_budget(time_limit, speech_rate)
+        budget.update({"char_budget": 20, "target_chars": 20, "max_token": 20})
         holder = "正方" if speaker["side"] == "affirmative" else "反方"
         model_id = str(config.get("model_id") or config.get("model_name") or "").strip()
         model_display_name = str(config.get("model_name") or speaker.get("model_name") or "").strip()
@@ -5348,6 +6436,8 @@ class MatchStore:
             "debate_history": [],
             "task_type": "self_intro",
             "max_token": budget["max_token"],
+            "max_len": budget["target_chars"],
+            "max_length": budget["target_chars"],
             "other_info": {
                 "match_id": match["id"],
                 "speaker_id": speaker["id"],
@@ -5356,7 +6446,13 @@ class MatchStore:
                 "time_limit_seconds": time_limit,
                 "speech_rate": budget["speech_rate"],
                 "chars_per_second": budget["chars_per_second"],
+                "raw_chars_per_second": budget["raw_chars_per_second"],
+                "screen_playback_rate": budget["screen_playback_rate"],
                 "char_budget": budget["char_budget"],
+                "usable_seconds": budget["usable_seconds"],
+                "speech_time_factor": budget["speech_time_factor"],
+                "tts_volume": self._formal_tts_volume(),
+                "tts_pitch_rate": self._formal_tts_pitch_rate(),
                 "request_model": model_id,
                 "model_display_name": model_display_name,
             },
@@ -6480,16 +7576,58 @@ class MatchStore:
                         options[key] = value
             if options.get("seed") is None or options.get("seed") == "":
                 options["seed"] = self._tts_consistency_seed(provider, speaker, preset)
-            if options.get("temperature") is None or options.get("temperature") == "":
-                options["temperature"] = 0.25
-            if options.get("top_p") is None or options.get("top_p") == "":
-                options["top_p"] = 0.8
+        if provider in {"local_qwen", "alicloud"}:
+            # Formal live-debate profile: voices may differ by speaker, but prosody
+            # must stay consistent across all agent debaters and all TTS segments.
+            options["speech_rate"] = self._formal_tts_speech_rate()
+            options["volume"] = self._formal_tts_volume()
+            options["pitch_rate"] = self._formal_tts_pitch_rate()
+            if provider == "local_qwen":
+                options["temperature"] = self._formal_tts_temperature()
+                options["top_p"] = self._formal_tts_top_p()
+                options["instructions"] = self._formal_tts_instructions()
         return SpeechGatewaySelection(
             gateway=getattr(selection, "gateway"),
             provider=provider,
             options=options,
             preset=getattr(selection, "preset", None),
         )
+
+    @staticmethod
+    def _env_float(name: str, default: float, low: float, high: float) -> float:
+        raw = os.getenv(name, "").strip()
+        try:
+            value = float(raw) if raw else default
+        except ValueError:
+            value = default
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _env_int(name: str, default: int, low: int, high: int) -> int:
+        raw = os.getenv(name, "").strip()
+        try:
+            value = int(float(raw)) if raw else default
+        except ValueError:
+            value = default
+        return max(low, min(high, value))
+
+    def _formal_tts_speech_rate(self) -> float:
+        return self._env_float("PHDEBATE_FORMAL_TTS_SPEECH_RATE", FORMAL_DEBATE_TTS_SPEECH_RATE, 0.7, 2.0)
+
+    def _formal_tts_volume(self) -> int:
+        return self._env_int("PHDEBATE_FORMAL_TTS_VOLUME", FORMAL_DEBATE_TTS_VOLUME, 0, 100)
+
+    def _formal_tts_pitch_rate(self) -> float:
+        return self._env_float("PHDEBATE_FORMAL_TTS_PITCH_RATE", FORMAL_DEBATE_TTS_PITCH_RATE, 0.5, 1.5)
+
+    def _formal_tts_temperature(self) -> float:
+        return self._env_float("PHDEBATE_FORMAL_TTS_TEMPERATURE", FORMAL_DEBATE_TTS_TEMPERATURE, 0.0, 1.0)
+
+    def _formal_tts_top_p(self) -> float:
+        return self._env_float("PHDEBATE_FORMAL_TTS_TOP_P", FORMAL_DEBATE_TTS_TOP_P, 0.1, 1.0)
+
+    def _formal_tts_instructions(self) -> str:
+        return os.getenv("PHDEBATE_FORMAL_TTS_INSTRUCTIONS", "").strip() or FORMAL_DEBATE_TTS_INSTRUCTIONS
 
     def _tts_consistency_seed(self, provider: str, speaker: Dict[str, Any], preset: Dict[str, Any]) -> int:
         raw = "|".join(
@@ -6723,13 +7861,20 @@ class MatchStore:
     # --- agent output budget (deterministic max_token from the speech time limit) ---
 
     def _tts_speaking_cps(self) -> float:
-        """Spoken Chinese characters per second at speech_rate=1 (debate pace)."""
-        raw = os.getenv("PHDEBATE_TTS_SPEAKING_CPS", "4.5").strip()
+        """Measured raw Chinese characters per second for local Qwen TTS audio.
+
+        The Qwen speed parameter is not linear in practice, so the output budget
+        is based on measured audio duration and the browser playback rate.
+        """
+        raw = os.getenv("PHDEBATE_TTS_SPEAKING_CPS", "3.55").strip()
         try:
             value = float(raw)
         except ValueError:
-            value = 4.5
+            value = 3.55
         return max(2.0, min(8.0, value))
+
+    def _screen_tts_playback_rate(self) -> float:
+        return self._env_float("PHDEBATE_SCREEN_TTS_PLAYBACK_RATE", FORMAL_DEBATE_SCREEN_PLAYBACK_RATE, 0.75, 1.6)
 
     def _agent_tokens_per_char(self) -> float:
         """Tokens per Chinese character for the agent model's tokenizer.
@@ -6747,15 +7892,17 @@ class MatchStore:
     def _agent_max_token_margin(self) -> float:
         """Headroom so the model finishes a sentence naturally instead of being
         hard-truncated exactly at the time budget."""
-        raw = os.getenv("PHDEBATE_AGENT_MAX_TOKEN_MARGIN", "1.15").strip()
+        raw = os.getenv("PHDEBATE_AGENT_MAX_TOKEN_MARGIN", "1.05").strip()
         try:
             value = float(raw)
         except ValueError:
-            value = 1.15
+            value = 1.05
         return max(1.0, min(2.0, value))
 
     def _speaker_speech_rate(self, speaker: Dict[str, Any]) -> float:
         """Resolve the TTS speech rate for a speaker (its preset, else provider default)."""
+        if str(speaker.get("speaker_type") or "") == "agent":
+            return self._formal_tts_speech_rate()
         provider = str((integration_config.active_section("tts") or {}).get("provider") or "alicloud")
         preset_id = str(speaker.get("tts_voice_preset_id") or "").strip()
         preset = integration_config.voice_preset(preset_id) if preset_id else None
@@ -6767,24 +7914,83 @@ class MatchStore:
             rate = 1.0
         return max(0.5, min(2.0, rate))
 
+    def _agent_speech_time_factor(self) -> float:
+        """Fraction of the nominal phase duration available for spoken content.
+
+        The rest is reserved for first-audio startup, browser playback drift, and
+        stage control. Keeping this below 1.0 reduces overrun when TTS latency or
+        venue audio devices fluctuate.
+        """
+        return self._env_float("PHDEBATE_AGENT_SPEECH_TIME_FACTOR", 0.78, 0.65, 1.0)
+
     def _agent_output_budget(self, time_limit_seconds: int, speech_rate: float) -> Dict[str, Any]:
         """Deterministically derive the char/token budget for one speech.
 
-        char_budget = time_limit × spoken_chars_per_sec × speech_rate
+        char_budget = time_limit × measured_raw_cps × screen_playback_rate × safety_factor
         max_token   = round(char_budget × tokens_per_char × margin), clamped to [64, 4096]
         """
-        cps = self._tts_speaking_cps() * speech_rate
-        char_budget = max(1.0, float(time_limit_seconds) * cps)
+        raw_cps = self._tts_speaking_cps()
+        playback_rate = self._screen_tts_playback_rate()
+        cps = raw_cps * playback_rate
+        factor = self._agent_speech_time_factor()
+        usable_seconds = max(1.0, float(time_limit_seconds) * factor)
+        char_budget = max(1.0, usable_seconds * cps)
         target_chars = max(40, int(char_budget))
         raw_tokens = char_budget * self._agent_tokens_per_char() * self._agent_max_token_margin()
         max_token = max(64, min(4096, int(round(raw_tokens))))
         return {
             "speech_rate": round(speech_rate, 3),
             "chars_per_second": round(cps, 3),
+            "raw_chars_per_second": round(raw_cps, 3),
+            "screen_playback_rate": round(playback_rate, 3),
+            "usable_seconds": int(round(usable_seconds)),
+            "speech_time_factor": round(factor, 3),
             "char_budget": target_chars,
             "target_chars": target_chars,
             "max_token": max_token,
         }
+
+    def _agent_text_budget_chars(self, payload: Dict[str, Any]) -> int:
+        candidates = [
+            payload.get("target_chars"),
+            payload.get("max_len"),
+            payload.get("max_length"),
+            (payload.get("other_info") or {}).get("char_budget") if isinstance(payload.get("other_info"), dict) else None,
+        ]
+        for raw in candidates:
+            try:
+                value = int(float(raw))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return max(1, min(6000, value))
+        return 0
+
+    def _clamp_agent_text_to_budget(self, text: Any, payload: Dict[str, Any]) -> tuple[str, bool]:
+        raw = str(text or "")
+        limit = self._agent_text_budget_chars(payload)
+        if limit <= 0 or len(raw) <= limit:
+            return raw, False
+        clipped = raw[:limit].rstrip()
+        if not clipped:
+            return "", True
+
+        strong_pos = max(clipped.rfind(ch) for ch in "。！？!?；;\n")
+        if strong_pos >= max(1, int(limit * 0.60)):
+            return clipped[: strong_pos + 1].strip(), True
+
+        soft_pos = max(clipped.rfind(ch) for ch in "，,、：:")
+        if soft_pos >= max(1, int(limit * 0.75)):
+            return clipped[: soft_pos + 1].strip(), True
+
+        clipped = clipped.rstrip("，,、：:；; ")
+        if not clipped:
+            return "", True
+        if clipped[-1] not in "。！？!?；;":
+            if len(clipped) >= limit:
+                clipped = clipped[: max(1, limit - 1)].rstrip()
+            clipped = f"{clipped}。"
+        return clipped, True
 
     async def _fail_agent_task(self, task_id: str, speaker_id: str, exc: AgentGatewayError) -> None:
         async with self._lock:
@@ -6930,12 +8136,20 @@ class MatchStore:
     def _ensure_speaker_allowed_for_current_phase(self, speaker: Dict[str, Any]) -> None:
         phase = self._current_phase()
         if phase["phase_type"] == "free_debate":
+            fd = self.snapshot["free_debate"]
             expected_side = self.snapshot["free_debate"]["current_turn_side"]
             if speaker["side"] != expected_side:
                 raise MatchStateError(
                     "invalid_speaker",
                     f"当前自由辩论轮到{self._side_name(expected_side)}发言。",
                     {"expected_side": expected_side, "speaker_side": speaker["side"]},
+                )
+            expected_speaker_id = fd.get("current_fallback_speaker_id") if fd.get("fallback_mode") else None
+            if expected_speaker_id and speaker["id"] != expected_speaker_id:
+                raise MatchStateError(
+                    "invalid_speaker",
+                    "当前兜底自由辩论只允许指定编号辩手发言。",
+                    {"expected_speaker_id": expected_speaker_id, "speaker_id": speaker["id"]},
                 )
             total_clock = self._clock(f"{speaker['side']}_total")
             if total_clock and total_clock["remaining_ms"] <= 0:
@@ -7166,6 +8380,7 @@ class MatchStore:
         chunk_index: int,
         size_bytes: int,
         duration_ms: Optional[int],
+        pcm_stats: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         now = iso_now()
         asset = self._audio_asset_for_speech(speech_id)
@@ -7204,11 +8419,19 @@ class MatchStore:
                 "size_bytes": size_bytes,
                 "mime_type": mime_type,
                 "duration_ms": duration_ms,
+                "peak_level": pcm_stats.get("peak") if pcm_stats else None,
+                "rms_level": pcm_stats.get("rms") if pcm_stats else None,
+                "silent": bool(pcm_stats and pcm_stats.get("silent")),
                 "created_at": now,
             }
         )
         chunks.sort(key=lambda item: int(item["chunk_index"]))
         total_duration = sum(int(chunk.get("duration_ms") or 0) for chunk in chunks)
+        pcm_chunks = [chunk for chunk in chunks if chunk.get("peak_level") is not None]
+        audio_peak = max([int(chunk.get("peak_level") or 0) for chunk in pcm_chunks], default=None)
+        rms_values = [float(chunk.get("rms_level") or 0.0) for chunk in pcm_chunks]
+        audio_rms = (sum(rms_values) / len(rms_values)) if rms_values else None
+        silent_chunk_count = sum(1 for chunk in pcm_chunks if chunk.get("silent"))
 
         asset.update(
             {
@@ -7221,10 +8444,58 @@ class MatchStore:
                 "chunk_count": len(chunks),
                 "status": "recording",
                 "chunks": chunks,
+                "audio_peak_level": audio_peak,
+                "audio_rms_level": audio_rms,
+                "silent_chunk_count": silent_chunk_count,
                 "updated_at": now,
             }
         )
         return asset
+
+    def _pending_human_transcript_text(self, speech: Dict[str, Any]) -> str:
+        if speech.get("source") != "human_asr":
+            return ASR_PENDING_TRANSCRIPT_TEXT
+        speech_id = str(speech.get("id") or "")
+        asset = self._audio_asset_for_speech(speech_id) if speech_id else None
+        if asset and self._audio_asset_is_silent(asset):
+            return ASR_SILENT_INPUT_TEXT
+        asr_status = str((self.snapshot.get("speech_service") or {}).get("asr", {}).get("status") or "")
+        if asr_status == "failed":
+            return ASR_UNAVAILABLE_TRANSCRIPT_TEXT
+        return ASR_PENDING_TRANSCRIPT_TEXT
+
+    def _audio_asset_is_silent(self, asset: Optional[Dict[str, Any]]) -> bool:
+        if not asset:
+            return False
+        if not self._asr_supported_audio_mime(str(asset.get("mime_type") or "")):
+            return False
+        chunk_count = int(asset.get("chunk_count") or 0)
+        if chunk_count <= 0:
+            return False
+        peak = asset.get("audio_peak_level")
+        if peak is None:
+            return False
+        return int(peak or 0) <= PCM_SILENCE_PEAK_THRESHOLD
+
+    def _pcm_audio_stats(self, content: bytes, mime_type: str) -> Optional[Dict[str, Any]]:
+        if not self._asr_supported_audio_mime(mime_type):
+            return None
+        if len(content) < 2:
+            return {"peak": 0, "rms": 0.0, "silent": True}
+        usable = content[: len(content) - (len(content) % 2)]
+        sample_count = len(usable) // 2
+        if sample_count <= 0:
+            return {"peak": 0, "rms": 0.0, "silent": True}
+        peak = 0
+        square_sum = 0
+        for idx in range(0, len(usable), 2):
+            sample = int.from_bytes(usable[idx : idx + 2], byteorder="little", signed=True)
+            abs_sample = abs(sample)
+            if abs_sample > peak:
+                peak = abs_sample
+            square_sum += sample * sample
+        rms = (square_sum / sample_count) ** 0.5
+        return {"peak": peak, "rms": rms, "silent": peak <= PCM_SILENCE_PEAK_THRESHOLD}
 
     def _speech_revision_text(self, active: Optional[Dict[str, Any]], segments: List[Dict[str, Any]]) -> str:
         if active:
@@ -7287,6 +8558,8 @@ class MatchStore:
         return segment
 
     def _apply_archived_asr_text(self, speech_id: str, text: str) -> None:
+        if speech_id in self._abandoned_speech_ids:
+            return
         active = self.snapshot.get("current_speech")
         if active and active.get("id") == speech_id:
             active["content_partial"] = text
@@ -7295,6 +8568,9 @@ class MatchStore:
             if not _is_human_system_transcript_text(text):
                 segment.pop("exclude_from_history", None)
                 segment.pop("system_placeholder", None)
+            else:
+                segment["exclude_from_history"] = True
+                segment["system_placeholder"] = "asr_pending" if text == ASR_PENDING_TRANSCRIPT_TEXT else "asr_unavailable"
             return
 
         for segment in self.snapshot.setdefault("recent_transcript", []):
@@ -7307,6 +8583,9 @@ class MatchStore:
                 if not _is_human_system_transcript_text(text):
                     segment.pop("exclude_from_history", None)
                     segment.pop("system_placeholder", None)
+                else:
+                    segment["exclude_from_history"] = True
+                    segment["system_placeholder"] = "asr_pending" if text == ASR_PENDING_TRANSCRIPT_TEXT else "asr_unavailable"
                 self.snapshot.setdefault("speech_revisions", []).insert(
                     0,
                     {
@@ -7337,7 +8616,10 @@ class MatchStore:
             "side": side,
             "turn_index": self._current_turn_index(),
         }
-        self._upsert_transcript_segment(speech, speaker_id, text, True, "human_asr")
+        segment = self._upsert_transcript_segment(speech, speaker_id, text, True, "human_asr")
+        if _is_human_system_transcript_text(text):
+            segment["exclude_from_history"] = True
+            segment["system_placeholder"] = "asr_pending" if text == ASR_PENDING_TRANSCRIPT_TEXT else "asr_unavailable"
 
     def _free_debate_side_has_time(self, side: str) -> bool:
         clock = self._clock(f"{side}_total")
@@ -7351,6 +8633,13 @@ class MatchStore:
     def _advance_free_debate_turn_if_needed(self, side: str) -> None:
         phase = self._current_phase()
         if phase["phase_type"] != "free_debate":
+            return
+        if self.snapshot.get("free_debate", {}).get("fallback_mode"):
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(self._advance_fallback_free_debate_turn("speech_end"))
+            except RuntimeError:
+                pass
             return
         if self._free_debate_both_sides_exhausted():
             return
@@ -7648,6 +8937,7 @@ class MatchStore:
         normalized = aliases.get(scene, scene)
         allowed = {
             "idle", "opening", "teams", "live", "paused",
+            "debate_process",
             "audience_vote",
             "xiaoqi_commentary", "xiaoqi_result",
             "judge_commentary", "judge_result", "audience_result",

@@ -1612,7 +1612,7 @@ function VoteSummary({ voteState, speakers }: { voteState: VoteState; speakers: 
       <Kpi label="学生票" value={`${audience.total}`} detail={voteState.audience_published ? "已公布" : "未公布"} />
       <div className="ranking-list">
         {audience.best_speaker.map((item, index) => (
-          <div className="ranking-row" key={item.speaker_id}><span>{index + 1}</span><strong>{speakerLabel(speakers.find((speaker) => speaker.id === item.speaker_id))}</strong><em>{item.count} 票</em></div>
+          <div className="ranking-row" key={item.speaker_id}><span>{index + 1}</span><strong>{speakerLabel(speakers.find((speaker) => speaker.id === item.speaker_id))}</strong><em>{item.count} 分</em></div>
         ))}
       </div>
     </div>
@@ -1926,6 +1926,7 @@ function liveModeLabel(mode?: string | null): string {
 function screenSceneLabel(scene?: string | null): string {
   if (scene === "idle") return "候场";
   if (scene === "live") return "实况";
+  if (scene === "debate_process") return "当前辩论过程";
   if (scene === "paused") return "暂停";
   if (scene === "judge_commentary") return "评委点评";
   if (scene === "judge_result") return "评委结果";
@@ -2078,6 +2079,7 @@ function speakerTypeLabel(type: SpeakerType): string {
 function agentStatusLabel(status?: string): string {
   if (!status) return "未联调";
   if (status === "ready") return "可用";
+  if (status === "speech_only") return "可用";
   if (status === "streaming") return "生成中";
   if (status === "failed") return "异常";
   if (status === "ok") return "正常";
@@ -2086,7 +2088,7 @@ function agentStatusLabel(status?: string): string {
 }
 
 function agentStatusTone(status?: string): "green" | "blue" | "red" | "gold" | "muted" {
-  if (status === "ready") return "green";
+  if (status === "ready" || status === "speech_only") return "green";
   if (status === "streaming") return "blue";
   if (status === "failed") return "red";
   if (!status) return "muted";

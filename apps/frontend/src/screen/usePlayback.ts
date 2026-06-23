@@ -28,6 +28,7 @@ const SILENCE_URL = "/assets/silence-24k-1s.mp3";
 const PLAYBACK_PROGRESS_EPSILON = 0.05;
 const PLAYBACK_HEARTBEAT_MS = 5000;
 const SCREEN_TTS_VOLUME = 0.86;
+export const SCREEN_TTS_PLAYBACK_RATE = 1.38;
 
 export function usePlayback(
   matchId: string,
@@ -164,6 +165,7 @@ export function usePlayback(
       el = new Audio();
       el.preload = "auto";
       el.volume = SCREEN_TTS_VOLUME;
+      applyScreenTtsPlaybackRate(el);
       activeElRef.current = el;
       attachHandlers(el);
     }
@@ -291,6 +293,7 @@ export function usePlayback(
         const el = ensureEl();
         currentPlayRef.current = { speechId: sp.speechId, taskId: sp.taskId, speakerId: sp.speakerId, idx };
         el.volume = SCREEN_TTS_VOLUME;
+        applyScreenTtsPlaybackRate(el);
         // 预热下一句，缩小句间空隙（命中后端可缓存的归档音频）。
         const nextUrl = sp.chunks.find((c) => c.sentenceIdx === idx + 1)?.audioUrl;
         if (nextUrl) preloadNext(nextUrl);
@@ -547,6 +550,29 @@ export function shouldSendPlaybackHeartbeat(
   if (previous.segment === segment && now - previous.atMs < intervalMs) return false;
   playbackHeartbeatRef.current = { segment, atMs: now };
   return true;
+}
+
+type PitchPreservingAudioElement = HTMLAudioElement & {
+  preservesPitch?: boolean;
+  mozPreservesPitch?: boolean;
+  webkitPreservesPitch?: boolean;
+};
+
+export function applyScreenTtsPlaybackRate(el: HTMLAudioElement, rate = SCREEN_TTS_PLAYBACK_RATE): void {
+  const safeRate = Number.isFinite(rate) ? Math.min(1.6, Math.max(0.75, rate)) : 1;
+  try {
+    el.playbackRate = safeRate;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const pitchEl = el as PitchPreservingAudioElement;
+    pitchEl.preservesPitch = true;
+    pitchEl.mozPreservesPitch = true;
+    pitchEl.webkitPreservesPitch = true;
+  } catch {
+    /* ignore */
+  }
 }
 
 export async function postWithRetry(

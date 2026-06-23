@@ -2,7 +2,7 @@ import * as React from "react";
 import {
   Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles,
   UserCircle2, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
-  ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX, Upload,
+  ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX, Upload, ClipboardCheck,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Badge, Select, Textarea, Input, Separator, Spinner } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
@@ -11,13 +11,51 @@ import { Tabs } from "../ui/Tabs";
 import { useToast } from "../lib/toast";
 import { useAdminData } from "../lib/data";
 import { useAction } from "../lib/actions";
-import { post, pushXiaoqiMatchRecord } from "../../api/client";
+import { post, pushXiaoqiMatchRecord, request } from "../../api/client";
 import { SCENE_LABELS, STATUS_LABELS, sideLabel } from "../lib/labels";
 import { resolveAvatar } from "../../state/avatar";
 import type { MatchSnapshot, Speaker } from "../../types/contracts";
 
 const SEAT_LABELS = ["", "一辩", "二辩", "三辩", "四辩"];
 const seatLabel = (seat: number) => SEAT_LABELS[seat] ?? `${seat}号位`;
+
+interface FallbackSpeechItem {
+  phase_id: string;
+  phase_name?: string;
+  speaker_id: string;
+  speaker_label: string;
+  speaker_name?: string;
+  speech_id: string;
+  text_loaded: boolean;
+  audio_ready: boolean;
+  chunk_count: number;
+  voice_preset_id?: string | null;
+}
+
+interface FallbackFreeItem {
+  index: number;
+  phase_id: string;
+  speaker_id?: string | null;
+  speaker_label: string;
+  speaker_type?: string | null;
+  side?: string | null;
+  text_loaded: boolean;
+  audio_required: boolean;
+  audio_ready: boolean;
+  chunk_count: number;
+}
+
+interface FallbackStatus {
+  history_loaded: boolean;
+  history_path: string;
+  load_error: string;
+  overall_ready: boolean;
+  missing_audio_count: number;
+  checks: Record<string, boolean>;
+  self_intro_items: FallbackSpeechItem[];
+  agent_phase_items: FallbackSpeechItem[];
+  free_debate_items: FallbackFreeItem[];
+}
 
 /* 阶段导航条：6 个页内选项（赛前→比赛过程→观众投票→小七评价→评委点评→结果展示） */
 type StageTab = "pre" | "live" | "audience" | "xiaoqi" | "judge" | "result";
@@ -38,6 +76,7 @@ function tabForState(s: MatchSnapshot): StageTab {
   if (scene === "xiaoqi_commentary" || scene === "xiaoqi_result") return "xiaoqi";
   if (scene === "judge_commentary") return "judge";
   if (["judge_result", "audience_result", "acknowledgment"].includes(scene)) return "result";
+  if (scene === "debate_process") return "live";
   if (status === "running" || scene === "live") return "live";
   return "pre";
 }
@@ -288,7 +327,13 @@ export function Control() {
       {(tab === "pre" || tab === "live") && (
         <div className="space-y-4">
           {tab === "pre" && <PreScreenControl />}
-          {tab === "live" && <TTSRealtimeModule />}
+          {tab === "live" && (
+            <>
+              <LiveScreenControl />
+              <TTSRealtimeModule />
+            </>
+          )}
+          <FallbackControlPanel />
           <AgentControlPanel />
         </div>
       )}
@@ -371,6 +416,141 @@ function PreScreenControl() {
     { scene: "teams", label: "阵容介绍" },
   ];
   return <ScreenSceneRow title="赛前大屏画面" scenes={scenes} base={base} run={run} />;
+}
+
+function LiveScreenControl() {
+  const { matchId } = useAdminData();
+  const { run } = useAction();
+  const base = `/api/matches/${matchId}`;
+  const scenes: Array<{ scene: string; label: string }> = [
+    { scene: "live", label: "比赛实况" },
+    { scene: "debate_process", label: "当前辩论过程" },
+  ];
+  return <ScreenSceneRow title="比赛过程大屏画面" scenes={scenes} base={base} run={run} />;
+}
+
+function FallbackControlPanel() {
+  const { snapshot, matchId, refresh } = useAdminData();
+  const { run, pending } = useAction();
+  const toast = useToast();
+  const [status, setStatus] = React.useState<FallbackStatus | null>(null);
+  const [phaseId, setPhaseId] = React.useState(snapshot?.match.current_phase_id ?? "");
+  const base = `/api/matches/${matchId}`;
+
+  const loadStatus = React.useCallback(async () => {
+    try {
+      setStatus(await request<FallbackStatus>(`${base}/fallback/status`));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "兜底控制加载失败", "error");
+    }
+  }, [base, toast]);
+
+  React.useEffect(() => {
+    void loadStatus();
+  }, [loadStatus]);
+
+  React.useEffect(() => {
+    if (snapshot?.match.current_phase_id && !phaseId) setPhaseId(snapshot.match.current_phase_id);
+  }, [phaseId, snapshot?.match.current_phase_id]);
+
+  if (!snapshot) return null;
+  const currentPhase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
+  const selectedPhase = snapshot.phases.find((item) => item.id === phaseId) ?? currentPhase;
+  const freePhase = snapshot.phases.find((item) => item.phase_type === "free_debate");
+  const agentFallbacks = status?.agent_phase_items ?? [];
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm"><ClipboardCheck className="size-4" /> 现场兜底控制</CardTitle>
+        <CardDescription>用于切换阶段、播放预设替代音频和启动兜底自由辩论编号流程。</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 lg:grid-cols-[1.1fr_1fr]">
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="flex items-center gap-2">
+              <Select value={phaseId} onChange={(event) => setPhaseId(event.target.value)} className="h-9">
+                {[...snapshot.phases].sort((a, b) => a.display_order - b.display_order).map((phase) => (
+                  <option key={phase.id} value={phase.id}>{phase.display_order}. {phase.name}</option>
+                ))}
+              </Select>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!selectedPhase || pending}
+                onClick={() =>
+                  run(async () => {
+                    await post(`${base}/fallback/phases/${phaseId}/select`);
+                    await refresh();
+                  }, { success: `已跳转到 ${selectedPhase?.name ?? "目标阶段"}` })
+                }
+              >
+                <ArrowRight /> 切到阶段开始
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">切换时会停止当前发言、音频和计时；目标阶段之前缺失的真实历史会用兜底历史补齐并标记来源。</p>
+          </div>
+
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!freePhase || currentPhase?.phase_type !== "free_debate" || pending}
+                onClick={() =>
+                  run(async () => {
+                    await post(`${base}/fallback/free-debate/start`);
+                    await refresh();
+                  }, { success: "已启动兜底自由辩论" })
+                }
+              >
+                <Megaphone /> 兜底自由辩论
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                {currentPhase?.phase_type === "free_debate" ? `${status?.free_debate_items?.length ?? 0} 个编号` : "需先进入自由辩论阶段"}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">编号来自固定历史；人类按打印编号发言，AI 编号自动播放预设音频。</p>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground">全部 AI 阶段预设替代</span>
+          </div>
+          {agentFallbacks.length === 0 ? (
+            <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">当前比赛配置没有 AI 固定发言阶段，或无需预设替代音频。</p>
+          ) : (
+            <div className="grid gap-2 md:grid-cols-2">
+              {agentFallbacks.map((item) => (
+                <div key={item.speech_id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-foreground">{item.phase_name} · {item.speaker_label}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {item.audio_ready ? `${item.chunk_count} 段预设音频` : "固定音频不可用"}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!item.audio_ready || pending}
+                    onClick={() =>
+                      run(async () => {
+                        await post(`${base}/fallback/phases/${item.phase_id}/speakers/${item.speaker_id}/play`);
+                        await refresh();
+                      }, { success: `已强制切换到 ${item.phase_name} · ${item.speaker_label} 兜底播放` })
+                    }
+                  >
+                    <Play /> 替代
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function ScreenSceneRow({

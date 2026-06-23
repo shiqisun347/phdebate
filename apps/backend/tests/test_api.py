@@ -162,9 +162,361 @@ def test_tts_speech_profile_is_stable_for_same_speaker(monkeypatch) -> None:
     assert first.options["voice"] == "dylan"
     assert first.options["model"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert first.options["seed"] == second.options["seed"]
-    assert first.options["temperature"] == 0.25
-    assert first.options["top_p"] == 0.8
+    assert first.options["speech_rate"] == 1.48
+    assert first.options["volume"] == 74
+    assert first.options["pitch_rate"] == 1.0
+    assert first.options["temperature"] == 0.18
+    assert first.options["top_p"] == 0.65
+    assert "不要抑扬顿挫" in first.options["instructions"]
     assert first.options["seed"] != other_speaker.options["seed"]
+
+
+def test_fallback_status_loads_history_and_reports_agent_items(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【正方二辩陈词】\n正方二辩兜底内容。\n\n"
+        "【自由辩论】\n【正方二辩】：自由辩论正方二辩。\n【反方二辩】：自由辩论反方二辩。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+
+    data = store.fallback_status()
+
+    assert data["history_loaded"] is True
+    assert data["self_intro_items"]
+    assert data["checks"]["self_intro_audio_ready"] is False
+    assert any(item["phase_name"] == "正方二辩陈词" and item["text_loaded"] for item in data["agent_phase_items"])
+    assert len(data["free_debate_items"]) == 2
+    assert data["missing_audio_count"] >= len(data["self_intro_items"])
+
+
+def test_fallback_phase_select_fills_missing_history(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【正方一辩立论】\n正方一辩真实缺失时的兜底。\n\n"
+        "【反方一辩立论】\n反方一辩真实缺失时的兜底。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    client.post("/api/matches/match_001/start")
+
+    selected = client.post("/api/matches/match_001/fallback/phases/phase_aff_statement_2/select")
+
+    assert selected.status_code == 200, selected.text
+    data = selected.json()["data"]
+    fallback_segments = [item for item in data["recent_transcript"] if item.get("source") == "fallback_history"]
+    assert {item["phase_id"] for item in fallback_segments} >= {"phase_aff_constructive_1", "phase_neg_constructive_1"}
+    assert all(item.get("fallback") is True for item in fallback_segments)
+
+
+def test_fallback_phase_select_treats_asr_placeholder_as_missing(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【正方一辩立论】\n正方一辩兜底历史。\n\n"
+        "【反方一辩立论】\n反方一辩兜底历史。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    client.post("/api/matches/match_001/start")
+    speech = {
+        "id": "speech_asr_failed_aff_1",
+        "phase_id": "phase_aff_constructive_1",
+        "speaker_id": "spk_aff_1",
+        "side": "affirmative",
+        "turn_index": 0,
+    }
+    segment = store._upsert_transcript_segment(
+        speech,
+        "spk_aff_1",
+        "本次发言已结束，正式转写将在后续 ASR 链路中补齐。",
+        True,
+        "human_asr",
+    )
+    segment["exclude_from_history"] = True
+    segment["system_placeholder"] = "asr_pending"
+
+    selected = client.post("/api/matches/match_001/fallback/phases/phase_aff_statement_2/select")
+
+    assert selected.status_code == 200, selected.text
+    data = selected.json()["data"]
+    fallback_segments = [
+        item
+        for item in data["recent_transcript"]
+        if item.get("phase_id") == "phase_aff_constructive_1" and item.get("source") == "fallback_history"
+    ]
+    assert fallback_segments
+    assert fallback_segments[0]["text"] == "正方一辩兜底历史。"
+
+
+def test_agent_payload_fills_only_missing_human_history_from_fallback(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【正方一辩立论】\n正方一辩兜底历史。\n\n"
+        "【反方一辩立论】\n反方一辩不应自动补入。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    store.snapshot["recent_transcript"] = []
+    placeholder_speech = {
+        "id": "speech_asr_failed_aff_1",
+        "phase_id": "phase_aff_constructive_1",
+        "speaker_id": "spk_aff_1",
+        "side": "affirmative",
+        "turn_index": 0,
+    }
+    segment = store._upsert_transcript_segment(
+        placeholder_speech,
+        "spk_aff_1",
+        "转写不可用，请以现场发言为准。",
+        True,
+        "human_asr",
+    )
+    segment["exclude_from_history"] = True
+    segment["system_placeholder"] = "asr_unavailable"
+    phase = next(item for item in store.snapshot["phases"] if item["id"] == "phase_aff_statement_2")
+    speaker = next(item for item in store.snapshot["speakers"] if item["id"] == "spk_aff_2")
+
+    payload = store._build_agent_payload("task_payload_test", "speech_payload_test", speaker, phase_override=phase)
+
+    history_payload = payload["debate_history"]
+    flat = [(stage["stage"], msg["speaker"], msg["content"]) for stage in history_payload for msg in stage["message"]]
+    assert ("正方一辩立论", "正方一辩", "正方一辩兜底历史。") in flat
+    assert all(content != "反方一辩不应自动补入。" for _stage, _speaker, content in flat)
+    assert all("转写不可用" not in content for _stage, _speaker, content in flat)
+
+
+def test_fallback_play_uses_existing_audio_without_generation(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text("【正方二辩陈词】\n正方二辩兜底内容。\n", encoding="utf-8")
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    client.post("/api/matches/match_001/start")
+    client.post("/api/matches/match_001/fallback/phases/phase_aff_statement_2/select")
+    speech_id = "fallback_speech_phase_aff_statement_2_spk_aff_2"
+    audio_dir = store.audio_root_path() / "match_001" / "fallback_test" / speech_id
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts.mp3"
+    audio_bytes = b"0" * 2048
+    audio_path.write_bytes(audio_bytes)
+    store._upsert_audio_asset(
+        speech_id=speech_id,
+        speaker_id="spk_aff_2",
+        phase_id="phase_aff_statement_2",
+        mime_type="audio/mpeg",
+        archive_dir=audio_dir,
+        chunk_path=audio_path,
+        chunk_index=0,
+        size_bytes=len(audio_bytes),
+        duration_ms=None,
+    )
+    asset = store._audio_asset_for_speech(speech_id)
+    assert asset is not None
+    asset["status"] = "completed"
+    asset["fallback_text"] = "正方二辩兜底内容。"
+
+    played = client.post("/api/matches/match_001/fallback/phases/phase_aff_statement_2/speakers/spk_aff_2/play")
+
+    assert played.status_code == 200, played.text
+    speech = played.json()["data"]["current_speech"]
+    assert speech["id"] == speech_id
+    assert speech["source"] == "fallback_history"
+    assert speech["tts_expected_sentences"] == 1
+
+
+def test_fallback_play_force_takes_over_active_speech_and_ignores_late_asr(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text("【正方二辩陈词】\n正方二辩兜底内容。\n", encoding="utf-8")
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    client.post("/api/matches/match_001/start")
+    client.post("/api/matches/match_001/phases/phase_aff_constructive_1/start")
+    started = client.post("/api/matches/match_001/speakers/spk_aff_1/start-speaking")
+    assert started.status_code == 200, started.text
+    old_speech_id = started.json()["data"]["current_speech"]["id"]
+    store.snapshot["current_speech"]["content_partial"] = "迟到的旧转写。"
+    store._upsert_transcript_segment(store.snapshot["current_speech"], "spk_aff_1", "迟到的旧转写。", False, "human_asr")
+
+    class FakeASRSession:
+        async def finish(self):
+            return ASRResult(text="不应该写回的 ASR 结果", latency_ms=12, chunk_count=1)
+
+    store._asr_streams[old_speech_id] = FakeASRSession()
+    store.snapshot["speech_service"]["asr"] = {"status": "streaming", "latency_ms": 12, "active_sessions": 1, "detail": "old stream"}
+    store.snapshot["flow"]["awaiting_host_confirm"] = True
+
+    speech_id = "fallback_speech_phase_aff_statement_2_spk_aff_2"
+    audio_dir = store.audio_root_path() / "match_001" / "fallback_force_test" / speech_id
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts.mp3"
+    audio_bytes = b"0" * 2048
+    audio_path.write_bytes(audio_bytes)
+    store._upsert_audio_asset(
+        speech_id=speech_id,
+        speaker_id="spk_aff_2",
+        phase_id="phase_aff_statement_2",
+        mime_type="audio/mpeg",
+        archive_dir=audio_dir,
+        chunk_path=audio_path,
+        chunk_index=0,
+        size_bytes=len(audio_bytes),
+        duration_ms=None,
+    )
+    asset = store._audio_asset_for_speech(speech_id)
+    assert asset is not None
+    asset["status"] = "completed"
+    asset["fallback_text"] = "正方二辩兜底内容。"
+
+    played = client.post("/api/matches/match_001/fallback/phases/phase_aff_statement_2/speakers/spk_aff_2/play")
+
+    assert played.status_code == 200, played.text
+    data = played.json()["data"]
+    speech = data["current_speech"]
+    assert speech["id"] == speech_id
+    assert speech["speaker_id"] == "spk_aff_2"
+    assert data["match"]["current_phase_id"] == "phase_aff_statement_2"
+    assert data["match"]["status"] == "running"
+    assert data["flow"]["awaiting_host_confirm"] is False
+    assert data["speech_service"]["asr"]["active_sessions"] == 0
+    assert data["speech_service"]["tts"]["status"] == "playing"
+    assert old_speech_id in store._abandoned_speech_ids
+    assert not any(item.get("speech_id") == old_speech_id or item.get("id") == old_speech_id for item in data["recent_transcript"])
+
+    late_chunk = asyncio.run(store.record_audio_chunk(old_speech_id, "spk_aff_1", 0, b"\0" * 3200, "audio/L16;rate=16000"))
+    assert late_chunk["ignored_after_takeover"] is True
+    asyncio.run(store._record_live_asr_text(old_speech_id, "spk_aff_1", "迟到结果", True, 20, 1))
+    assert not any(
+        (item.get("speech_id") == old_speech_id or item.get("id") == old_speech_id) and item.get("text") == "迟到结果"
+        for item in store.snapshot["recent_transcript"]
+    )
+
+
+def test_fallback_audio_ready_rejects_tiny_fake_package(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text("【正方二辩陈词】\n正方二辩兜底内容。\n", encoding="utf-8")
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    speech_id = "fallback_speech_phase_aff_statement_2_spk_aff_2"
+    audio_dir = store.audio_root_path() / "match_001" / "fallback_test" / speech_id
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts.mp3"
+    audio_path.write_bytes(b"mp3")
+    store._upsert_audio_asset(
+        speech_id=speech_id,
+        speaker_id="spk_aff_2",
+        phase_id="phase_aff_statement_2",
+        mime_type="audio/mpeg",
+        archive_dir=audio_dir,
+        chunk_path=audio_path,
+        chunk_index=0,
+        size_bytes=3,
+        duration_ms=None,
+    )
+    asset = store._audio_asset_for_speech(speech_id)
+    assert asset is not None
+    asset["status"] = "completed"
+    asset["fallback_text"] = "正方二辩兜底内容。"
+
+    item = next(entry for entry in store._fallback_agent_phase_items() if entry["speech_id"] == speech_id)
+
+    assert item["audio_ready"] is False
+
+
+def test_self_introduction_endpoint_uses_fixed_fallback_audio(monkeypatch) -> None:
+    item = next(entry for entry in store._fallback_self_intro_items() if entry["speaker_id"] == "spk_aff_2")
+    assert item["text"].startswith(f"大家好，我是{item['speaker_label']}{item['speaker_name']}，")
+    assert item["text"].endswith("我会清晰回应对方观点。")
+    speech_id = item["speech_id"]
+    task_id = item["task_id"]
+    audio_dir = store.audio_root_path() / "match_001" / "fallback_self_intro_test" / speech_id
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "intro.mp3"
+    audio_bytes = b"0" * 2048
+    audio_path.write_bytes(audio_bytes)
+    store._upsert_audio_asset(
+        speech_id=speech_id,
+        speaker_id="spk_aff_2",
+        phase_id=item["phase_id"],
+        mime_type="audio/mpeg",
+        archive_dir=audio_dir,
+        chunk_path=audio_path,
+        chunk_index=0,
+        size_bytes=len(audio_bytes),
+        duration_ms=None,
+    )
+    asset = store._audio_asset_for_speech(speech_id)
+    assert asset is not None
+    asset["status"] = "completed"
+    asset["fallback_text"] = item["text"]
+
+    def fail_stream(*_args, **_kwargs):
+        raise AssertionError("self-introduction must use fixed fallback audio, not live agent")
+
+    monkeypatch.setattr(store.agent_gateway, "stream_speech", fail_stream)
+
+    response = client.post("/api/matches/match_001/speakers/spk_aff_2/self-introduction")
+
+    assert response.status_code == 200, response.text
+    speech = response.json()["data"]["current_speech"]
+    assert speech["id"] == speech_id
+    assert speech["tts_task_id"] == task_id
+    assert speech["kind"] == "self_intro"
+    assert speech["source"] == "fallback_history"
+    assert speech["content_final"] == item["text"]
+    assert speech["tts_expected_sentences"] == 1
+
+
+def test_fallback_free_debate_restricts_to_numbered_human(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【自由辩论】\n"
+        "【正方三辩】：正方三辩按编号发言。\n"
+        "【反方二辩】：反方二辩预设音频。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    client.post("/api/matches/match_001/start")
+    asyncio.run(store.start_phase("phase_free_debate"))
+
+    snapshot = asyncio.run(store.start_fallback_free_debate())
+
+    assert snapshot["free_debate"]["fallback_mode"] is True
+    assert snapshot["free_debate"]["current_fallback_speaker_id"] == "spk_aff_3"
+    wrong = client.post("/api/matches/match_001/speakers/spk_aff_1/start-speaking")
+    assert wrong.status_code == 409
+    assert wrong.json()["error"]["code"] == "invalid_speaker"
+    right = client.post("/api/matches/match_001/speakers/spk_aff_3/start-speaking")
+    assert right.status_code == 200, right.text
+
+
+def test_fallback_free_debate_waits_between_ai_turns(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【自由辩论】\n"
+        "【正方二辩】：正方二辩预设音频。\n"
+        "【反方一辩】：反方一辩预设音频。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    monkeypatch.setenv("PHDEBATE_FALLBACK_FREE_AI_GAP_SECONDS", "0.05")
+    calls = []
+
+    async def fake_play(phase_id: str, speaker_id: str, *, free_turn_index=None):
+        calls.append((asyncio.get_running_loop().time(), phase_id, speaker_id, free_turn_index))
+        return await store.get_snapshot()
+
+    monkeypatch.setattr(store, "play_fallback_speech", fake_play)
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")
+        await store.start_fallback_free_debate()
+        first_started_at = calls[-1][0]
+        await store._advance_fallback_free_debate_turn("speech_end")
+        return first_started_at, calls[-1][0]
+
+    first_started_at, second_started_at = asyncio.run(scenario())
+
+    assert [call[2:] for call in calls] == [
+        ("spk_aff_2", 1),
+        ("spk_neg_1", 2),
+    ]
+    assert second_started_at - first_started_at >= 0.045
 
 
 def test_production_auth_requires_read_token_and_keeps_vote_options_public(monkeypatch) -> None:
@@ -1826,6 +2178,9 @@ def test_agent_payload_sends_model_id_not_display_name() -> None:
     assert intro_payload["model_name"] == "qwen3.6-plus"
     assert intro_payload["request_model"] == "qwen3.6-plus"
     assert intro_payload["model_display_name"] == "Qwen-Max"
+    assert intro_payload["target_chars"] == 20
+    assert intro_payload["max_token"] == 20
+    assert intro_payload["other_info"]["char_budget"] == 20
 
 
 def test_mock_agent_standard_endpoints() -> None:
@@ -3035,11 +3390,33 @@ def test_agent_output_budget_is_deterministic_and_scales() -> None:
     base = store._agent_output_budget(180, 1.0)
     assert base["max_token"] >= 64
     assert base["target_chars"] >= 40
+    assert base["raw_chars_per_second"] == 3.55
+    assert base["screen_playback_rate"] == 1.38
+    assert base["speech_time_factor"] == 0.78
     # Deterministic: same inputs → same output.
     assert store._agent_output_budget(180, 1.0) == base
-    # More time and faster speech both allow more spoken content → larger ceiling.
+    # More time allows more spoken content. The TTS speed parameter is measured
+    # separately because Qwen speed is not linear enough to use for budgeting.
     assert store._agent_output_budget(360, 1.0)["max_token"] > base["max_token"]
-    assert store._agent_output_budget(180, 1.5)["max_token"] > base["max_token"]
+    faster = store._agent_output_budget(180, 1.5)
+    assert faster["speech_rate"] == 1.5
+    assert faster["target_chars"] == base["target_chars"]
+
+
+def test_agent_text_is_clamped_to_output_budget() -> None:
+    payload = {"target_chars": 10}
+    text = "第一句已经完整。第二句内容会明显超过预算，需要被截断。"
+
+    clipped, clamped = store._clamp_agent_text_to_budget(text, payload)
+
+    assert clamped is True
+    assert clipped == "第一句已经完整。"
+
+    hard_text = "这是一段没有任何标点但明显超过限制的长文本"
+    clipped, clamped = store._clamp_agent_text_to_budget(hard_text, {"target_chars": 12})
+    assert clamped is True
+    assert clipped.endswith("。")
+    assert len(clipped) <= 12
 
 
 def test_agent_payload_carries_max_token_and_message_history() -> None:
@@ -3048,6 +3425,13 @@ def test_agent_payload_carries_max_token_and_message_history() -> None:
 
     assert payload["max_token"] >= 64
     assert payload["target_chars"] >= 40
+    assert payload["max_len"] == payload["target_chars"]
+    assert payload["max_length"] == payload["target_chars"]
+    assert payload["other_info"]["speech_rate"] == 1.48
+    assert payload["other_info"]["tts_volume"] == 74
+    assert payload["other_info"]["speech_time_factor"] == 0.78
+    assert payload["other_info"]["raw_chars_per_second"] == 3.55
+    assert payload["other_info"]["screen_playback_rate"] == 1.38
     # debate_history matches 请求体(1).json: "message" key, speaker is side+seat only.
     for stage in payload["debate_history"]:
         assert "message" in stage and "content" not in stage
@@ -3553,6 +3937,48 @@ def test_asr_pending_placeholder_is_excluded_from_agent_history_and_replaced() -
     store._apply_archived_asr_text(speech_id, "正方三辩真实转写内容。")
     history = store._build_debate_history()
     assert any("正方三辩真实转写内容。" == msg["content"] for stage in history for msg in stage["message"])
+
+
+def test_silent_pcm_replaces_pending_placeholder_and_skips_archive_asr(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PHDEBATE_AUDIO_DIR", str(tmp_path / "audio"))
+    monkeypatch.setenv("PHDEBATE_ASR_REALTIME", "1")
+    monkeypatch.setenv("PHDEBATE_ASR_AUTO_RECOGNIZE", "1")
+    active = store.snapshot["current_speech"]
+    active["content_partial"] = ""
+    active["content_final"] = ""
+    speech_id = active["id"]
+    zero_pcm = b"\0" * 16000
+
+    first = client.post(
+        f"/api/matches/match_001/speeches/{speech_id}/audio-chunks",
+        data={"speaker_id": "spk_aff_3", "chunk_index": "0", "duration_ms": "500"},
+        files={"file": ("chunk-0.pcm", zero_pcm, "audio/L16;rate=16000")},
+    )
+    assert first.status_code == 200
+    assert first.json()["data"]["silent"] is True
+    assert first.json()["data"]["peak_level"] == 0
+    snap = client.get("/api/matches/match_001").json()["data"]
+    asset = next(a for a in snap["audio_assets"] if a["speech_id"] == speech_id)
+    assert asset["audio_peak_level"] == 0
+    assert snap["speech_service"]["asr"]["status"] == "failed"
+
+    stopped = client.post("/api/matches/match_001/speakers/spk_aff_3/stop-speaking")
+    assert stopped.status_code == 200
+    segment = stopped.json()["data"]["recent_transcript"][0]
+    assert segment["text"] == "麦克风输入没有检测到有效声音，请以现场发言为准。"
+    assert segment["exclude_from_history"] is True
+
+    complete = client.post(
+        f"/api/matches/match_001/speeches/{speech_id}/audio/complete",
+        json={"speaker_id": "spk_aff_3"},
+    )
+    assert complete.status_code == 200
+    data = complete.json()["data"]
+    assert data["recent_transcript"][0]["text"] == "麦克风输入没有检测到有效声音，请以现场发言为准。"
+    assert data["audio_assets"][0]["asr_realtime_status"] == "failed"
+    assert data["audio_assets"][0]["asr_realtime_error"] == "microphone input is silent"
+    history = store._build_debate_history()
+    assert all("麦克风输入没有检测到有效声音" not in msg["content"] for stage in history for msg in stage["message"])
 
 
 def test_audio_chunk_upload_archives_file_and_completes_asset() -> None:

@@ -19,12 +19,43 @@ const PCM_SAMPLE_RATE = 16000;
 const PCM_CHUNK_MS = 500;
 const PCM_SAMPLES_PER_CHUNK = PCM_SAMPLE_RATE * (PCM_CHUNK_MS / 1000);
 const PCM_MIME_TYPE = "audio/L16;rate=16000";
+const PCM_SILENCE_PEAK_THRESHOLD = 1;
+const PCM_SILENCE_WARNING_CHUNKS = 3;
+const MIC_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  channelCount: 1,
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+const PCM_WORKLET_SOURCE = `
+class PhdebatePcmCapture extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0] && inputs[0][0];
+    if (input && input.length) {
+      const frame = new Float32Array(input);
+      this.port.postMessage(frame, [frame.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor("phdebate-pcm-capture", PhdebatePcmCapture);
+`;
 
 type EntryStep = "identity" | "mic" | "ready";
 type CheckStatus = "idle" | "testing" | "passed" | "failed";
 
 interface BrowserWindowWithAudioContext extends Window {
   webkitAudioContext?: typeof AudioContext;
+}
+
+interface PcmChunkStats {
+  peak: number;
+  rms: number;
+  silent: boolean;
+}
+
+interface PcmChunkPayload extends PcmChunkStats {
+  blob: Blob;
 }
 
 function createBrowserAudioContext(): AudioContext | null {
@@ -58,10 +89,29 @@ function downsampleToPcm(input: Float32Array, sourceRate: number): Int16Array {
   return result;
 }
 
-function pcmBlob(samples: number[]): Blob {
+function pcmStats(samples: number[]): PcmChunkStats {
+  if (!samples.length) return { peak: 0, rms: 0, silent: true };
+  let peak = 0;
+  let squareSum = 0;
+  for (const sample of samples) {
+    const value = Math.abs(sample);
+    if (value > peak) peak = value;
+    squareSum += sample * sample;
+  }
+  return {
+    peak,
+    rms: Math.sqrt(squareSum / samples.length),
+    silent: peak <= PCM_SILENCE_PEAK_THRESHOLD,
+  };
+}
+
+function pcmChunk(samples: number[]): PcmChunkPayload {
   const pcm = new Int16Array(samples);
   const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-  return new Blob([bytes], { type: PCM_MIME_TYPE });
+  return {
+    blob: new Blob([bytes], { type: PCM_MIME_TYPE }),
+    ...pcmStats(samples),
+  };
 }
 
 export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
@@ -94,12 +144,13 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   const activeSpeakerId = speaker?.id ?? null;
   const speakerType = speaker?.speaker_type;
   const activeAudioAsset = snapshot?.audio_assets.find((item) => item.speech_id === activeSpeechId);
+  const shouldPublishLiveKitMicrophone = Boolean(activeSpeechId && activeSpeakerId && !speechPaused);
   useLiveKitAudio({
     matchId,
     role: "speaker",
     speakerId: selectedSpeakerId,
-    enabled: entryStep === "ready" && speakerType === "human",
-    publishMicrophone: Boolean(activeSpeechId && activeSpeakerId && !speechPaused),
+    enabled: entryStep === "ready" && speakerType === "human" && shouldPublishLiveKitMicrophone,
+    publishMicrophone: shouldPublishLiveKitMicrophone,
   });
 
   useEffect(() => {
@@ -150,13 +201,13 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
     const currentSpeechId = activeSpeechId;
     const currentSpeakerId = activeSpeakerId;
 
-    function enqueueUpload(blob: Blob, durationMs: number, filename?: string) {
+    function enqueueUpload(blob: Blob, durationMs: number, filename?: string, stats?: PcmChunkStats) {
       const chunkIndex = chunkIndexRef.current;
       chunkIndexRef.current += 1;
       const upload = uploadChainRef.current.catch(() => undefined).then(() => uploadAudioChunk(matchId, currentSpeechId, currentSpeakerId, chunkIndex, blob, durationMs, filename))
         .then((chunk) => {
           // 后端只回这一片的归档结果(含累计 chunk_count)，不再回传整张快照。
-          if (!cancelled) setAudioStatus(chunk.chunk_count ? "记录中" : "待命");
+          if (!cancelled) setAudioStatus(stats?.silent ? "麦克风无输入" : chunk.chunk_count ? "记录中" : "待命");
         })
         .catch((err) => {
           if (!cancelled) {
@@ -186,45 +237,121 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       );
     }
 
-    function startPcmArchive(stream: MediaStream): (() => void) | null {
+    async function startPcmArchive(stream: MediaStream): Promise<(() => void) | null> {
       const audioContext = createBrowserAudioContext();
       if (!audioContext) return null;
-      void audioContext.resume().catch(() => undefined);
-      const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      const mute = audioContext.createGain();
+      const context = audioContext;
+      void context.resume().catch(() => undefined);
+      const source = context.createMediaStreamSource(stream);
+      const mute = context.createGain();
       const sampleBuffer: number[] = [];
       mute.gain.value = 0;
+      let closed = false;
+      let silentChunkStreak = 0;
+      let silenceWarningSent = false;
+      let silenceErrorActive = false;
+
+      function reportInputLevel(stats: PcmChunkStats): boolean {
+        if (stats.silent) {
+          silentChunkStreak += 1;
+          if (silentChunkStreak >= PCM_SILENCE_WARNING_CHUNKS && !silenceWarningSent) {
+            silenceWarningSent = true;
+            silenceErrorActive = true;
+            setAudioStatus("麦克风无输入");
+            setError("检测到麦克风输入持续为静音，请检查是否选错设备、耳机/系统是否静音，或重新进入辩手端。");
+            sendRef.current("speaker.mic_error", {
+              speaker_id: currentSpeakerId,
+              mic_permission: "granted",
+              device_label: stream.getAudioTracks()[0]?.label || "browser microphone",
+              message: "Microphone input is silent"
+            });
+          }
+          return silenceWarningSent;
+        }
+        silentChunkStreak = 0;
+        if (silenceErrorActive) {
+          silenceErrorActive = false;
+          setError(null);
+        }
+        setAudioStatus("记录中");
+        return false;
+      }
 
       function flush(force = false) {
         while (sampleBuffer.length >= PCM_SAMPLES_PER_CHUNK || (force && sampleBuffer.length > 0)) {
           const take = force ? Math.min(sampleBuffer.length, PCM_SAMPLES_PER_CHUNK) : PCM_SAMPLES_PER_CHUNK;
           const samples = sampleBuffer.splice(0, take);
           const chunkNumber = chunkIndexRef.current;
-          enqueueUpload(pcmBlob(samples), Math.round((samples.length / PCM_SAMPLE_RATE) * 1000), `chunk_${String(chunkNumber).padStart(5, "0")}.pcm`);
+          const chunk = pcmChunk(samples);
+          const silenceWarningActive = reportInputLevel(chunk);
+          const uploadStats: PcmChunkStats = { peak: chunk.peak, rms: chunk.rms, silent: chunk.silent && silenceWarningActive };
+          enqueueUpload(
+            chunk.blob,
+            Math.round((samples.length / PCM_SAMPLE_RATE) * 1000),
+            `chunk_${String(chunkNumber).padStart(5, "0")}.pcm`,
+            uploadStats
+          );
         }
       }
 
-      processor.onaudioprocess = (event) => {
+      function appendInput(input: Float32Array) {
         if (cancelled) return;
-        const pcm = downsampleToPcm(event.inputBuffer.getChannelData(0), audioContext.sampleRate);
+        const pcm = downsampleToPcm(input, context.sampleRate);
         for (const sample of pcm) sampleBuffer.push(sample);
         flush(false);
-      };
+      }
+
+      async function startWorklet(): Promise<(() => void) | null> {
+        if (!context.audioWorklet || typeof AudioWorkletNode === "undefined") return null;
+        const moduleUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: "text/javascript" }));
+        try {
+          await context.audioWorklet.addModule(moduleUrl);
+        } finally {
+          URL.revokeObjectURL(moduleUrl);
+        }
+        const node = new AudioWorkletNode(context, "phdebate-pcm-capture");
+        node.port.onmessage = (event) => {
+          const frame = event.data instanceof Float32Array ? event.data : new Float32Array(event.data);
+          appendInput(frame);
+        };
+        source.connect(node);
+        node.connect(mute);
+        mute.connect(context.destination);
+        setAudioStatus("记录中");
+        return () => {
+          if (closed) return;
+          closed = true;
+          node.port.onmessage = null;
+          flush(true);
+          queueArchiveComplete();
+          source.disconnect();
+          node.disconnect();
+          mute.disconnect();
+          void context.close();
+        };
+      }
+
+      const workletStop = await startWorklet().catch(() => null);
+      if (workletStop) return workletStop;
+
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (event) => appendInput(event.inputBuffer.getChannelData(0));
 
       source.connect(processor);
       processor.connect(mute);
-      mute.connect(audioContext.destination);
+      mute.connect(context.destination);
       setAudioStatus("记录中");
 
       return () => {
+        if (closed) return;
+        closed = true;
         processor.onaudioprocess = null;
         flush(true);
         queueArchiveComplete();
         source.disconnect();
         processor.disconnect();
         mute.disconnect();
-        void audioContext.close();
+        void context.close();
       };
     }
 
@@ -255,7 +382,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       }
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
         if (cancelled) {
           localStream.getTracks().forEach((track) => track.stop());
           return;
@@ -265,7 +392,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
         pendingUploadsRef.current = [];
         uploadChainRef.current = Promise.resolve();
         try {
-          stopPcmArchive = startPcmArchive(localStream);
+          stopPcmArchive = await startPcmArchive(localStream);
         } catch {
           stopPcmArchive = null;
         }
@@ -326,7 +453,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       await runAction("console-mic-test", "麦克风测试", async () => {
         setError(null);
         setMicTestStatus("testing");
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
         await new Promise((resolve) => window.setTimeout(resolve, 450));
         stream.getTracks().forEach((track) => track.stop());
         setMicTestStatus("passed");
@@ -1014,6 +1141,7 @@ function isAgentAllowedForPhase(speaker: Speaker, phase: Phase | undefined, free
 function agentStatusLabel(status?: string): string {
   if (!status) return "未检测";
   if (status === "ready") return "就绪";
+  if (status === "speech_only") return "就绪";
   if (status === "streaming") return "生成中";
   if (status === "failed") return "异常";
   if (status === "ok") return "正常";

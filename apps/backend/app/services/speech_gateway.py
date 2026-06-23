@@ -1128,21 +1128,16 @@ def _local_qwen_voice(voice: str) -> str:
     return aliases.get(value, value or "dylan")
 
 
-def _env_truthy(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _local_qwen_tts_extra_payload(session: Dict[str, Any]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
     for key in ("seed", "temperature", "top_p"):
         value = session.get(key)
         if value is not None and value != "":
             payload[key] = value
-    if _env_truthy("PHDEBATE_LOCAL_QWEN_TTS_EXTENDED_PARAMS"):
-        for key in ("volume", "pitch_rate", "instructions"):
-            value = session.get(key)
-            if value is not None and value != "":
-                payload[key] = value
+    for key in ("volume", "pitch_rate", "instructions"):
+        value = session.get(key)
+        if value is not None and value != "":
+            payload[key] = value
     return payload
 
 

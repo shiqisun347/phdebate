@@ -18,7 +18,7 @@ export interface PlaybackSpeech {
   speechId: string;
   speakerId: string;
   taskId: string;
-  source: string; // 期望 "agent_text"
+  source: string; // agent_text or fixed fallback audio
   state: string; // 期望 "speaking"
   expectedSentences: number | null; // tts_expected_sentences；null = 仍在生成
   createdSentences: number; // tts_created_sentences；已排入 TTS 队列，可对缺口做超时裁决
@@ -128,7 +128,7 @@ export function reconcile(input: PlaybackInput, config: PlaybackConfig = DEFAULT
   if (!audioEnabled) return stop("audio_disabled");
   if (suppressed) return stop("suppressed");
   if (!speech) return stop("no_speech");
-  if (speech.source !== "agent_text") return stop("wrong_source");
+  if (!isPlayableSpeechSource(speech.source)) return stop("wrong_source");
   // 允许 "thinking" 与 "speaking" 都播放。关键：AI 发言在「大屏上报播放」之前一直是 "thinking"，
   // 正是首段播放（screen → playback-progress）把它翻成 "speaking"。若这里只认 "speaking" 就会死锁：
   // 大屏不播 → 状态不前进 → 永远不播（本次"点了也不发声"的真因）。只有 ended/paused 才截断音频。
@@ -212,4 +212,8 @@ export function reconcile(input: PlaybackInput, config: PlaybackConfig = DEFAULT
     return { kind: "SKIP", position: { ...pos, nextIdx: idx + 1, waitingSinceMs: null }, sentenceIdx: idx, reason: "watchdog_timeout" };
   }
   return { kind: "WAIT", position: pos, sentenceIdx: idx };
+}
+
+function isPlayableSpeechSource(source: string): boolean {
+  return source === "agent_text" || source === "fallback_history";
 }

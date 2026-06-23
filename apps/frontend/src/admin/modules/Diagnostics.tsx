@@ -106,8 +106,8 @@ export function Diagnostics() {
                     <p className="text-xs text-muted-foreground">{a.model} · {a.detail}</p>
                   </div>
                 </div>
-                <Badge variant={a.status === "ready" ? "success" : a.status === "failed" ? "destructive" : "warning"}>
-                  {a.status}
+                <Badge variant={a.status === "ready" || a.status === "speech_only" ? "success" : a.status === "failed" ? "destructive" : "warning"}>
+                  {a.status === "speech_only" ? "ready" : a.status}
                 </Badge>
               </div>
             ))}

@@ -210,9 +210,15 @@ describe("reconcile — STOP 守卫（截断）", () => {
     expect(d.kind).not.toBe("STOP");
   });
 
-  it("10. 非 agent_text → STOP(wrong_source)", () => {
+  it("10. 人声 ASR 来源 → STOP(wrong_source)", () => {
     const d = reconcile({ ...base, speech: mkSpeech({ source: "human_asr" }), position: bound });
     expect((d as any).reason).toBe("wrong_source");
+  });
+
+  it("10b. 固定兜底音频来源 fallback_history → 可以播放", () => {
+    const d = reconcile({ ...base, speech: mkSpeech({ source: "fallback_history", expectedSentences: 1, chunks: chunks(0) }), position: emptyPosition() });
+    expect(["NOTIFY_START", "PLAY"]).toContain(d.kind);
+    expect(d.kind).not.toBe("STOP");
   });
 
   it("11. speech 变更 → STOP(speech_changed)，重置并绑定到新发言", () => {

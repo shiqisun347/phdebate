@@ -26,6 +26,10 @@ const ALICLOUD_TTS_DEFAULTS = {
     sample_rate: 24000,
     mode: "server_commit",
     language_type: "Chinese",
+    speech_rate: 1.48,
+    volume: 74,
+    pitch_rate: 1,
+    instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。",
   },
 };
 
@@ -58,7 +62,17 @@ const LOCAL_QWEN_ASR_DEFAULTS = {
 
 const LOCAL_QWEN_TTS_DEFAULTS = {
   endpoint: "http://127.0.0.1:12302",
-  settings: { model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", response_format: "mp3", sample_rate: 24000, speech_rate: 1 },
+  settings: {
+    model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    response_format: "mp3",
+    sample_rate: 24000,
+    speech_rate: 1.48,
+    volume: 74,
+    pitch_rate: 1,
+    temperature: 0.18,
+    top_p: 0.65,
+    instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。",
+  },
 };
 
 const ALICLOUD_VOICES = [
@@ -447,10 +461,12 @@ function VoicePresetManager({
       is_default: false,
       description: "",
       sample_rate: Number(config.tts.settings?.sample_rate ?? 24000),
-      speech_rate: 1,
-      volume: 70,
+      speech_rate: 1.48,
+      volume: 74,
       pitch_rate: 1,
-      instructions: "",
+      temperature: 0.18,
+      top_p: 0.65,
+      instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。",
     }),
     [config.tts.provider, config.tts.settings]
   );

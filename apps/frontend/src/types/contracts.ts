@@ -2,7 +2,7 @@ export type MatchStatus = "draft" | "ready" | "running" | "paused" | "interventi
 export type Side = "affirmative" | "negative" | "neutral";
 export type SpeakerType = "human" | "agent";
 export type ClockState = "idle" | "running" | "paused" | "expired" | "stopped";
-export type ScreenScene = "idle" | "live" | "paused" | "audience_vote" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result" | "xiaoqi_commentary" | "xiaoqi_result" | "acknowledgment";
+export type ScreenScene = "idle" | "live" | "debate_process" | "paused" | "audience_vote" | "judge_commentary" | "judge_result" | "audience_result" | "opening" | "teams" | "intermission" | "result" | "xiaoqi_commentary" | "xiaoqi_result" | "acknowledgment";
 export type LiveMode = "single" | "free" | "prep";
 export type AudioOutputMode = "host" | "admin" | "screen" | "off";
 
@@ -180,6 +180,9 @@ export interface AudioChunkUploadResult {
   size_bytes: number;
   file_path: string;
   pcm_ready: boolean;
+  silent?: boolean;
+  peak_level?: number | null;
+  rms_level?: number | null;
   ignored_after_complete?: boolean; // 发言已完成后到达的迟到分片被良性忽略时为 true
 }
 
@@ -597,6 +600,8 @@ export interface VoicePreset {
   speech_rate?: number;
   volume?: number;
   pitch_rate?: number;
+  temperature?: number;
+  top_p?: number;
   instructions?: string;
 }
 

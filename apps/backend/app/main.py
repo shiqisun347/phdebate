@@ -301,6 +301,39 @@ async def get_preflight_report(match_id: str, _principal: Principal = Depends(re
     return {"ok": True, "data": build_preflight_report(snapshot, diagnostics)}
 
 
+@app.get("/api/matches/{match_id}/fallback/status")
+async def get_fallback_status(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": store.fallback_status()}
+
+
+@app.post("/api/matches/{match_id}/fallback/prepare-audio")
+async def prepare_fallback_audio(match_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    data = await store.prepare_fallback_audio(force=bool((body or {}).get("force", False)))
+    return {"ok": True, "data": data}
+
+
+@app.post("/api/matches/{match_id}/fallback/phases/{phase_id}/select")
+async def select_fallback_phase(match_id: str, phase_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.select_phase_with_fallback(phase_id)}
+
+
+@app.post("/api/matches/{match_id}/fallback/phases/{phase_id}/speakers/{speaker_id}/play")
+async def play_fallback_speech(match_id: str, phase_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    turn_index_raw = (body or {}).get("free_turn_index")
+    turn_index = int(turn_index_raw) if turn_index_raw is not None else None
+    return {"ok": True, "data": await store.play_fallback_speech(phase_id, speaker_id, free_turn_index=turn_index)}
+
+
+@app.post("/api/matches/{match_id}/fallback/free-debate/start")
+async def start_fallback_free_debate(match_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
+    await _ensure_match(match_id)
+    return {"ok": True, "data": await store.start_fallback_free_debate()}
+
+
 @app.get("/api/admin/security/auth")
 async def get_security_auth(_principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     return {"ok": True, "data": runtime_auth_status()}
@@ -712,9 +745,8 @@ async def start_agent_speaking(match_id: str, speaker_id: str, _principal: Princ
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/self-introduction")
 async def start_agent_self_introduction(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
-    asyncio.create_task(store.run_agent_speech(speaker_id, mode="self_intro"))
-    await store.emit("agent.self_introduction.requested", {"speaker_id": speaker_id}, "host", speaker_id)
-    return {"ok": True, "data": await store.get_snapshot()}
+    data = await store.play_fallback_self_intro(speaker_id)
+    return {"ok": True, "data": data}
 
 
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/free-debate-skip")

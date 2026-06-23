@@ -305,7 +305,7 @@ def test_alicloud_tts_sends_clean_text_and_omits_instructions_for_flash_model() 
     assert socket.sent[1]["text"] == "人工智能，千问语音合成"
 
 
-def test_local_qwen_tts_consistency_seed_is_sent_before_extended_params(monkeypatch) -> None:
+def test_local_qwen_tts_consistency_seed_and_formal_params_are_sent_by_default() -> None:
     gateway = LocalQwenTTSGateway(
         section={
             "endpoint": "http://127.0.0.1:12302",
@@ -323,14 +323,15 @@ def test_local_qwen_tts_consistency_seed_is_sent_before_extended_params(monkeypa
 
     session = gateway._session_options({"seed": 12345, "volume": 86, "pitch_rate": 1.05})
 
-    monkeypatch.delenv("PHDEBATE_LOCAL_QWEN_TTS_EXTENDED_PARAMS", raising=False)
-    assert _local_qwen_tts_extra_payload(session) == {"seed": 12345}
-
-    monkeypatch.setenv("PHDEBATE_LOCAL_QWEN_TTS_EXTENDED_PARAMS", "1")
     extra = _local_qwen_tts_extra_payload(session)
     assert extra["seed"] == 12345
     assert extra["volume"] == 86
     assert extra["pitch_rate"] == 1.05
+    variants = _local_qwen_tts_payload_variants({"input": "测试", "speed": 1.12}, session)
+    assert variants[0]["volume"] == 86
+    assert variants[0]["pitch_rate"] == 1.05
+    assert variants[1] == {"input": "测试", "speed": 1.12, "seed": 12345}
+    assert variants[-1] == {"input": "测试", "speed": 1.12}
 
 
 def test_local_qwen_tts_payload_variants_keep_seed_without_losing_compatibility() -> None:

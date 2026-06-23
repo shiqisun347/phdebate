@@ -198,13 +198,16 @@ function RankColumn({
             className={`vote-rank-card ${ranked ? "ranked" : ""}`}
             onClick={() => onTap(speaker.id)}
           >
-            <span className={`vote-rank-badge ${ranked ? "on" : ""}`}>{ranked ? rank + 1 : ""}</span>
+            <span className={`vote-rank-badge ${ranked ? "on" : ""}`}>
+              <b>{ranked ? rank + 1 : "—"}</b>
+              <em>{ranked ? "名" : "待选"}</em>
+            </span>
             <span className="vote-rank-avatar">
               {speaker.image_url ? <img src={speaker.image_url} alt={speaker.name} /> : <span>{speaker.name.slice(0, 1)}</span>}
             </span>
             <span className="vote-rank-meta">
               <strong>{speaker.name}</strong>
-              <em>{sideLabel(speaker.side)}{seatLabel(speaker.seat)}</em>
+              <em>{sideLabel(speaker.side)} · {seatLabel(speaker.seat)}</em>
             </span>
           </button>
         );

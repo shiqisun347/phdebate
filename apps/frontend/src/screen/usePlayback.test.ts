@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  SCREEN_TTS_PLAYBACK_RATE,
+  applyScreenTtsPlaybackRate,
   clearActiveAudio,
   computeResumeIdx,
   observeActiveAudioProgress,
@@ -173,6 +175,34 @@ describe("usePlayback playback heartbeat", () => {
     expect(heartbeat.current).toEqual({ segment: "speech:task:0", atMs: 6000 });
     expect(shouldSendPlaybackHeartbeat(6100, "speech:task:1", heartbeat, 5000)).toBe(true);
     expect(heartbeat.current).toEqual({ segment: "speech:task:1", atMs: 6100 });
+  });
+});
+
+describe("usePlayback screen playback rate", () => {
+  it("applies a stable faster playback rate while preserving pitch", () => {
+    const audio = {
+      playbackRate: 1,
+      preservesPitch: false,
+      mozPreservesPitch: false,
+      webkitPreservesPitch: false,
+    } as unknown as HTMLAudioElement;
+
+    applyScreenTtsPlaybackRate(audio);
+
+    expect(audio.playbackRate).toBe(SCREEN_TTS_PLAYBACK_RATE);
+    expect((audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch).toBe(true);
+    expect((audio as HTMLAudioElement & { mozPreservesPitch?: boolean }).mozPreservesPitch).toBe(true);
+    expect((audio as HTMLAudioElement & { webkitPreservesPitch?: boolean }).webkitPreservesPitch).toBe(true);
+  });
+
+  it("clamps playback rate to the safe browser range", () => {
+    const audio = { playbackRate: 1 } as HTMLAudioElement;
+
+    applyScreenTtsPlaybackRate(audio, 99);
+    expect(audio.playbackRate).toBe(1.6);
+
+    applyScreenTtsPlaybackRate(audio, 0.1);
+    expect(audio.playbackRate).toBe(0.75);
   });
 });
 

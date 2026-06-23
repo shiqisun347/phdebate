@@ -17,6 +17,18 @@ from typing import Any, Dict, List, Optional
 from app.services.sqlite_repo import project_root
 
 
+FORMAL_DEBATE_TTS_INSTRUCTIONS = (
+    "正式、平直、清晰、克制，接近现场辩论正常发言；"
+    "不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。"
+)
+FORMAL_DEBATE_TTS_SPEECH_RATE = 1.48
+FORMAL_DEBATE_TTS_VOLUME = 74
+FORMAL_DEBATE_TTS_PITCH_RATE = 1.0
+FORMAL_DEBATE_TTS_TEMPERATURE = 0.18
+FORMAL_DEBATE_TTS_TOP_P = 0.65
+FORMAL_DEBATE_SCREEN_PLAYBACK_RATE = 1.38
+
+
 ALICLOUD_ASR_DEFAULTS = {
     "provider": "alicloud",
     "enabled": True,
@@ -42,9 +54,11 @@ ALICLOUD_TTS_DEFAULTS = {
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 1.0,
-        "volume": 70,
-        "pitch_rate": 1.0,
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "screen_playback_rate": FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
     },
 }
 
@@ -87,9 +101,13 @@ LOCAL_QWEN_TTS_DEFAULTS = {
         "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         "response_format": "mp3",
         "sample_rate": 24000,
-        "speech_rate": 1.0,
-        "volume": 70,
-        "pitch_rate": 1.0,
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "screen_playback_rate": FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
     },
 }
 
@@ -104,10 +122,10 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 1.0,
-        "volume": 70,
-        "pitch_rate": 1.0,
-        "instructions": "播报清晰、语气稳健，适合作为辩论赛主持提示。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
         "description": "亲切自然，适合主持提示和系统播报。",
@@ -122,10 +140,10 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 1.0,
-        "volume": 72,
-        "pitch_rate": 1.0,
-        "instructions": "平直、清晰、字正腔圆，适合正式辩论发言。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": True,
         "description": "平直清晰、字正腔圆，适合正式辩论和立论陈词。",
@@ -140,10 +158,10 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 1.0,
-        "volume": 70,
-        "pitch_rate": 1.0,
-        "instructions": "语气自信、有条理，表达有攻辩节奏但不过度夸张。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
         "description": "标准普通话，带部分北方口音；作为备用男声保留。",
@@ -158,10 +176,10 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 0.95,
-        "volume": 68,
-        "pitch_rate": 1.0,
-        "instructions": "语气温和、清晰、沉稳，适合总结陈词和稳健表达。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
         "description": "温和清晰，适合总结陈词或稳健表达。",
@@ -176,10 +194,12 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 1.0,
-        "volume": 72,
-        "pitch_rate": 1.0,
-        "instructions": "平直、清晰、字正腔圆，适合正式辩论发言。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
         "description": "本地 Qwen3-TTS 男声，适合 AI 辩手。",
@@ -194,10 +214,12 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 1.0,
-        "volume": 70,
-        "pitch_rate": 1.0,
-        "instructions": "播报清晰、语气稳健，适合作为辩论赛主持提示。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
         "description": "本地 Qwen3-TTS 女声，适合主持提示和系统播报。",
@@ -212,10 +234,12 @@ DEFAULT_VOICE_PRESETS = [
         "sample_rate": 24000,
         "mode": "server_commit",
         "language_type": "Chinese",
-        "speech_rate": 0.95,
-        "volume": 68,
-        "pitch_rate": 1.0,
-        "instructions": "语气温和、清晰、沉稳，适合总结陈词和稳健表达。",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
         "description": "本地 Qwen3-TTS 女声，适合总结陈词。",
@@ -229,7 +253,6 @@ _XFYUN_ENV_KEYS = {
     "api_key": "XFYUN_API_KEY",
     "api_secret": "XFYUN_API_SECRET",
 }
-
 
 def _under_pytest() -> bool:
     return "pytest" in sys.modules
@@ -365,12 +388,17 @@ class IntegrationConfigStore:
             section.setdefault("settings", {})
             for key, value in (defaults.get("settings") or {}).items():
                 section["settings"].setdefault(key, deepcopy(value))
+            if kind == "tts" and provider in {"alicloud", "local_qwen"}:
+                section["settings"].update(self._formal_tts_settings(provider))
             section["secrets"] = self._merge_secrets(section.get("secrets") or {}, {})
         presets = [self._normalize_voice_preset(item) for item in self.config.get("voice_presets", []) if isinstance(item, dict)]
         seen = {item["id"] for item in presets}
         for item in DEFAULT_VOICE_PRESETS:
             if item["id"] not in seen:
                 presets.append(deepcopy(item))
+        for item in presets:
+            if item.get("provider") in {"alicloud", "local_qwen"}:
+                item.update(self._formal_tts_settings(str(item.get("provider") or "")))
         self._migrate_alicloud_default_voice(presets)
         if not any(item.get("is_default") and item.get("enabled") for item in presets):
             for item in presets:
@@ -378,6 +406,23 @@ class IntegrationConfigStore:
                     item["is_default"] = True
                     break
         self.config["voice_presets"] = presets
+
+    def _formal_tts_settings(self, provider: str) -> Dict[str, Any]:
+        settings: Dict[str, Any] = {
+            "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+            "volume": FORMAL_DEBATE_TTS_VOLUME,
+            "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+            "screen_playback_rate": FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
+            "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
+        }
+        if provider == "local_qwen":
+            settings.update(
+                {
+                    "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+                    "top_p": FORMAL_DEBATE_TTS_TOP_P,
+                }
+            )
+        return settings
 
     def _migrate_alicloud_default_voice(self, presets: List[Dict[str, Any]]) -> None:
         neil = next((item for item in presets if item.get("id") == "voice_alicloud_neil_debater"), None)
@@ -431,6 +476,8 @@ class IntegrationConfigStore:
             "speech_rate": float(item.get("speech_rate") or 1.0),
             "volume": self._normalize_tts_volume(item.get("volume")),
             "pitch_rate": float(item.get("pitch_rate") or 1.0),
+            "temperature": float(item.get("temperature") if item.get("temperature") not in {None, ""} else FORMAL_DEBATE_TTS_TEMPERATURE),
+            "top_p": float(item.get("top_p") if item.get("top_p") not in {None, ""} else FORMAL_DEBATE_TTS_TOP_P),
             "instructions": str(item.get("instructions") or "").strip(),
             "enabled": bool(item.get("enabled", True)),
             "is_default": bool(item.get("is_default", False)),
