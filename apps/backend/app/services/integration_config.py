@@ -19,14 +19,19 @@ from app.services.sqlite_repo import project_root
 
 FORMAL_DEBATE_TTS_INSTRUCTIONS = (
     "正式、平直、清晰、克制，接近现场辩论正常发言；"
-    "不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。"
+    "不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，不要口音化，"
+    "不要故意拉长字音，保持稳定音量和自然停顿。"
 )
-FORMAL_DEBATE_TTS_SPEECH_RATE = 1.48
-FORMAL_DEBATE_TTS_VOLUME = 74
+FORMAL_DEBATE_TTS_SPEECH_RATE = 1.4
+FORMAL_DEBATE_TTS_VOLUME = 70
 FORMAL_DEBATE_TTS_PITCH_RATE = 1.0
-FORMAL_DEBATE_TTS_TEMPERATURE = 0.18
-FORMAL_DEBATE_TTS_TOP_P = 0.65
-FORMAL_DEBATE_SCREEN_PLAYBACK_RATE = 1.38
+FORMAL_DEBATE_TTS_TEMPERATURE = 0.05
+FORMAL_DEBATE_TTS_TOP_P = 0.5
+FORMAL_DEBATE_TTS_TOP_K = 20
+FORMAL_DEBATE_TTS_REPETITION_PENALTY = 1.1
+FORMAL_DEBATE_TTS_CHUNK_SIZE = 8
+FORMAL_DEBATE_TTS_MAX_NEW_TOKENS = 2048
+FORMAL_DEBATE_SCREEN_PLAYBACK_RATE = 1.0
 
 
 ALICLOUD_ASR_DEFAULTS = {
@@ -107,6 +112,12 @@ LOCAL_QWEN_TTS_DEFAULTS = {
         "screen_playback_rate": FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
         "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
         "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "top_k": FORMAL_DEBATE_TTS_TOP_K,
+        "repetition_penalty": FORMAL_DEBATE_TTS_REPETITION_PENALTY,
+        "chunk_size": FORMAL_DEBATE_TTS_CHUNK_SIZE,
+        "max_new_tokens": FORMAL_DEBATE_TTS_MAX_NEW_TOKENS,
+        "stream": True,
+        "language_type": "Chinese",
         "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
     },
 }
@@ -180,9 +191,9 @@ DEFAULT_VOICE_PRESETS = [
         "volume": FORMAL_DEBATE_TTS_VOLUME,
         "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
         "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
-        "enabled": True,
+        "enabled": False,
         "is_default": False,
-        "description": "温和清晰，适合总结陈词或稳健表达。",
+        "description": "已禁用：现场测试音色不稳定。",
     },
     {
         "id": "voice_local_qwen_dylan_debater",
@@ -201,7 +212,7 @@ DEFAULT_VOICE_PRESETS = [
         "top_p": FORMAL_DEBATE_TTS_TOP_P,
         "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
-        "is_default": False,
+        "is_default": True,
         "description": "本地 Qwen3-TTS 男声，适合 AI 辩手。",
     },
     {
@@ -220,9 +231,69 @@ DEFAULT_VOICE_PRESETS = [
         "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
         "top_p": FORMAL_DEBATE_TTS_TOP_P,
         "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
+        "enabled": False,
+        "is_default": False,
+        "description": "已禁用：现场测试音色不稳定。",
+    },
+    {
+        "id": "voice_local_qwen_aiden_debater",
+        "name": "本地 Qwen 男声 · Aiden",
+        "provider": "local_qwen",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice": "aiden",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "mode": "server_commit",
+        "language_type": "Chinese",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
         "enabled": True,
         "is_default": False,
-        "description": "本地 Qwen3-TTS 女声，适合主持提示和系统播报。",
+        "description": "本地 Qwen3-TTS 普通男声候选，优先用于现场辩论。",
+    },
+    {
+        "id": "voice_local_qwen_sohee_debater",
+        "name": "本地 Qwen 女声 · Sohee",
+        "provider": "local_qwen",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice": "sohee",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "mode": "server_commit",
+        "language_type": "Chinese",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
+        "enabled": True,
+        "is_default": False,
+        "description": "本地 Qwen3-TTS 普通女声候选，优先用于现场辩论。",
+    },
+    {
+        "id": "voice_local_qwen_ryan_debater",
+        "name": "本地 Qwen 男声 · Ryan",
+        "provider": "local_qwen",
+        "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice": "ryan",
+        "response_format": "mp3",
+        "sample_rate": 24000,
+        "mode": "server_commit",
+        "language_type": "Chinese",
+        "speech_rate": FORMAL_DEBATE_TTS_SPEECH_RATE,
+        "volume": FORMAL_DEBATE_TTS_VOLUME,
+        "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
+        "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
+        "top_p": FORMAL_DEBATE_TTS_TOP_P,
+        "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
+        "enabled": True,
+        "is_default": False,
+        "description": "本地 Qwen3-TTS 男声候选，优先用于现场辩论。",
     },
     {
         "id": "voice_local_qwen_serena_summary",
@@ -240,9 +311,9 @@ DEFAULT_VOICE_PRESETS = [
         "temperature": FORMAL_DEBATE_TTS_TEMPERATURE,
         "top_p": FORMAL_DEBATE_TTS_TOP_P,
         "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
-        "enabled": True,
+        "enabled": False,
         "is_default": False,
-        "description": "本地 Qwen3-TTS 女声，适合总结陈词。",
+        "description": "已禁用：现场测试音色不稳定。",
     },
 ]
 
@@ -389,7 +460,8 @@ class IntegrationConfigStore:
             for key, value in (defaults.get("settings") or {}).items():
                 section["settings"].setdefault(key, deepcopy(value))
             if kind == "tts" and provider in {"alicloud", "local_qwen"}:
-                section["settings"].update(self._formal_tts_settings(provider))
+                for key, value in self._formal_tts_settings(provider).items():
+                    section["settings"].setdefault(key, deepcopy(value))
             section["secrets"] = self._merge_secrets(section.get("secrets") or {}, {})
         presets = [self._normalize_voice_preset(item) for item in self.config.get("voice_presets", []) if isinstance(item, dict)]
         seen = {item["id"] for item in presets}
@@ -398,14 +470,41 @@ class IntegrationConfigStore:
                 presets.append(deepcopy(item))
         for item in presets:
             if item.get("provider") in {"alicloud", "local_qwen"}:
-                item.update(self._formal_tts_settings(str(item.get("provider") or "")))
+                for key, value in self._formal_tts_settings(str(item.get("provider") or "")).items():
+                    if item.get(key) in {None, ""}:
+                        item[key] = deepcopy(value)
         self._migrate_alicloud_default_voice(presets)
+        self._enforce_local_qwen_voice_whitelist(presets)
         if not any(item.get("is_default") and item.get("enabled") for item in presets):
             for item in presets:
                 if item.get("enabled"):
                     item["is_default"] = True
                     break
         self.config["voice_presets"] = presets
+
+    def _enforce_local_qwen_voice_whitelist(self, presets: List[Dict[str, Any]]) -> None:
+        stable_voices = {"aiden", "dylan", "ryan", "sohee"}
+        presets[:] = [
+            item for item in presets
+            if not (
+                item.get("provider") == "local_qwen"
+                and (
+                    str(item.get("voice") or "").strip().lower() in {"eric", "ono_anna"}
+                    or item.get("id") in {"voice_local_qwen_eric_debater", "voice_local_qwen_ono_anna_debater"}
+                )
+            )
+        ]
+        for item in presets:
+            if item.get("provider") != "local_qwen":
+                continue
+            voice = str(item.get("voice") or "").strip().lower()
+            if voice not in stable_voices:
+                item["enabled"] = False
+                item["is_default"] = False
+                if not str(item.get("description") or "").startswith("已禁用"):
+                    item["description"] = "已禁用：现场测试音色不稳定。"
+                continue
+            item["is_default"] = voice == "dylan"
 
     def _formal_tts_settings(self, provider: str) -> Dict[str, Any]:
         settings: Dict[str, Any] = {
@@ -414,6 +513,25 @@ class IntegrationConfigStore:
             "pitch_rate": FORMAL_DEBATE_TTS_PITCH_RATE,
             "screen_playback_rate": FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
             "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
+            "response_format": "mp3",
+            "stream": True,
+            "language_type": "Chinese",
+            "chunk_size": FORMAL_DEBATE_TTS_CHUNK_SIZE,
+            "max_new_tokens": FORMAL_DEBATE_TTS_MAX_NEW_TOKENS,
+            "top_k": FORMAL_DEBATE_TTS_TOP_K,
+            "repetition_penalty": FORMAL_DEBATE_TTS_REPETITION_PENALTY,
+            "stability_mode": "stable",
+            "first_segment_chars": 24,
+            "min_segment_chars": 32,
+            "max_segment_chars": 72,
+            "sentence_concurrency": 1,
+            "sentence_timeout_s": 60,
+            "loudness_normalize": True,
+            "loudness_target": -18,
+            "loudness_timeout_s": 12,
+            "tts_speaking_cps": 5.4,
+            "agent_speech_time_factor": 0.78,
+            "agent_max_token_margin": 1.0,
         }
         if provider == "local_qwen":
             settings.update(
@@ -478,6 +596,11 @@ class IntegrationConfigStore:
             "pitch_rate": float(item.get("pitch_rate") or 1.0),
             "temperature": float(item.get("temperature") if item.get("temperature") not in {None, ""} else FORMAL_DEBATE_TTS_TEMPERATURE),
             "top_p": float(item.get("top_p") if item.get("top_p") not in {None, ""} else FORMAL_DEBATE_TTS_TOP_P),
+            "top_k": int(item.get("top_k") or FORMAL_DEBATE_TTS_TOP_K),
+            "repetition_penalty": float(item.get("repetition_penalty") or FORMAL_DEBATE_TTS_REPETITION_PENALTY),
+            "chunk_size": int(item.get("chunk_size") or FORMAL_DEBATE_TTS_CHUNK_SIZE),
+            "max_new_tokens": int(item.get("max_new_tokens") or FORMAL_DEBATE_TTS_MAX_NEW_TOKENS),
+            "stream": bool(item.get("stream", True)),
             "instructions": str(item.get("instructions") or "").strip(),
             "enabled": bool(item.get("enabled", True)),
             "is_default": bool(item.get("is_default", False)),

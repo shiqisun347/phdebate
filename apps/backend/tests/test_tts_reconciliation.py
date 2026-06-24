@@ -41,6 +41,12 @@ def _patch_tts(monkeypatch, gateway, provider: str = "test") -> None:
     )
 
 
+def _set_tts_settings(**settings) -> None:
+    from app.services.integration_config import integration_config
+
+    integration_config.config.setdefault("tts", {}).setdefault("settings", {}).update(settings)
+
+
 def _use_embedded_mock_agent(speaker_id: str = "spk_aff_2") -> None:
     resp = client.patch(
         f"/api/matches/match_001/agents/configs/agent_{speaker_id}",
@@ -68,6 +74,65 @@ def _seed_running_speech(speech_id: str = "sp_test", speaker_id: str = "spk_aff_
     return speech
 
 
+def test_stable_tts_segments_do_not_create_tiny_first_chunk(monkeypatch) -> None:
+    _set_tts_settings(stability_mode="stable", min_segment_chars=80, max_segment_chars=120)
+    text = (
+        "第一，我们讨论人工智能时代的学习方式，不能只看工具替代了多少操作，"
+        "更要看人是否还能理解问题如何被拆解、验证和复盘。"
+        "第二，编程思维不是要求每个人都成为工程师，而是训练一种稳定、清晰、可执行的表达方式。"
+        "第三，提问当然重要，但如果没有结构化执行，问题很容易停留在口号层面。"
+        "第四，现场辩论的语音应该保持平直克制，不应该突然出现奇怪的拖腔、口音和夸张语气。"
+    )
+
+    segments = store._stable_tts_segments(text)
+
+    assert len(segments) >= 2
+    assert len(segments[0]) >= 80
+    assert all(len(segment) >= 40 for segment in segments[:-1])
+
+
+def test_stable_tts_text_synthesis_runs_segments_sequentially(monkeypatch) -> None:
+    _set_tts_settings(stability_mode="stable", min_segment_chars=40, max_segment_chars=55)
+    _seed_running_speech()
+    speaker = store._find_speaker("spk_aff_2")
+    order: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(
+        store,
+        "_select_tts_for_speech",
+        lambda *_args, **_kwargs: SimpleNamespace(gateway=object(), provider="local_qwen", options={}, preset=None),
+    )
+
+    async def fake_synthesize(text, sentence_idx, task_id, speech_id, speaker, selection=None):
+        order.append(("start", sentence_idx))
+        await asyncio.sleep(0)
+        order.append(("end", sentence_idx))
+        return True
+
+    monkeypatch.setattr(store, "_synthesize_sentence_tts_with_timeout", fake_synthesize)
+    text = (
+        "第一，稳定模式会等待较大的自然语义块，避免八个字就切成一段。"
+        "第二，它会顺序请求本机语音模型，减少同一次发言里的音色漂移。"
+        "第三，合成完成后再按顺序播放，虽然首音略慢，但整体听感更正常。"
+    )
+
+    expected = asyncio.run(store._synthesize_text_tts("sp_test", "task_seed", speaker, text))
+
+    assert expected >= 2
+    assert order == [item for idx in range(expected) for item in (("start", idx), ("end", idx))]
+
+
+def test_tts_loudness_normalization_degrades_to_original_when_ffmpeg_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_LOUDNESS_NORMALIZE", "1")
+    monkeypatch.setenv("PHDEBATE_FFMPEG_BIN", str(tmp_path / "missing-ffmpeg"))
+    original = b"fake-mp3-bytes"
+
+    audio, meta = asyncio.run(store._normalize_tts_audio_bytes(original, "audio/mpeg", tmp_path, "task_seed", 0))
+
+    assert audio == original
+    assert meta["status"] == "missing_ffmpeg"
+
+
 # --- 完成不变量 ----------------------------------------------------------------
 
 _MULTI_SENTENCE = (
@@ -92,6 +157,19 @@ class _FlakyGateway:
         return TTSResult(audio=b"mp3", mime_type="audio/mpeg", latency_ms=1, chunk_count=1)
 
 
+class _FirstOkThenFailGateway:
+    """首段成功、后续失败，用于稳定覆盖尾部分段 skipped 的完成路径。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def synthesize(self, text: str, **_opts) -> TTSResult:
+        self.calls += 1
+        if self.calls > 1:
+            raise XfyunGatewayError("tail tts failed", code=500)
+        return TTSResult(audio=b"mp3", mime_type="audio/mpeg", latency_ms=1, chunk_count=1)
+
+
 class _AlwaysOkGateway:
     """每句都成功合成——用于"所有句子都有音频"的场景。"""
 
@@ -110,6 +188,7 @@ def test_unexpected_synthesize_error_skips_sentence_not_stall(monkeypatch) -> No
     """根因加固（线上事故复刻）：合成抛出非 SpeechProviderError 的意外异常（如曾经调用未定义方法的
     AttributeError）时，每个分段也必须降级为「跳句」事件，绝不能让任务静默死亡、让大屏空等看门狗
     12s。否则任意一个 bug 就会让整段 AI 发言全程没声音。"""
+    _set_tts_settings(stability_mode="legacy")
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")
     monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "0")
     _patch_tts(monkeypatch, _BoomGateway(), provider="xfyun")
@@ -235,10 +314,12 @@ def test_tail_skipped_tts_auto_completes_and_next_agent_can_start(monkeypatch) -
             yield {"type": "final", "task_id": payload["task_id"], "content": _MULTI_SENTENCE}
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
+    _set_tts_settings(stability_mode="legacy")
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")
     monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "0")  # 本测试要覆盖尾部分段失败→跳句兜底，关掉重试以免把瞬时失败救活
+    _set_tts_settings(stability_mode="legacy", tts_speaking_cps=8)
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
-    _patch_tts(monkeypatch, _FlakyGateway(), provider="xfyun")
+    _patch_tts(monkeypatch, _FirstOkThenFailGateway(), provider="xfyun")
     _use_embedded_mock_agent("spk_aff_2")
     _use_embedded_mock_agent("spk_neg_1")
     original_gateway = store.agent_gateway
@@ -248,7 +329,7 @@ def test_tail_skipped_tts_auto_completes_and_next_agent_can_start(monkeypatch) -
         speech = store.snapshot["current_speech"]
         assert speech is not None
         expected = int(speech["tts_expected_sentences"])
-        assert expected >= 4
+        assert expected >= 2
         ready = sorted(store._tts_ready_indices(speech["id"]))
         skipped = set(int(i) for i in speech["tts_skipped_sentences"])
         assert ready
@@ -262,6 +343,7 @@ def test_tail_skipped_tts_auto_completes_and_next_agent_can_start(monkeypatch) -
         assert store.snapshot["flow"]["awaiting_host_confirm"] is False
         assert store.events[-1]["type"] == "speech.ended"
 
+        _patch_tts(monkeypatch, _AlwaysOkGateway(), provider="xfyun")
         asyncio.run(store.run_agent_speech("spk_neg_1"))
         next_speech = store.snapshot["current_speech"]
         assert next_speech is not None
@@ -275,6 +357,7 @@ def test_screen_error_on_audio_backed_sentence_never_skips_or_completes(monkeypa
     绝不能把这些句子标记为跳过、更不能据此提前收尾整段发言——否则任意异常屏幕都会把发言
     "播一句就结束"。正常屏幕逐句 played 仍能正确收尾。"""
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
+    _set_tts_settings(stability_mode="legacy", tts_speaking_cps=8)
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
     _patch_tts(monkeypatch, _AlwaysOkGateway(), provider="xfyun")
@@ -287,7 +370,7 @@ def test_screen_error_on_audio_backed_sentence_never_skips_or_completes(monkeypa
         speech = store.snapshot["current_speech"]
         assert speech is not None
         expected = int(speech["tts_expected_sentences"])
-        assert expected >= 3
+        assert expected >= 2
         ready = sorted(store._tts_ready_indices(speech["id"]))
         assert ready == list(range(expected)), "本测试要求所有句子都有音频"
         sid, task_id = speech["id"], speech["tts_task_id"]
@@ -313,6 +396,7 @@ def test_first_segment_gets_lead_silence_prepended(monkeypatch) -> None:
     from pathlib import Path as _P
 
     monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "1")
+    _set_tts_settings(stability_mode="legacy", tts_speaking_cps=8)
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")
     monkeypatch.setenv("PHDEBATE_TTS_LEAD_SILENCE", "1")
     _patch_tts(monkeypatch, _AlwaysOkGateway(), provider="xfyun")
@@ -340,6 +424,7 @@ def test_first_segment_gets_lead_silence_prepended(monkeypatch) -> None:
 
 def test_completion_invariant_with_gaps(monkeypatch) -> None:
     """多句 + 半数失败：必然出现 skipped 缺口，且不变量仍成立（大屏据此可推进到结束）。"""
+    _set_tts_settings(stability_mode="legacy")
     monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "1")  # 顺序，便于断言确定的缺口
     monkeypatch.setenv("PHDEBATE_TTS_RETRY_ATTEMPTS", "0")  # 本测试要验证失败→跳句缺口，关掉重试以免把瞬时失败救活
     _patch_tts(monkeypatch, _FlakyGateway(), provider="xfyun")

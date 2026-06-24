@@ -4,12 +4,16 @@ import io
 import json
 import wave
 
+import httpx
+import pytest
+
 from app.services.speech_gateway import (
     ALICLOUD_ASR_AUDIO_FRAME_BYTES,
     AlicloudASRGateway,
     AlicloudTTSGateway,
     FunASRASRGateway,
     LocalQwenTTSGateway,
+    SpeechGatewayError,
     _local_qwen_tts_extra_payload,
     _local_qwen_tts_payload_variants,
     _prepare_local_qwen_asr_audio,
@@ -273,6 +277,10 @@ def test_normalize_tts_text_removes_markdown_and_rewrites_terms() -> None:
     assert result == "第二，人工智能、语音合成的接口密钥见链接，千问语音识别。"
 
 
+def test_normalize_tts_text_rewrites_unstable_debate_opening() -> None:
+    assert normalize_tts_text("感谢主席，反方一辩启问问候在场各位。") == "感谢主持人，反方一辩启问问候在场各位。"
+
+
 def test_alicloud_tts_sends_clean_text_and_omits_instructions_for_flash_model() -> None:
     socket = FakeAlicloudWebSocket()
 
@@ -352,3 +360,42 @@ def test_local_qwen_tts_payload_variants_keep_seed_without_losing_compatibility(
     assert variants[0]["top_p"] == 0.8
     assert variants[1] == {**base, "seed": 12345}
     assert variants[2] == base
+
+
+def test_local_qwen_tts_strict_payload_does_not_silently_drop_formal_params(monkeypatch) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["temperature"] == 0.05
+        assert payload["top_p"] == 0.5
+        assert payload["instructions"]
+        return httpx.Response(400, json={"detail": "unsupported formal params"})
+
+    real_async_client = httpx.AsyncClient
+
+    def fake_async_client(*_args, **kwargs):
+        return real_async_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr("app.services.speech_gateway.httpx.AsyncClient", fake_async_client)
+    gateway = LocalQwenTTSGateway(
+        section={
+            "endpoint": "http://127.0.0.1:12302",
+            "settings": {
+                "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                "response_format": "mp3",
+                "sample_rate": 24000,
+                "speech_rate": 1.52,
+            },
+        },
+        preset={"voice": "dylan"},
+    )
+
+    with pytest.raises(SpeechGatewayError):
+        asyncio.run(
+            gateway.synthesize(
+                "这是正式辩论语音测试。",
+                strict_payload=True,
+                temperature=0.05,
+                top_p=0.5,
+                instructions="正式、平直、稳定。",
+            )
+        )

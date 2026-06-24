@@ -35,13 +35,15 @@ def _now() -> str:
 # 可复制的流程模板：每行一个环节，用 | 分隔字段。
 FLOW_TEMPLATE = """# 赛制流程模板：每行一个环节，使用 | 分隔字段
 # 环节名称 | 持方(正方/反方/中立) | 发言人 | 时长(秒) | 类型(statement/free_debate/summary)
-正方一辩开篇立论 | 正方 | 一辩 | 180 | statement
-反方一辩开篇立论 | 反方 | 一辩 | 180 | statement
-正方二辩驳论 | 正方 | 二辩 | 120 | statement
-反方二辩驳论 | 反方 | 二辩 | 120 | statement
+正方一辩立论 | 正方 | 一辩 | 180 | statement
+反方一辩立论 | 反方 | 一辩 | 180 | statement
+正方二辩陈词 | 正方 | 二辩 | 120 | statement
+反方二辩陈词 | 反方 | 二辩 | 120 | statement
+正方三辩陈词 | 正方 | 三辩 | 90 | statement
+反方三辩陈词 | 反方 | 三辩 | 90 | statement
 自由辩论 | 中立 | 双方交替 | 240 | free_debate
-反方四辩总结陈词 | 反方 | 四辩 | 180 | summary
-正方四辩总结陈词 | 正方 | 四辩 | 180 | summary
+反方四辩总结 | 反方 | 四辩 | 180 | summary
+正方四辩总结 | 正方 | 四辩 | 180 | summary
 """
 
 _SIDE_MAP = {

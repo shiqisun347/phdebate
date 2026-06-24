@@ -6,6 +6,7 @@ import importlib.util
 import io
 import re
 import zipfile
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,9 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.main import FRONTEND_ASSETS, FRONTEND_INDEX
 from app.services.agent_gateway import AgentGateway, AgentGatewayError
+from app.services.fallback_plan import fallback_topic_key, load_fallback_plan, text_for_phase
 from app.services.match_store import store
+from app.services.ruleset_store import FLOW_TEMPLATE, parse_flow, ruleset_store
 from app.services.xfyun_gateway import ASRResult, TTSResult, XfyunGatewayError
 
 
@@ -75,6 +78,92 @@ def test_health() -> None:
     assert response.json()["ok"] is True
 
 
+def test_standard_ruleset_template_includes_third_debater_before_free_debate() -> None:
+    names = [item["name"] for item in parse_flow(FLOW_TEMPLATE)["nodes"]]
+
+    assert names == [
+        "正方一辩立论",
+        "反方一辩立论",
+        "正方二辩陈词",
+        "反方二辩陈词",
+        "正方三辩陈词",
+        "反方三辩陈词",
+        "自由辩论",
+        "反方四辩总结",
+        "正方四辩总结",
+    ]
+    assert "正方三辩陈词" in names
+    assert "反方三辩陈词" in names
+    assert names.index("正方三辩陈词") < names.index("自由辩论")
+    assert names.index("反方三辩陈词") < names.index("自由辩论")
+
+
+def test_ruleset_phase_conversion_preserves_explicit_phase_ids() -> None:
+    phases = store._phases_from_ruleset(
+        {
+            "flow": [
+                {
+                    "id": "phase_custom_aff3",
+                    "key": "aff_statement_3",
+                    "name": "正方三辩陈词",
+                    "side": "affirmative",
+                    "speaker": "三辩",
+                    "duration_seconds": 90,
+                    "phase_type": "statement",
+                }
+            ]
+        }
+    )
+
+    assert phases[0]["id"] == "phase_custom_aff3"
+    assert phases[0]["speaker_seat"] == 3
+
+
+def test_ruleset_update_applies_times_to_current_match_without_replacing_phase_ids() -> None:
+    original = ruleset_store.get("ruleset_standard_4v4")
+    assert original is not None
+    try:
+        created = client.post(
+            "/api/matches",
+            json={"title": "赛制同步测试", "topic": "测试辩题", "ruleset_id": "ruleset_standard_4v4"},
+        )
+        assert created.status_code == 200, created.text
+        snapshot = client.get("/api/matches/current").json()["data"]
+        first_phase_id = snapshot["phases"][0]["id"]
+        assert snapshot["phases"][0]["duration_seconds"] == 180
+        started_match = client.post("/api/matches/current/start")
+        assert started_match.status_code == 200, started_match.text
+        started = client.post(f"/api/matches/current/phases/{first_phase_id}/start")
+        assert started.status_code == 200, started.text
+
+        flow = deepcopy(original["flow"])
+        flow[0]["duration_seconds"] = 120
+        free_node = next(item for item in flow if item["phase_type"] == "free_debate")
+        free_node["side_total_seconds"] = 90
+        free_node["turn_seconds"] = 12
+        free_node["duration_seconds"] = 180
+
+        updated = client.patch(
+            "/api/admin/rulesets/ruleset_standard_4v4",
+            json={**original, "flow": flow},
+        )
+
+        assert updated.status_code == 200, updated.text
+        applied = updated.json()["data"]["applied_current_match"]
+        assert applied["applied"] is True
+        data = client.get("/api/matches/current").json()["data"]
+        assert data["phases"][0]["id"] == first_phase_id
+        assert data["phases"][0]["duration_seconds"] == 120
+        free_phase = next(item for item in data["phases"] if item["phase_type"] == "free_debate")
+        assert free_phase["duration_seconds"] == 180
+        assert free_phase["side_total_seconds"] == 90
+        assert free_phase["turn_seconds"] == 12
+        clocks = {clock["name"]: clock for clock in data["clocks"]}
+        assert clocks["main"]["total_seconds"] == 120
+    finally:
+        ruleset_store.update("ruleset_standard_4v4", original)
+
+
 def test_streaming_tts_splits_long_prefix_on_soft_break(monkeypatch) -> None:
     monkeypatch.setenv("PHDEBATE_TTS_EARLY_SEGMENT_CHARS", "48")
     text = "我们首先要明确今天的争议焦点并不是技术本身是否有价值，而是它是否应该成为所有人必须掌握的基础能力，后续论证还在继续生成"
@@ -119,18 +208,18 @@ def test_streaming_tts_first_segment_starts_early(monkeypatch) -> None:
     assert seg_mid == ""  # 还没遇到句末 → 不切
 
 
-def test_local_qwen_tts_preserves_parallel_synthesis_by_default(monkeypatch) -> None:
+def test_local_qwen_tts_uses_sequential_stable_synthesis_by_default(monkeypatch) -> None:
     from app.services.integration_config import integration_config
 
     monkeypatch.delenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", raising=False)
     integration_config.config["tts"]["provider"] = "local_qwen"
-    assert store._tts_sentence_concurrency() == 4
+    assert store._tts_sentence_concurrency() == 1
 
     integration_config.config["tts"]["provider"] = "alicloud"
-    assert store._tts_sentence_concurrency() == 4
+    assert store._tts_sentence_concurrency() == 1
 
     integration_config.config["tts"]["provider"] = "local_qwen"
-    monkeypatch.setenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "3")
+    integration_config.config["tts"]["settings"]["sentence_concurrency"] = 3
     assert store._tts_sentence_concurrency() == 3
 
 
@@ -162,11 +251,12 @@ def test_tts_speech_profile_is_stable_for_same_speaker(monkeypatch) -> None:
     assert first.options["voice"] == "dylan"
     assert first.options["model"] == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert first.options["seed"] == second.options["seed"]
-    assert first.options["speech_rate"] == 1.48
-    assert first.options["volume"] == 74
+    assert first.options["speech_rate"] == 1.4
+    assert first.options["volume"] == 70
     assert first.options["pitch_rate"] == 1.0
-    assert first.options["temperature"] == 0.18
-    assert first.options["top_p"] == 0.65
+    assert first.options["temperature"] == 0.05
+    assert first.options["top_p"] == 0.5
+    assert first.options["strict_payload"] is True
     assert "不要抑扬顿挫" in first.options["instructions"]
     assert first.options["seed"] != other_speaker.options["seed"]
 
@@ -188,6 +278,56 @@ def test_fallback_status_loads_history_and_reports_agent_items(monkeypatch, tmp_
     assert any(item["phase_name"] == "正方二辩陈词" and item["text_loaded"] for item in data["agent_phase_items"])
     assert len(data["free_debate_items"]) == 2
     assert data["missing_audio_count"] >= len(data["self_intro_items"])
+
+
+def test_fallback_topic_specific_histories_are_selected(monkeypatch) -> None:
+    monkeypatch.delenv("PHDEBATE_FALLBACK_HISTORY_FILE", raising=False)
+
+    copyright_plan = load_fallback_plan("AI生成内容应该不应该享有版权保护?")
+    persona_plan = load_fallback_plan("给AI赋予人格设定是好事还是坏事?")
+    programming_plan = load_fallback_plan("AI时代，我们应该培养编程思维/提问思维")
+
+    assert fallback_topic_key("AI生成内容应该不应该享有版权保护?") == "ai_copyright"
+    assert fallback_topic_key("给AI赋予人格设定是好事还是坏事?") == "ai_persona"
+    assert copyright_plan.topic_key == "ai_copyright"
+    assert persona_plan.topic_key == "ai_persona"
+    assert programming_plan.topic_key == "programming"
+    assert "版权" in copyright_plan.sections["正方一辩立论"].text
+    assert "人格设定" in persona_plan.sections["正方一辩立论"].text
+
+
+def test_fallback_phase_title_synonyms_match_history_sections(monkeypatch) -> None:
+    monkeypatch.delenv("PHDEBATE_FALLBACK_HISTORY_FILE", raising=False)
+    plan = load_fallback_plan("AI生成内容应该不应该享有版权保护?")
+
+    assert text_for_phase(plan, {"name": "正方一辩开篇立论"}).startswith("尊敬的评委")
+    assert text_for_phase(plan, {"name": "反方二辩驳论"}).startswith("谢谢主席")
+    assert text_for_phase(plan, {"name": "反方四辩总结陈词"}).startswith("谢谢主席")
+    assert text_for_phase(plan, {"name": "正方四辩总结陈词"}).startswith("谢谢主席")
+
+
+def test_fallback_audio_ids_are_isolated_by_topic(monkeypatch) -> None:
+    monkeypatch.delenv("PHDEBATE_FALLBACK_HISTORY_FILE", raising=False)
+    original_topic = store.snapshot["match"].get("topic", "")
+    try:
+        store.snapshot["match"]["topic"] = "AI生成内容应该不应该享有版权保护?"
+        copyright_speech_id = store._fallback_speech_id("phase_aff_statement_2", "spk_aff_2")
+        copyright_free_id = store._fallback_speech_id("phase_free_debate", "spk_aff_2", kind="free", turn_index=1)
+        copyright_intro_id = store._fallback_speech_id("phase_aff_statement_2", "spk_aff_2", kind="self_intro")
+
+        store.snapshot["match"]["topic"] = "给AI赋予人格设定是好事还是坏事?"
+        persona_speech_id = store._fallback_speech_id("phase_aff_statement_2", "spk_aff_2")
+
+        store.snapshot["match"]["topic"] = "AI时代，我们应该培养编程思维/提问思维"
+        programming_speech_id = store._fallback_speech_id("phase_aff_statement_2", "spk_aff_2")
+
+        assert copyright_speech_id == "fallback_ai_copyright_speech_phase_aff_statement_2_spk_aff_2"
+        assert copyright_free_id == "fallback_ai_copyright_free_phase_free_debate_spk_aff_2_1"
+        assert copyright_intro_id == "fallback_self_intro_phase_aff_statement_2_spk_aff_2"
+        assert persona_speech_id == "fallback_ai_persona_speech_phase_aff_statement_2_spk_aff_2"
+        assert programming_speech_id == "fallback_speech_phase_aff_statement_2_spk_aff_2"
+    finally:
+        store.snapshot["match"]["topic"] = original_topic
 
 
 def test_fallback_phase_select_fills_missing_history(monkeypatch, tmp_path) -> None:
@@ -517,6 +657,26 @@ def test_fallback_free_debate_waits_between_ai_turns(monkeypatch, tmp_path) -> N
         ("spk_neg_1", 2),
     ]
     assert second_started_at - first_started_at >= 0.045
+
+
+def test_fallback_phase_select_free_debate_starts_as_normal_mode(monkeypatch, tmp_path) -> None:
+    history = tmp_path / "完整兜底历史.md"
+    history.write_text(
+        "【正方一辩立论】\n正方一辩兜底。\n\n"
+        "【自由辩论】\n【正方三辩】：正方三辩编号发言。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHDEBATE_FALLBACK_HISTORY_FILE", str(history))
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    client.post("/api/matches/match_001/start")
+
+    selected = client.post("/api/matches/match_001/fallback/phases/phase_free_debate/select")
+
+    assert selected.status_code == 200, selected.text
+    data = selected.json()["data"]
+    assert data["match"]["current_phase_id"] == "phase_free_debate"
+    assert data["free_debate"]["assignment_mode"] == "teammate_control"
+    assert data["free_debate"]["fallback_mode"] is False
 
 
 def test_production_auth_requires_read_token_and_keeps_vote_options_public(monkeypatch) -> None:
@@ -2646,6 +2806,114 @@ def test_free_debate_single_turn_defaults_to_15_seconds(monkeypatch) -> None:
     assert turn_clock["total_seconds"] == 15
 
 
+def test_free_debate_clocks_start_for_ruleset_generated_phase_id(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    free_phase = next(item for item in store.snapshot["phases"] if item["id"] == "phase_free_debate")
+    free_phase["id"] = "phase_5_phase_5"
+    free_phase["phase_key"] = "phase_5"
+
+    started_phase = client.post("/api/matches/match_001/phases/phase_5_phase_5/start")
+    assert started_phase.status_code == 200, started_phase.text
+    started_speech = client.post("/api/matches/match_001/speakers/spk_aff_1/start-speaking")
+    assert started_speech.status_code == 200, started_speech.text
+
+    data = started_speech.json()["data"]
+    clocks = {item["name"]: item for item in data["clocks"]}
+    assert data["match"]["live_mode"] == "free"
+    assert clocks["turn"]["state"] == "running"
+    assert clocks["affirmative_total"]["state"] == "running"
+    assert clocks["negative_total"]["state"] == "paused"
+
+
+def test_single_speaker_phase_follows_current_role_assignment() -> None:
+    _use_embedded_mock_agent("spk_aff_2")
+    converted = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_1",
+        json={"speaker_type": "agent", "agent_config_id": "agent_spk_aff_2"},
+    )
+    assert converted.status_code == 200, converted.text
+    started = client.post("/api/matches/match_001/start")
+    assert started.status_code == 200, started.text
+    phase = client.post("/api/matches/match_001/phases/phase_aff_constructive_1/start")
+    assert phase.status_code == 200, phase.text
+
+    human_start = client.post("/api/matches/match_001/speakers/spk_aff_1/start-speaking")
+    assert human_start.status_code == 409
+    assert human_start.json()["error"]["code"] == "invalid_speaker"
+    active = store.snapshot.get("current_speech") or {}
+    if active.get("speaker_id") != "spk_aff_1":
+        store.ensure_agent_speaker_for_current_phase("spk_aff_1")
+
+    client.post("/api/matches/match_001/speeches/current/reset", json={"reason": "test_role_switch"})
+    reverted = client.patch("/api/matches/match_001/speakers/spk_aff_1", json={"speaker_type": "human"})
+    assert reverted.status_code == 200, reverted.text
+    agent_start = client.post("/api/matches/match_001/speakers/spk_aff_1/start-agent-speaking")
+    assert agent_start.status_code == 409
+    assert agent_start.json()["error"]["code"] == "invalid_speaker"
+    human_start = client.post("/api/matches/match_001/speakers/spk_aff_1/start-speaking")
+    assert human_start.status_code == 200, human_start.text
+    assert human_start.json()["data"]["current_speech"]["speaker_id"] == "spk_aff_1"
+
+
+def test_free_debate_all_agent_side_auto_handles_without_human_skip(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "0.02")
+    _use_embedded_mock_agent("spk_aff_2")
+    _use_embedded_mock_agent("spk_aff_4")
+    for speaker_id, config_id in (("spk_aff_1", "agent_spk_aff_2"), ("spk_aff_3", "agent_spk_aff_4")):
+        response = client.patch(
+            f"/api/matches/match_001/speakers/{speaker_id}",
+            json={"speaker_type": "agent", "agent_config_id": config_id},
+        )
+        assert response.status_code == 200, response.text
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")
+        await asyncio.sleep(0.08)
+        return await store.get_snapshot()
+
+    data = asyncio.run(scenario())
+    assert data["free_debate"]["current_turn_side"] == "affirmative"
+    assert data["free_debate"].get("auto_handled", {}).get("affirmative_1") in {
+        "spk_aff_1",
+        "spk_aff_2",
+        "spk_aff_3",
+        "spk_aff_4",
+    }
+
+
+def test_free_debate_agent_pending_keeps_dual_countdown_mode(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+
+    async def slow_stream(_endpoint, _payload, _fallback, config=None):
+        await asyncio.sleep(0.2)
+        yield {"type": "final", "content": "自由辩论中，AI 接管发言，继续回应对方观点。"}
+
+    monkeypatch.setattr(store.agent_gateway, "stream_speech", slow_stream)
+
+    async def scenario():
+        await store.start_phase("phase_free_debate")
+        task = asyncio.create_task(store.run_agent_speech("spk_aff_2"))
+        try:
+            for _ in range(20):
+                snap = await store.get_snapshot()
+                if snap.get("current_speech"):
+                    return snap
+                await asyncio.sleep(0.01)
+            return await store.get_snapshot()
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    data = asyncio.run(scenario())
+    assert data["match"]["live_mode"] == "free"
+    assert data["current_speech"]["speaker_id"] == "spk_aff_2"
+    assert data["current_speech"]["state"] == "thinking"
+    assert {clock["name"] for clock in data["clocks"]} == {"affirmative_total", "turn", "negative_total"}
+
+
 def test_free_debate_one_side_total_exhausted_other_side_continues(monkeypatch) -> None:
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
     phase = client.post("/api/matches/match_001/phases/phase_free_debate/start")
@@ -3390,8 +3658,8 @@ def test_agent_output_budget_is_deterministic_and_scales() -> None:
     base = store._agent_output_budget(180, 1.0)
     assert base["max_token"] >= 64
     assert base["target_chars"] >= 40
-    assert base["raw_chars_per_second"] == 3.55
-    assert base["screen_playback_rate"] == 1.38
+    assert base["raw_chars_per_second"] == 5.4
+    assert base["screen_playback_rate"] == 1.0
     assert base["speech_time_factor"] == 0.78
     # Deterministic: same inputs → same output.
     assert store._agent_output_budget(180, 1.0) == base
@@ -3427,11 +3695,11 @@ def test_agent_payload_carries_max_token_and_message_history() -> None:
     assert payload["target_chars"] >= 40
     assert payload["max_len"] == payload["target_chars"]
     assert payload["max_length"] == payload["target_chars"]
-    assert payload["other_info"]["speech_rate"] == 1.48
-    assert payload["other_info"]["tts_volume"] == 74
+    assert payload["other_info"]["speech_rate"] == 1.4
+    assert payload["other_info"]["tts_volume"] == 70
     assert payload["other_info"]["speech_time_factor"] == 0.78
-    assert payload["other_info"]["raw_chars_per_second"] == 3.55
-    assert payload["other_info"]["screen_playback_rate"] == 1.38
+    assert payload["other_info"]["raw_chars_per_second"] == 5.4
+    assert payload["other_info"]["screen_playback_rate"] == 1.0
     # debate_history matches 请求体(1).json: "message" key, speaker is side+seat only.
     for stage in payload["debate_history"]:
         assert "message" in stage and "content" not in stage

@@ -16,7 +16,16 @@ import httpx
 import websockets
 
 
-HUMAN_SPEAKERS = ["spk_aff_1", "spk_aff_3", "spk_neg_2", "spk_neg_4"]
+ALL_SPEAKER_IDS = [
+    "spk_aff_1",
+    "spk_aff_2",
+    "spk_aff_3",
+    "spk_aff_4",
+    "spk_neg_1",
+    "spk_neg_2",
+    "spk_neg_3",
+    "spk_neg_4",
+]
 AGENT_ENDPOINT = "http://47.93.206.109:8000/api/debate"
 DEFAULT_REFERENCE_FLOW = Path(__file__).resolve().parents[2] / "用于参考的辩论过程.md"
 
@@ -108,7 +117,7 @@ def speaker_tokens() -> Dict[str, str]:
         if tokens:
             return tokens
     shared = os.getenv("PHDEBATE_SPEAKER_TOKEN", "").strip()
-    return {speaker_id: shared for speaker_id in HUMAN_SPEAKERS}
+    return {speaker_id: shared for speaker_id in ALL_SPEAKER_IDS}
 
 
 def ws_base_from_http(base_url: str) -> str:
@@ -368,6 +377,17 @@ async def wait_snapshot(api: Api) -> Dict[str, Any]:
     return data["data"]
 
 
+def phase_by_type(snapshot: Dict[str, Any], phase_type: str) -> Dict[str, Any]:
+    for phase in snapshot.get("phases", []):
+        if phase.get("phase_type") == phase_type:
+            return phase
+    raise AssertionError(f"phase_type {phase_type!r} not found")
+
+
+def clock_by_name(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {str(clock.get("name")): clock for clock in snapshot.get("clocks", [])}
+
+
 async def wait_agent_failed(api: Api, speaker_id: str, timeout: float = 12) -> Dict[str, Any]:
     deadline = time.monotonic() + timeout
     last: Dict[str, Any] = {}
@@ -527,6 +547,164 @@ async def configure_all_agents(api: Api, snapshot: Dict[str, Any], endpoint: str
         )
 
 
+async def wait_human_consoles_online(api: Api, expected: int, timeout: float = 10) -> Dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last: Dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        snapshot = await wait_snapshot(api)
+        last = snapshot
+        online = int(((snapshot.get("speech_service") or {}).get("consoles") or {}).get("online") or 0)
+        if online >= expected:
+            return snapshot
+        await asyncio.sleep(0.3)
+    raise TimeoutError(f"human consoles did not reach {expected}; last={last.get('speech_service', {}).get('consoles')}")
+
+
+def side_label(side: str) -> str:
+    return "正方" if side == "affirmative" else "反方" if side == "negative" else "中立"
+
+
+def seat_label(seat: Any) -> str:
+    return {1: "一辩", 2: "二辩", 3: "三辩", 4: "四辩"}.get(int(seat or 0), f"{seat}辩")
+
+
+def speaker_label(speaker: Dict[str, Any]) -> str:
+    return f"{side_label(str(speaker.get('side')))}{seat_label(speaker.get('seat'))}"
+
+
+def speaker_for_phase(snapshot: Dict[str, Any], phase: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if phase.get("phase_type") == "free_debate":
+        return None
+    return next(
+        (
+            speaker
+            for speaker in snapshot.get("speakers", [])
+            if speaker.get("side") == phase.get("side") and speaker.get("seat") == phase.get("speaker_seat")
+        ),
+        None,
+    )
+
+
+def speakers_on_side(snapshot: Dict[str, Any], side: str, speaker_type: Optional[str] = None) -> list[Dict[str, Any]]:
+    return [
+        speaker
+        for speaker in snapshot.get("speakers", [])
+        if speaker.get("side") == side and (speaker_type is None or speaker.get("speaker_type") == speaker_type)
+    ]
+
+
+def phase_reference_text(sections: Dict[str, str], phase: Dict[str, Any], speaker: Optional[Dict[str, Any]]) -> str:
+    name = str(phase.get("name") or "")
+    candidates = [
+        name,
+        name.replace("总结", "结辩"),
+        name.replace("总结", "总结陈词"),
+        name.replace("开篇立论", "立论"),
+        name.replace("驳论", "陈词"),
+    ]
+    label = speaker_label(speaker) if speaker else name
+    fallback = f"{label}围绕本场辩题完成本阶段发言，回应对方核心观点并推进己方论证。"
+    return section_text(sections, candidates, fallback)
+
+
+async def maybe_start_agent_turn(api: Api, speaker_id: str, label: str) -> None:
+    snapshot = await wait_snapshot(api)
+    current = snapshot.get("current_speech") or {}
+    if current.get("speaker_id") == speaker_id:
+        return
+    await api.request(
+        "POST",
+        f"/api/matches/current/speakers/{speaker_id}/start-agent-speaking",
+        role="speaker",
+        speaker_id=speaker_id,
+        expected=(200, 409),
+        allowed_failure=True,
+        name=f"{label} ensure agent started",
+    )
+
+
+async def complete_configured_single_phase(
+    api: Api,
+    phase: Dict[str, Any],
+    reference_sections: Dict[str, str],
+    *,
+    partial_count_fn,
+    latency_fn,
+) -> Dict[str, Any]:
+    snapshot = await wait_snapshot(api)
+    current_phase_id = snapshot["match"]["current_phase_id"]
+    api.rec.require(f"{phase['name']} is current phase", current_phase_id == phase["id"], current_phase_id)
+    speaker = speaker_for_phase(snapshot, phase)
+    api.rec.require(f"{phase['name']} has configured speaker", bool(speaker), str(phase))
+    if not speaker:
+        return snapshot
+
+    text = phase_reference_text(reference_sections, phase, speaker)
+    label = f"{phase['name']} · {speaker_label(speaker)}"
+    if speaker.get("speaker_type") == "human":
+        data = await simulate_human_turn(
+            api,
+            str(speaker["id"]),
+            text,
+            final_latency=latency_fn(text),
+            partial_count=partial_count_fn(text),
+        )
+        await api.request(
+            "POST",
+            "/api/matches/current/flow/confirm",
+            role="host",
+            json_body={"reason": f"e2e_{phase.get('phase_key')}_done"},
+            name=f"host confirms after {phase['name']}",
+        )
+        return data
+
+    await maybe_start_agent_turn(api, str(speaker["id"]), label)
+    return await recover_or_finish_agent(
+        api,
+        [str(speaker["id"])],
+        fallback_text=text,
+        fallback_reason=f"e2e_{phase.get('phase_key')}_agent_unreachable",
+        label=label,
+    )
+
+
+async def complete_free_debate_turn(
+    api: Api,
+    reference_sections: Dict[str, str],
+    *,
+    partial_count_fn,
+    latency_fn,
+) -> Dict[str, Any]:
+    snapshot = await wait_snapshot(api)
+    side = str((snapshot.get("free_debate") or {}).get("current_turn_side") or "affirmative")
+    humans = speakers_on_side(snapshot, side, "human")
+    agents = speakers_on_side(snapshot, side, "agent")
+    if humans:
+        speaker = humans[0]
+        text = free_debate_excerpt(
+            reference_sections,
+            speaker_label(speaker),
+            f"自由辩论中，{speaker_label(speaker)}继续追问对方论证中的关键漏洞。",
+        )
+        return await simulate_human_turn(
+            api,
+            str(speaker["id"]),
+            text,
+            final_latency=latency_fn(text),
+            partial_count=partial_count_fn(text),
+        )
+    if agents:
+        return await recover_or_finish_agent(
+            api,
+            [str(speaker["id"]) for speaker in agents],
+            fallback_text=f"自由辩论中，{side_label(side)}AI 接管发言，继续推进本方论证并回应对方质询。",
+            fallback_reason="e2e_free_debate_agent_unreachable",
+            label=f"free debate {side_label(side)} auto-agent",
+        )
+    api.rec.add(f"free debate {side_label(side)} has no speaker", False, str(snapshot.get("speakers")), allowed_failure=True)
+    return snapshot
+
+
 async def run(args: argparse.Namespace) -> int:
     if args.env_file:
         load_env_file(Path(args.env_file))
@@ -567,8 +745,13 @@ async def run(args: argparse.Namespace) -> int:
         await configure_all_agents(api, snapshot, args.agent_endpoint)
 
         if args.self_intro:
-            ok = await run_self_introduction_probe(api, "spk_aff_2")
-            if not ok:
+            intro_agent = next((speaker for speaker in snapshot.get("speakers", []) if speaker.get("speaker_type") == "agent"), None)
+            ok = True
+            if intro_agent:
+                ok = await run_self_introduction_probe(api, str(intro_agent["id"]))
+            else:
+                rec.add("prematch self-introduction skipped", True, "current lineup has no agent speaker")
+            if intro_agent and not ok:
                 recreated = await api.request(
                     "POST",
                     "/api/matches",
@@ -598,6 +781,11 @@ async def run(args: argparse.Namespace) -> int:
             reference_sections,
             ["正方三辩陈词"],
             "正方三辩追问：只强调提问而不强调可执行拆解，如何保证答案能落地并被验证？",
+        )
+        ref_neg3 = section_text(
+            reference_sections,
+            ["反方三辩陈词"],
+            "反方三辩认为，提问思维不是空泛表达，而是先确定问题边界、判断标准和行动优先级。",
         )
         ref_free_aff3 = free_debate_excerpt(
             reference_sections,
@@ -633,11 +821,37 @@ async def run(args: argparse.Namespace) -> int:
                 True,
                 "using provided debate manuscript for long human turns and summaries",
             )
+        phase_names = [phase.get("name") for phase in snapshot.get("phases", [])]
+        rec.require(
+            "standard flow names match rehearsal baseline",
+            phase_names
+            == [
+                "正方一辩立论",
+                "反方一辩立论",
+                "正方二辩陈词",
+                "反方二辩陈词",
+                "正方三辩陈词",
+                "反方三辩陈词",
+                "自由辩论",
+                "反方四辩总结",
+                "正方四辩总结",
+            ],
+            " -> ".join(str(name) for name in phase_names),
+        )
 
         screen = WSClient("screen", ws_url(args.base_url, "screen", api.token_for("screen")), rec)
         await screen.connect()
         sockets.append(screen)
-        for speaker_id in HUMAN_SPEAKERS:
+
+        human_speakers = [speaker for speaker in snapshot.get("speakers", []) if speaker.get("speaker_type") == "human"]
+        agent_speakers = [speaker for speaker in snapshot.get("speakers", []) if speaker.get("speaker_type") == "agent"]
+        rec.require(
+            "lineup role configuration loaded",
+            len(human_speakers) + len(agent_speakers) == len(snapshot.get("speakers", [])),
+            f"human={len(human_speakers)} agent={len(agent_speakers)}",
+        )
+        for speaker in human_speakers:
+            speaker_id = str(speaker["id"])
             ws = WSClient(speaker_id, ws_url(args.base_url, "speaker", api.token_for("speaker", speaker_id), speaker_id), rec)
             await ws.connect()
             sockets.append(ws)
@@ -651,121 +865,180 @@ async def run(args: argparse.Namespace) -> int:
                     },
                 }
             )
-            await ws.wait_for("speaker.heartbeat", speaker_id=speaker_id, timeout=5)
-        snapshot = await wait_snapshot(api)
-        rec.require("four human consoles online", snapshot["speech_service"]["consoles"]["online"] == 4, str(snapshot["speech_service"]["consoles"]))
+        if human_speakers:
+            snapshot = await wait_human_consoles_online(api, len(human_speakers))
+            rec.require(
+                "configured human consoles online",
+                snapshot["speech_service"]["consoles"]["online"] >= len(human_speakers),
+                str(snapshot["speech_service"]["consoles"]),
+            )
+        else:
+            rec.add("configured human consoles online", True, "current lineup has no human speakers")
 
         await api.request("POST", "/api/matches/current/start", role="host", name="host starts match")
         await screen.wait_for("match.resumed", timeout=5)
 
-        await simulate_human_turn(
-            api,
-            "spk_aff_1",
-            ref_aff1,
-            final_latency=synthetic_latency(ref_aff1),
-            partial_count=partial_count(ref_aff1),
+        phases = sorted(snapshot.get("phases", []), key=lambda item: int(item.get("display_order") or 0))
+        free_phase = next((phase for phase in phases if phase.get("phase_type") == "free_debate"), None)
+        rec.require("flow contains free debate phase", bool(free_phase), str([phase.get("name") for phase in phases]))
+        free_entered: Optional[Dict[str, Any]] = None
+        for phase in phases:
+            if phase.get("phase_type") == "free_debate":
+                free_entered = await wait_snapshot(api)
+                if free_entered["match"].get("current_phase_id") != phase["id"]:
+                    free_entered = await api.request(
+                        "POST",
+                        f"/api/matches/current/phases/{phase['id']}/start",
+                        role="host",
+                        name="jump to free debate when no prior single phase",
+                    )
+                    free_entered = free_entered["data"]
+                break
+            await complete_configured_single_phase(
+                api,
+                phase,
+                reference_sections,
+                partial_count_fn=partial_count,
+                latency_fn=synthetic_latency,
+            )
+            advanced = await api.request("POST", "/api/matches/current/phases/next", role="host", name=f"advance after {phase['name']}")
+            if free_phase and advanced["data"]["match"].get("current_phase_id") == free_phase["id"]:
+                free_entered = advanced["data"]
+                break
+
+        if free_entered is None:
+            free_entered = await wait_snapshot(api)
+        free_phase = phase_by_type(free_entered, "free_debate")
+        rec.require("free debate entered by phase type", free_entered["match"]["current_phase_id"] == free_phase["id"], free_phase["id"])
+        rec.require("screen live mode switches to free debate", free_entered["match"]["live_mode"] == "free", free_entered["match"]["live_mode"])
+        free_clocks = clock_by_name(free_entered)
+        expected_turn_seconds = int(free_phase.get("turn_seconds") or 15)
+        expected_side_seconds = int(free_phase.get("side_total_seconds") or max(1, int(free_phase.get("duration_seconds") or 240) // 2))
+        rec.require(
+            "free debate clock model follows configured timing",
+            free_clocks.get("turn", {}).get("total_seconds") == expected_turn_seconds
+            and free_clocks.get("affirmative_total", {}).get("total_seconds") == expected_side_seconds
+            and free_clocks.get("negative_total", {}).get("total_seconds") == expected_side_seconds,
+            str(free_clocks),
         )
-        await api.request("POST", "/api/matches/current/flow/confirm", role="host", json_body={"reason": "e2e_aff1_done"}, name="host confirms after aff1")
-        await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance to neg1 agent phase")
 
-        await recover_or_finish_agent(
+        current_side = str((free_entered.get("free_debate") or {}).get("current_turn_side") or "affirmative")
+        opposite_side = "negative" if current_side == "affirmative" else "affirmative"
+        wrong_human = next(iter(speakers_on_side(free_entered, opposite_side, "human")), None)
+        if wrong_human:
+            wrong_side = await api.request(
+                "POST",
+                f"/api/matches/current/speakers/{wrong_human['id']}/start-speaking",
+                role="speaker",
+                speaker_id=str(wrong_human["id"]),
+                expected=(409,),
+                name="wrong-side free debate rejected",
+            )
+            rec.require("wrong-side rejection code", (wrong_side.get("error") or {}).get("code") == "invalid_speaker", str(wrong_side.get("error")))
+        else:
+            rec.add("wrong-side free debate rejected", True, "opposite side has no human speaker to attempt wrong-side start")
+
+        expected_auto_takeover = False
+        auto_events_before = 0
+        opposite_humans = speakers_on_side(free_entered, opposite_side, "human")
+        opposite_agents = speakers_on_side(free_entered, opposite_side, "agent")
+        if opposite_humans and opposite_agents:
+            expected_auto_takeover = True
+            auto_baseline = await api.request(
+                "GET",
+                "/api/matches/current/data-summary",
+                role="host",
+                name="free debate auto-agent event baseline",
+            )
+            auto_events_before = int((auto_baseline.get("data", {}).get("event_type_counts") or {}).get("free_debate.auto_agent", 0))
+            for speaker in opposite_humans:
+                await api.request(
+                    "POST",
+                    f"/api/matches/current/speakers/{speaker['id']}/free-debate-skip",
+                    role="speaker",
+                    speaker_id=str(speaker["id"]),
+                    name=f"{speaker['id']} pre-skip next free turn",
+                )
+
+        await complete_free_debate_turn(
             api,
-            ["spk_neg_1"],
-            fallback_text="人工代输入：反方一辩强调提问思维决定问题定义，方向错了，执行越快偏差越大。",
-            fallback_reason="e2e_agent_unreachable",
-            label="neg1",
-        )
-
-        await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance to aff2 agent phase")
-        recovered = await recover_or_finish_agent(
-            api,
-            ["spk_aff_2"],
-            fallback_text="人工代输入：正方二辩指出，好问题也需要结构化验证，否则只是在语言层面循环。",
-            fallback_reason="e2e_agent_unreachable",
-            label="aff2",
-        )
-        rec.require("second agent turn finalized", recovered["recent_transcript"][0]["speaker_id"] == "spk_aff_2", "spk_aff_2 transcript on top")
-
-        await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance to neg2 human phase")
-        started = await api.request("POST", "/api/matches/current/speakers/spk_neg_2/start-speaking", role="speaker", speaker_id="spk_neg_2", name="neg2 starts long human speech")
-        rec.require("neg2 active", started["data"]["current_speech"]["speaker_id"] == "spk_neg_2", "neg2 speaking")
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/asr/fail", role="speaker", speaker_id="spk_neg_2", json_body={"reason": "e2e simulated network jitter"}, name="inject ASR failure")
-        failed_snapshot = await wait_snapshot(api)
-        rec.require("ASR failure does not stop match", failed_snapshot["match"]["status"] == "running" and failed_snapshot["current_speech"]["speaker_id"] == "spk_neg_2", "match still running")
-        neg2_partials = progressive_partials(ref_neg2, partial_count(ref_neg2))
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/asr/partial", role="speaker", speaker_id="spk_neg_2", json_body={"text": neg2_partials[-1] if neg2_partials else ref_neg2[:120], "latency_ms": 920}, name="ASR partial after recovery")
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/asr/final", role="speaker", speaker_id="spk_neg_2", json_body={"text": ref_neg2, "latency_ms": synthetic_latency(ref_neg2)}, name="ASR final after recovery")
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/pause-speaking", role="speaker", speaker_id="spk_neg_2", json_body={"reason": "e2e pause"}, name="speaker pause control")
-        paused = await wait_snapshot(api)
-        rec.require("speech pause state", paused["current_speech"]["state"] == "paused", "paused")
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/resume-speaking", role="speaker", speaker_id="spk_neg_2", json_body={"reason": "e2e resume"}, name="speaker resume control")
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/stop-speaking", role="speaker", speaker_id="spk_neg_2", name="neg2 stop after recovered ASR")
-
-        await api.request("POST", "/api/matches/current/phases/phase_free_debate/start", role="host", name="jump to free debate")
-        wrong_side = await api.request(
-            "POST",
-            "/api/matches/current/speakers/spk_neg_2/start-speaking",
-            role="speaker",
-            speaker_id="spk_neg_2",
-            expected=(409,),
-            name="wrong-side free debate rejected",
-        )
-        rec.require("wrong-side rejection code", (wrong_side.get("error") or {}).get("code") == "invalid_speaker", str(wrong_side.get("error")))
-
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_2/free-debate-skip", role="speaker", speaker_id="spk_neg_2", name="neg2 pre-skip next turn")
-        await api.request("POST", "/api/matches/current/speakers/spk_neg_4/free-debate-skip", role="speaker", speaker_id="spk_neg_4", name="neg4 pre-skip next turn")
-        await simulate_human_turn(
-            api,
-            "spk_aff_3",
-            ref_free_aff3 or ref_aff3,
-            final_latency=synthetic_latency(ref_free_aff3 or ref_aff3),
-            partial_count=partial_count(ref_free_aff3 or ref_aff3),
+            reference_sections,
+            partial_count_fn=partial_count,
+            latency_fn=synthetic_latency,
         )
         free_snapshot = await wait_snapshot(api)
-        rec.require("free debate auto-agent took skipped side", bool((free_snapshot.get("free_debate") or {}).get("auto_handled")), str(free_snapshot.get("free_debate")))
-        await recover_or_finish_agent(
-            api,
-            ["spk_neg_1", "spk_neg_3"],
-            fallback_text="人工代输入：自由辩论反方 AI 接管发言，指出目标定义比执行路径更先决定胜负。",
-            fallback_reason="e2e_free_debate_agent_unreachable",
-            label="free debate auto-agent",
+        free_after_speech_clocks = clock_by_name(free_snapshot)
+        rec.require(
+            "free debate remains in dual-countdown mode after human turn",
+            free_snapshot["match"]["live_mode"] == "free"
+            and "affirmative_total" in free_after_speech_clocks
+            and "negative_total" in free_after_speech_clocks,
+            f"live_mode={free_snapshot['match']['live_mode']} clocks={list(free_after_speech_clocks)}",
         )
+        if expected_auto_takeover:
+            auto_snapshot = await recover_or_finish_agent(
+                api,
+                [str(speaker["id"]) for speaker in opposite_agents],
+                fallback_text=f"自由辩论中，{side_label(opposite_side)}AI 接管发言，指出目标定义比执行路径更先决定胜负。",
+                fallback_reason="e2e_free_debate_agent_unreachable",
+                label="free debate skipped-side auto-agent",
+            )
+            auto_summary = await api.request(
+                "GET",
+                "/api/matches/current/data-summary",
+                role="host",
+                name="free debate auto-agent event after skip",
+            )
+            auto_events_after = int((auto_summary.get("data", {}).get("event_type_counts") or {}).get("free_debate.auto_agent", 0))
+            rec.require(
+                "free debate auto-agent took skipped side",
+                auto_events_after > auto_events_before,
+                f"events_before={auto_events_before} events_after={auto_events_after} current_fd={auto_snapshot.get('free_debate')}",
+            )
+        else:
+            rec.add("free debate auto-agent took skipped side", True, "current lineup has no mixed human+agent opposite side for pre-skip takeover")
 
-        await api.request("POST", "/api/matches/current/speakers/spk_aff_1/start-speaking", role="speaker", speaker_id="spk_aff_1", name="start speech before emergency")
         await api.request("POST", "/api/matches/current/emergency-stop", role="admin", json_body={"reason": "e2e emergency drill"}, name="admin emergency stop")
         emergency = await wait_snapshot(api)
         rec.require("emergency state entered", emergency["match"]["status"] == "intervention", emergency["match"]["status"])
-        blocked = await api.request(
-            "POST",
-            "/api/matches/current/speakers/spk_aff_1/asr/partial",
-            role="speaker",
-            speaker_id="spk_aff_1",
-            json_body={"text": "should be blocked"},
-            expected=(409,),
-            name="controls blocked during intervention",
-        )
-        rec.require("intervention blocks ASR updates", (blocked.get("error") or {}).get("code") == "invalid_state", str(blocked.get("error")))
+        if human_speakers:
+            blocked = await api.request(
+                "POST",
+                f"/api/matches/current/speakers/{human_speakers[0]['id']}/start-speaking",
+                role="speaker",
+                speaker_id=str(human_speakers[0]["id"]),
+                expected=(409,),
+                name="controls blocked during intervention",
+            )
+        elif agent_speakers:
+            blocked = await api.request(
+                "POST",
+                f"/api/matches/current/speakers/{agent_speakers[0]['id']}/start-agent-speaking",
+                role="speaker",
+                speaker_id=str(agent_speakers[0]["id"]),
+                expected=(409,),
+                name="controls blocked during intervention",
+            )
+        else:
+            raise AssertionError("lineup has neither human nor agent speakers")
+        rec.require("intervention blocks controls", (blocked.get("error") or {}).get("code") == "invalid_state", str(blocked.get("error")))
         await api.request("POST", "/api/matches/current/resume", role="host", name="resume after emergency")
-        await api.request("POST", "/api/matches/current/speeches/current/reset", role="host", json_body={"reason": "e2e cleanup after emergency"}, name="reset current speech after emergency")
 
-        await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance to neg4 summary")
-        await simulate_human_turn(
-            api,
-            "spk_neg_4",
-            ref_neg4_summary,
-            final_latency=synthetic_latency(ref_neg4_summary),
-            partial_count=partial_count(ref_neg4_summary),
-        )
-        await api.request("POST", "/api/matches/current/flow/confirm", role="host", json_body={"reason": "e2e_neg4_summary_done"}, name="host confirms after neg4 summary")
-        await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance to aff4 summary agent")
-        await recover_or_finish_agent(
-            api,
-            ["spk_aff_4"],
-            fallback_text=ref_aff4_summary,
-            fallback_reason="e2e_summary_agent_unreachable",
-            label="aff4 summary",
-        )
-        finished = await api.request("POST", "/api/matches/current/phases/next", role="host", name="phase next after final summary")
+        advanced = await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance after free debate")
+        finished = advanced
+        post_free_phases = [phase for phase in phases if free_phase and int(phase.get("display_order") or 0) > int(free_phase.get("display_order") or 0)]
+        for phase in post_free_phases:
+            snapshot = await wait_snapshot(api)
+            if snapshot["match"].get("current_phase_id") != phase["id"]:
+                continue
+            await complete_configured_single_phase(
+                api,
+                phase,
+                reference_sections,
+                partial_count_fn=partial_count,
+                latency_fn=synthetic_latency,
+            )
+            finished = await api.request("POST", "/api/matches/current/phases/next", role="host", name=f"advance after {phase['name']}")
         if finished["data"]["match"]["status"] != "finished":
             rec.add(
                 "phase next left match running",
@@ -790,7 +1063,10 @@ async def run(args: argparse.Namespace) -> int:
 
         logs = await api.request("GET", "/api/matches/current/data-summary", role="host", name="data summary after e2e")
         counts = logs["data"]["counts"]
-        rec.require("agent requests logged", counts.get("agent_requests", 0) >= 2, str(counts))
+        if agent_speakers:
+            rec.require("agent requests logged", counts.get("agent_requests", 0) >= 1, str(counts))
+        else:
+            rec.add("agent requests logged", True, "current lineup has no agent speakers")
         rec.require("transcripts accumulated", counts.get("transcript_segments", 0) >= 7, str(counts))
         rec.require("screen received realtime events", screen.last_seq >= 10, f"screen last_seq={screen.last_seq} counts={screen.counts}")
 

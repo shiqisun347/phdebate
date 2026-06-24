@@ -381,7 +381,9 @@ async def create_ruleset(body: Dict[str, Any], _principal: Principal = Depends(r
 @app.patch("/api/admin/rulesets/{ruleset_id}")
 async def update_ruleset(ruleset_id: str, body: Dict[str, Any], _principal: Principal = Depends(require_admin)) -> Dict[str, Any]:
     try:
-        return {"ok": True, "data": ruleset_store.update(ruleset_id, body or {})}
+        ruleset = ruleset_store.update(ruleset_id, body or {})
+        applied = await store.apply_ruleset_to_current_match(ruleset)
+        return {"ok": True, "data": {**ruleset, "applied_current_match": applied}}
     except KeyError:
         raise HTTPException(status_code=404, detail="ruleset not found")
 

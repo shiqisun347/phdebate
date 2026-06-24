@@ -20,6 +20,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from app.services.agent_gateway import AgentGateway, AgentGatewayError
 from app.services.fallback_plan import (
     FallbackPlan,
+    fallback_topic_key,
     label_for_speaker,
     load_fallback_plan,
     speaker_for_label,
@@ -562,8 +563,9 @@ class MatchStore:
             seat = self._seat_from_speaker_text(node.get("speaker", "")) if phase_type != "free_debate" else None
             key = node.get("key") or f"phase_{index}"
             duration = int(node.get("duration_seconds") or (240 if phase_type == "free_debate" else 180))
+            phase_id = str(node.get("id") or "").strip() or f"phase_{index}_{key}"
             phase = {
-                "id": f"phase_{index}_{key}",
+                "id": phase_id,
                 "phase_key": key,
                 "name": node.get("name") or f"环节{index}",
                 "phase_type": phase_type,
@@ -1452,6 +1454,87 @@ class MatchStore:
             "admin",
         )
 
+    async def apply_ruleset_to_current_match(self, ruleset: Dict[str, Any]) -> Dict[str, Any]:
+        generated = self._phases_from_ruleset(ruleset)
+        if not generated:
+            return {"applied": False, "reason": "empty_ruleset_flow", "updated_phase_count": 0}
+
+        async with self._lock:
+            match = self.snapshot.get("match", {})
+            ruleset_id = str(ruleset.get("id") or "")
+            if not ruleset_id or match.get("ruleset_id") != ruleset_id:
+                return {
+                    "applied": False,
+                    "reason": "not_current_match_ruleset",
+                    "current_ruleset_id": match.get("ruleset_id"),
+                    "ruleset_id": ruleset_id,
+                    "updated_phase_count": 0,
+                }
+
+            existing = sorted(self.snapshot.get("phases", []), key=lambda item: int(item.get("display_order") or 0))
+            updated_phase_ids: List[str] = []
+            created_phase_ids: List[str] = []
+            current_phase_id = match.get("current_phase_id")
+
+            for index, generated_phase in enumerate(generated):
+                if index < len(existing):
+                    phase = existing[index]
+                else:
+                    phase = deepcopy(generated_phase)
+                    phase["status"] = "pending"
+                    self.snapshot.setdefault("phases", []).append(phase)
+                    existing.append(phase)
+                    created_phase_ids.append(phase["id"])
+
+                preserved_id = phase["id"]
+                preserved_status = phase.get("status", "pending")
+                preserved_order = int(phase.get("display_order") or generated_phase.get("display_order") or index + 1)
+
+                for key in (
+                    "phase_key",
+                    "name",
+                    "phase_type",
+                    "side",
+                    "speaker_seat",
+                    "duration_seconds",
+                    "speaker_selector",
+                ):
+                    phase[key] = deepcopy(generated_phase.get(key))
+                phase["id"] = preserved_id
+                phase["status"] = preserved_status
+                phase["display_order"] = preserved_order
+
+                if generated_phase.get("phase_type") == "free_debate":
+                    phase["side_total_seconds"] = int(
+                        generated_phase.get("side_total_seconds")
+                        or max(1, int(generated_phase.get("duration_seconds") or 240) // 2)
+                    )
+                    phase["turn_seconds"] = int(generated_phase.get("turn_seconds") or 15)
+                    phase["duration_seconds"] = phase["side_total_seconds"] * 2
+                else:
+                    phase.pop("side_total_seconds", None)
+                    phase.pop("turn_seconds", None)
+
+                updated_phase_ids.append(phase["id"])
+
+            match["ruleset_name"] = ruleset.get("name", match.get("ruleset_name", ""))
+            match["updated_at"] = iso_now()
+            current_phase = next((phase for phase in self.snapshot.get("phases", []) if phase.get("id") == current_phase_id), None)
+            if current_phase:
+                self._sync_current_phase_clocks_after_config(current_phase)
+            self._persist_snapshot()
+            self._upsert_registry(self.snapshot)
+
+        payload = {
+            "ruleset_id": ruleset_id,
+            "updated_phase_count": len(updated_phase_ids),
+            "created_phase_count": len(created_phase_ids),
+            "updated_phase_ids": updated_phase_ids,
+            "created_phase_ids": created_phase_ids,
+        }
+        await self.emit("ruleset.applied_to_current_match", payload, "admin")
+        return {"applied": True, **payload}
+
     async def set_screen_scene(self, scene: str, live_mode: Optional[str]) -> Dict[str, Any]:
         normalized_scene = self._normalize_screen_scene(scene)
         async with self._lock:
@@ -1623,7 +1706,11 @@ class MatchStore:
                 "started_at": None,
                 "state": "thinking" if speaker["speaker_type"] == "agent" else "ready",
             }
-            self.snapshot["match"]["live_mode"] = "prep" if speaker["speaker_type"] == "agent" else ("free" if phase["phase_type"] == "free_debate" else "single")
+            self.snapshot["match"]["live_mode"] = (
+                self._agent_pending_live_mode(phase_id)
+                if speaker["speaker_type"] == "agent"
+                else self._live_mode_for_phase_id(phase_id)
+            )
             self._persist_snapshot()
         return await self.emit(
             "speaker.activated",
@@ -1750,7 +1837,7 @@ class MatchStore:
 
         async with self._lock:
             phase_id = self.snapshot["match"]["current_phase_id"]
-            self.snapshot["match"]["live_mode"] = "prep"
+            self.snapshot["match"]["live_mode"] = self._agent_pending_live_mode(phase_id, is_self_intro=is_self_intro)
             self._clear_flow_state()
             self.snapshot["current_speech"] = {
                 "id": speech_id,
@@ -1793,6 +1880,7 @@ class MatchStore:
         tts_sentence_idx = 0
         tts_sentence_tasks: List[asyncio.Task] = []
         tts_semaphore = asyncio.Semaphore(self._tts_sentence_concurrency())
+        stable_tts = bool(tts_enabled and self._tts_stable_mode_enabled())
 
         async def synthesize_sentence(sentence: str, sentence_idx: int) -> bool:
             async with tts_semaphore:
@@ -1850,7 +1938,31 @@ class MatchStore:
                     # Kick off TTS for each newly available segment. Prefer full
                     # sentences, but allow long comma-separated prefixes so the
                     # first audio can start before the agent finishes a paragraph.
-                    if tts_enabled:
+                    if tts_enabled and stable_tts:
+                        while True:
+                            sentence, new_sent_chars = self._next_stable_tts_segment(
+                                full_text, tts_sent_chars, final=False
+                            )
+                            if not sentence or new_sent_chars <= tts_sent_chars:
+                                break
+                            tts_sent_chars = new_sent_chars
+                            tts_sentence_tasks.append(asyncio.create_task(synthesize_sentence(sentence, tts_sentence_idx)))
+                            tts_sentence_idx += 1
+                            async with self._lock:
+                                speech = self.snapshot.get("current_speech")
+                                if speech and speech.get("id") == speech_id:
+                                    speech["tts_created_sentences"] = tts_sentence_idx
+                                    self.snapshot["speech_service"]["tts"].update(
+                                        {
+                                            "status": "synthesizing",
+                                            "queue_size": max(1, self._tts_unresolved_sentence_count(speech, fallback_total=tts_sentence_idx)),
+                                            "speaker_id": speaker_id,
+                                            "detail": f"stable TTS segment {tts_sentence_idx} queued",
+                                            "last_progress_at": iso_now(),
+                                        }
+                                    )
+                                    self._persist_snapshot()
+                    if tts_enabled and not stable_tts:
                         while True:
                             # Only the very first segment may be cut at a comma to keep
                             # time-to-first-audio low; everything after is whole-sentence
@@ -1917,9 +2029,35 @@ class MatchStore:
                 self._upsert_transcript_segment(speech, speaker_id, full_text, True, "agent_text")
                 self._persist_snapshot()
 
+        sentence_results = []
+
         # Fire TTS for any remaining text that didn't end with punctuation
         remaining_tail = full_text[tts_sent_chars:].strip()
-        if remaining_tail and tts_enabled:
+        if remaining_tail and tts_enabled and stable_tts:
+            while True:
+                sentence, new_sent_chars = self._next_stable_tts_segment(
+                    full_text, tts_sent_chars, final=True
+                )
+                if not sentence or new_sent_chars <= tts_sent_chars:
+                    break
+                tts_sent_chars = new_sent_chars
+                tts_sentence_tasks.append(asyncio.create_task(synthesize_sentence(sentence, tts_sentence_idx)))
+                tts_sentence_idx += 1
+                async with self._lock:
+                    speech = self.snapshot.get("current_speech")
+                    if speech and speech.get("id") == speech_id:
+                        speech["tts_created_sentences"] = tts_sentence_idx
+                        self.snapshot["speech_service"]["tts"].update(
+                            {
+                                "status": "synthesizing",
+                                "queue_size": max(1, self._tts_unresolved_sentence_count(speech, fallback_total=tts_sentence_idx)),
+                                "speaker_id": speaker_id,
+                                "detail": f"stable TTS segment {tts_sentence_idx} queued",
+                                "last_progress_at": iso_now(),
+                            }
+                        )
+                        self._persist_snapshot()
+        if remaining_tail and tts_enabled and not stable_tts:
             tts_sentence_tasks.append(asyncio.create_task(synthesize_sentence(remaining_tail, tts_sentence_idx)))
             tts_sentence_idx += 1
             async with self._lock:
@@ -1941,12 +2079,11 @@ class MatchStore:
         # the screen waits for exactly this many tts.sentence_ready events.
         expected_sentence_count = tts_sentence_idx
 
-        sentence_results: List[bool] = []
         if tts_sentence_tasks:
             raw = await asyncio.gather(*tts_sentence_tasks, return_exceptions=True)
             sentence_results = [bool(r) for r in raw if isinstance(r, bool)]
 
-        all_tts_failed = bool(tts_enabled and tts_sentence_tasks and sentence_results and not any(sentence_results))
+        all_tts_failed = bool(tts_enabled and expected_sentence_count > 0 and sentence_results and not any(sentence_results))
 
         async with self._lock:
             speech = self.snapshot.get("current_speech")
@@ -2207,17 +2344,31 @@ class MatchStore:
 
     def _load_fallback_plan(self) -> FallbackPlan:
         try:
-            return load_fallback_plan()
+            return load_fallback_plan(str(self.snapshot.get("match", {}).get("topic") or ""))
         except FileNotFoundError as exc:
             raise MatchStateError("fallback_history_missing", str(exc)) from exc
 
     def _fallback_speech_id(self, phase_id: str, speaker_id: str, *, kind: str = "speech", turn_index: Optional[int] = None) -> str:
+        topic_key = ""
+        if kind != "self_intro":
+            key = fallback_topic_key(str(self.snapshot.get("match", {}).get("topic") or ""))
+            # Keep the original programming-topic ids for backward compatibility
+            # with the already generated live package. New topics get isolated ids.
+            topic_key = "" if key == "programming" else f"{self._safe_path_part(key)}_"
         if turn_index is not None:
-            return f"fallback_{kind}_{self._safe_path_part(phase_id)}_{self._safe_path_part(speaker_id)}_{turn_index}"
-        return f"fallback_{kind}_{self._safe_path_part(phase_id)}_{self._safe_path_part(speaker_id)}"
+            return f"fallback_{topic_key}{kind}_{self._safe_path_part(phase_id)}_{self._safe_path_part(speaker_id)}_{turn_index}"
+        return f"fallback_{topic_key}{kind}_{self._safe_path_part(phase_id)}_{self._safe_path_part(speaker_id)}"
 
     def _fallback_task_id(self, speech_id: str) -> str:
         return f"task_{speech_id}"
+
+    def _fallback_kind_from_speech_id(self, speech_id: str) -> str:
+        value = str(speech_id or "")
+        if value.startswith("fallback_self_intro_"):
+            return "self_intro"
+        if value.startswith("fallback_free_") or "_free_" in value:
+            return "free"
+        return "speech"
 
     def _fallback_manifest_path(self) -> Path:
         raw = os.getenv("PHDEBATE_FALLBACK_AUDIO_MANIFEST", "").strip()
@@ -2479,6 +2630,8 @@ class MatchStore:
         return {
             "history_loaded": history_loaded,
             "history_path": plan.path if plan else "",
+            "topic_key": plan.topic_key if plan else fallback_topic_key(str(self.snapshot.get("match", {}).get("topic") or "")),
+            "topic_label": plan.topic_label if plan else str(self.snapshot.get("match", {}).get("topic") or ""),
             "load_error": load_error,
             "checks": checks,
             "overall_ready": history_loaded and all(checks.values()),
@@ -2536,7 +2689,8 @@ class MatchStore:
         text: str,
         force: bool = False,
     ) -> Dict[str, Any]:
-        text, timing = self._fallback_text_for_timing(phase, speaker, text, kind="self_intro" if speech_id.startswith("fallback_self_intro_") else "free" if speech_id.startswith("fallback_free_") else "speech")
+        fallback_kind = self._fallback_kind_from_speech_id(speech_id)
+        text, timing = self._fallback_text_for_timing(phase, speaker, text, kind=fallback_kind)
         existing = self._audio_asset_for_speech(speech_id) or self._attach_fallback_manifest_asset(speech_id)
         existing_ready = self._fallback_asset_ready(existing, text)
         if existing and existing_ready and not force:
@@ -2586,10 +2740,13 @@ class MatchStore:
         asset["tts_task_id"] = task_id
         asset["text_length"] = len(text)
         asset["fallback_text"] = text
-        asset["fallback_kind"] = "free" if speech_id.startswith("fallback_free_") else "self_intro" if speech_id.startswith("fallback_self_intro_") else "speech"
+        asset["fallback_kind"] = fallback_kind
         asset["fallback_speaker_label"] = label_for_speaker(speaker)
         asset["fallback_voice_preset_id"] = speaker.get("tts_voice_preset_id")
-        asset["fallback_history_path"] = str(self._load_fallback_plan().path if not speech_id.startswith("fallback_self_intro_") else "")
+        plan = self._load_fallback_plan()
+        asset["fallback_history_path"] = str(plan.path if not speech_id.startswith("fallback_self_intro_") else "")
+        asset["fallback_topic_key"] = plan.topic_key if not speech_id.startswith("fallback_self_intro_") else ""
+        asset["fallback_topic_label"] = plan.topic_label if not speech_id.startswith("fallback_self_intro_") else ""
         asset["fallback_text_original_length"] = timing.get("original_text_length")
         asset["fallback_text_clamped"] = timing.get("text_clamped")
         asset["fallback_target_chars"] = timing.get("target_chars")
@@ -2664,7 +2821,7 @@ class MatchStore:
                 self.snapshot["free_debate"] = {
                     "current_turn_side": "affirmative",
                     "turn_index": 1,
-                    "assignment_mode": "fallback_numbered",
+                    "assignment_mode": "teammate_control",
                     "fallback_mode": False,
                     "fallback_index": 0,
                 }
@@ -2672,6 +2829,8 @@ class MatchStore:
             added = self._fill_fallback_history_before_order(plan, int(phase.get("display_order") or 0))
             self._persist_snapshot()
         await self.emit("fallback.phase_selected", {"phase_id": phase_id, "history_segments_added": added}, "host")
+        if phase.get("phase_type") == "free_debate":
+            self._arm_free_debate_auto_agent("affirmative", 1)
         return await self.get_snapshot()
 
     def _fill_fallback_history_before_order(self, plan: FallbackPlan, target_order: int) -> int:
@@ -3326,7 +3485,7 @@ class MatchStore:
 
         async with self._lock:
             phase_id = self.snapshot["match"]["current_phase_id"]
-            self.snapshot["match"]["live_mode"] = "prep"
+            self.snapshot["match"]["live_mode"] = self._agent_pending_live_mode(phase_id, is_self_intro=is_self_intro)
             self._clear_flow_state()
             speech = {
                 "id": speech_id,
@@ -3599,7 +3758,7 @@ class MatchStore:
                 }
             )
             self.snapshot["current_speech"] = speech
-            self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+            self.snapshot["match"]["live_mode"] = self._live_mode_for_phase_id(phase_id)
             self._clear_flow_state()
             self._start_relevant_clocks(speaker["side"])
             self.snapshot["speech_service"]["asr"] = {
@@ -4433,7 +4592,7 @@ class MatchStore:
             speech = self.snapshot.get("current_speech") or {}
             active = speech if speech.get("speaker_id") == speaker_id else None
             if active and text_only:
-                self.snapshot["match"]["live_mode"] = "free" if active.get("phase_id") == "phase_free_debate" else "single"
+                self.snapshot["match"]["live_mode"] = self._live_mode_for_phase_id(str(active.get("phase_id") or ""))
             self.snapshot["speech_service"]["tts"] = {
                 "status": "failed",
                 "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
@@ -6489,7 +6648,7 @@ class MatchStore:
                 phase_id = speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
                 is_self_intro = speech.get("kind") == "self_intro"
                 if not is_self_intro:
-                    self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+                    self.snapshot["match"]["live_mode"] = self._live_mode_for_phase_id(phase_id)
                 speech["started_at"] = speech.get("started_at") or iso_now()
                 speech["state"] = "speaking"
                 if task_id and not speech.get("tts_task_id"):
@@ -6565,7 +6724,7 @@ class MatchStore:
                     speaker = self._find_speaker(speaker_id)
                     phase_id = speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
                     if speech.get("kind") != "self_intro":
-                        self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+                        self.snapshot["match"]["live_mode"] = self._live_mode_for_phase_id(phase_id)
                         self._start_relevant_clocks(speaker["side"])
                     speech["started_at"] = speech.get("started_at") or iso_now()
                     speech["state"] = "speaking"
@@ -6782,6 +6941,10 @@ class MatchStore:
             tts_selection = self._select_tts_for_speech(task_id, speech_id, speaker)
         except SpeechProviderError:
             return 0
+        if self._tts_stable_mode_enabled():
+            segments = self._stable_tts_segments(full_text)
+            await self._synthesize_stable_tts_segments(segments, task_id, speech_id, speaker, tts_selection)
+            return len(segments)
         semaphore = asyncio.Semaphore(self._tts_sentence_concurrency())
 
         async def synth(sentence: str, idx: int) -> bool:
@@ -6814,7 +6977,7 @@ class MatchStore:
     async def _start_agent_playback(self, task_id: str, speaker: Dict[str, Any]) -> None:
         async with self._lock:
             phase_id = self.snapshot["match"]["current_phase_id"]
-            self.snapshot["match"]["live_mode"] = "free" if phase_id == "phase_free_debate" else "single"
+            self.snapshot["match"]["live_mode"] = self._live_mode_for_phase_id(phase_id)
             if self.snapshot.get("current_speech"):
                 self.snapshot["current_speech"]["started_at"] = iso_now()
                 self.snapshot["current_speech"]["state"] = "speaking"
@@ -7022,6 +7185,160 @@ class MatchStore:
 
     _SENTENCE_END_RE = re.compile(r"[。！？!?]+")
     _TTS_SOFT_BREAK_RE = re.compile(r"[，,；;：:]")
+    _TTS_NATURAL_BREAK_RE = re.compile(r"[。！？!?；;]+")
+    _TTS_ANY_BREAK_RE = re.compile(r"[。！？!?；;，,：:]")
+
+    def _tts_stable_mode_enabled(self) -> bool:
+        raw_value = self._tts_setting_raw("stability_mode", "PHDEBATE_TTS_STABILITY_MODE", "stable")
+        if isinstance(raw_value, bool):
+            return raw_value
+        raw = str(raw_value or "stable").strip().lower()
+        return raw not in {"0", "false", "no", "off", "realtime", "fast", "legacy"}
+
+    def _tts_min_segment_chars(self) -> int:
+        return self._tts_setting_int("min_segment_chars", "PHDEBATE_TTS_MIN_SEGMENT_CHARS", 32, 24, 180)
+
+    def _tts_max_segment_chars(self) -> int:
+        value = self._tts_setting_int("max_segment_chars", "PHDEBATE_TTS_MAX_SEGMENT_CHARS", 72, 32, 260)
+        return max(self._tts_min_segment_chars(), min(260, value))
+
+    def _tts_first_stable_segment_chars(self) -> int:
+        return self._tts_setting_int("first_segment_chars", "PHDEBATE_TTS_FIRST_STABLE_SEGMENT_CHARS", 24, 16, 80)
+
+    def _stable_tts_segments(self, full_text: str) -> List[str]:
+        text = normalize_tts_text(full_text)
+        if not text:
+            return []
+        min_chars = self._tts_min_segment_chars()
+        max_chars = self._tts_max_segment_chars()
+        units = self._tts_sentence_units(text)
+        if not units:
+            units = [text]
+
+        segments: List[str] = []
+        current = ""
+        for unit in units:
+            for piece in self._split_oversized_tts_unit(unit, max_chars=max_chars, min_chars=min_chars):
+                if not current:
+                    current = piece
+                    continue
+                candidate = current + piece
+                if len(candidate) <= max_chars or len(current) < min_chars:
+                    current = candidate
+                    continue
+                segments.append(current)
+                current = piece
+        if current:
+            segments.append(current)
+
+        if len(segments) > 1 and len(segments[-1]) < min_chars:
+            tail = segments.pop()
+            if len(segments[-1]) + len(tail) <= max_chars + 24:
+                segments[-1] += tail
+            else:
+                segments.append(tail)
+        return [segment for segment in segments if segment.strip()]
+
+    def _next_stable_tts_segment(self, full_text: str, sent_chars: int, *, final: bool = False) -> tuple[str, int]:
+        """Return the next stable live-TTS chunk.
+
+        Stable mode should not wait for the entire agent response, but it must also
+        avoid the old 8-character first chunk that caused voice drift. We emit a
+        chunk once a natural break appears after the configured minimum, or when
+        the text reaches the configured maximum. On final text, any remaining tail
+        is emitted so playback can finish.
+        """
+        if sent_chars >= len(full_text):
+            return "", sent_chars
+        min_chars = self._tts_first_stable_segment_chars() if sent_chars <= 0 else self._tts_min_segment_chars()
+        max_chars = self._tts_max_segment_chars()
+        tail = full_text[sent_chars:]
+        if not tail.strip():
+            return "", len(full_text) if final else sent_chars
+
+        search_end = min(len(tail), max_chars)
+        window = tail[:search_end]
+        cut = 0
+        for match in self._TTS_NATURAL_BREAK_RE.finditer(window):
+            if match.end() >= min_chars:
+                cut = match.end()
+        if cut <= 0:
+            for match in self._TTS_ANY_BREAK_RE.finditer(window):
+                if match.end() >= min_chars:
+                    cut = match.end()
+        if cut <= 0 and len(tail.strip()) >= max_chars:
+            cut = max_chars
+        if cut <= 0 and final:
+            cut = len(tail)
+        if cut <= 0:
+            return "", sent_chars
+
+        segment = tail[:cut].strip()
+        new_pos = sent_chars + cut
+        if len(segment) < 4:
+            return "", new_pos
+        return normalize_tts_text(segment), new_pos
+
+    def _tts_sentence_units(self, text: str) -> List[str]:
+        units: List[str] = []
+        start = 0
+        for match in self._TTS_NATURAL_BREAK_RE.finditer(text):
+            end = match.end()
+            piece = text[start:end].strip()
+            if piece:
+                units.append(piece)
+            start = end
+        tail = text[start:].strip()
+        if tail:
+            units.append(tail)
+        return units
+
+    def _split_oversized_tts_unit(self, unit: str, *, max_chars: int, min_chars: int) -> List[str]:
+        text = unit.strip()
+        pieces: List[str] = []
+        while len(text) > max_chars:
+            window = text[:max_chars]
+            cut = 0
+            for match in self._TTS_ANY_BREAK_RE.finditer(window):
+                if match.end() >= min_chars:
+                    cut = match.end()
+            if cut <= 0:
+                cut = max_chars
+            pieces.append(text[:cut].strip())
+            text = text[cut:].strip()
+        if text:
+            pieces.append(text)
+        return pieces
+
+    async def _synthesize_stable_tts_segments(
+        self,
+        segments: List[str],
+        task_id: str,
+        speech_id: str,
+        speaker: Dict[str, Any],
+        selection: Optional[SpeechGatewaySelection],
+    ) -> List[bool]:
+        results: List[bool] = []
+        for sentence_idx, segment in enumerate(segments):
+            async with self._lock:
+                speech = self.snapshot.get("current_speech")
+                if not speech or speech.get("id") != speech_id:
+                    break
+                speech["tts_created_sentences"] = sentence_idx + 1
+                self.snapshot["speech_service"]["tts"].update(
+                    {
+                        "status": "synthesizing",
+                        "queue_size": max(1, self._tts_unresolved_sentence_count(speech, fallback_total=sentence_idx + 1)),
+                        "speaker_id": speaker["id"],
+                        "detail": f"stable TTS segment {sentence_idx + 1}/{len(segments)} queued",
+                        "last_progress_at": iso_now(),
+                    }
+                )
+                self._persist_snapshot()
+            results.append(
+                await self._synthesize_sentence_tts_with_timeout(segment, sentence_idx, task_id, speech_id, speaker, selection)
+            )
+        return results
 
     def _next_tts_sentence(self, full_text: str, sent_chars: int, allow_soft_break: bool = True) -> tuple:
         """Return (segment, new_sent_chars) for the next TTS-ready text after sent_chars.
@@ -7239,13 +7556,35 @@ class MatchStore:
             archive_dir.mkdir(parents=True, exist_ok=True)
             ext = self._audio_extension(result.mime_type)
             file_path = archive_dir / f"tts_{self._safe_path_part(task_id)}_s{sentence_idx}.{ext}"
+            normalized_audio, normalize_meta = await self._normalize_tts_audio_bytes(
+                result.audio,
+                result.mime_type,
+                archive_dir,
+                task_id,
+                sentence_idx,
+            )
+            if normalize_meta.get("status") in {"failed", "missing_ffmpeg", "timeout"}:
+                await self.emit(
+                    "tts.normalize_failed",
+                    {
+                        "task_id": task_id,
+                        "speech_id": speech_id,
+                        "speaker_id": speaker_id,
+                        "sentence_idx": sentence_idx,
+                        "status": normalize_meta.get("status"),
+                        "detail": normalize_meta.get("detail", ""),
+                    },
+                    "system",
+                    speaker_id,
+                    sync_structured=False,
+                )
             # 首句（idx 0）前置一小段静音：补偿投影机音频输出的启动延迟，避免开场"前几个字被吃掉"。
             # 只对 mp3 首句生效；MP3 帧自描述，拼接静音帧后浏览器正常解码（静音→语音）。
-            archived_audio = result.audio
+            archived_audio = normalized_audio
             if sentence_idx == 0 and result.mime_type == "audio/mpeg":
                 lead = self._tts_lead_silence_bytes()
                 if lead:
-                    archived_audio = lead + result.audio
+                    archived_audio = lead + normalized_audio
             file_path.write_bytes(archived_audio)
             audio_root = self.audio_root_path()
             rel = file_path.relative_to(audio_root)
@@ -7316,11 +7655,13 @@ class MatchStore:
                     "audio_asset_id": asset["id"],
                     "mime_type": result.mime_type,
                     "size_bytes": len(result.audio),
+                    "archived_size_bytes": len(archived_audio),
                     "chunk_count": result.chunk_count,
                     "latency_ms": latency_ms,
                     "file_path": str(file_path),
                     "provider": selection.provider,
                     "voice_preset_id": (selection.preset or {}).get("id"),
+                    "normalization": normalize_meta,
                 },
                 latency_ms=latency_ms,
                 completed_at=iso_now(),
@@ -7567,6 +7908,12 @@ class MatchStore:
                 "instructions",
                 "temperature",
                 "top_p",
+                "top_k",
+                "repetition_penalty",
+                "chunk_size",
+                "max_new_tokens",
+                "stream",
+                "language_type",
             ):
                 if options.get(key) is None or options.get(key) == "":
                     value = preset.get(key)
@@ -7585,7 +7932,16 @@ class MatchStore:
             if provider == "local_qwen":
                 options["temperature"] = self._formal_tts_temperature()
                 options["top_p"] = self._formal_tts_top_p()
+                options["top_k"] = self._formal_tts_top_k()
+                options["repetition_penalty"] = self._formal_tts_repetition_penalty()
+                options["chunk_size"] = self._formal_tts_chunk_size()
+                options["max_new_tokens"] = self._formal_tts_max_new_tokens()
+                options["stream"] = True
+                options["language_type"] = "Chinese"
+                options["response_format"] = "mp3"
                 options["instructions"] = self._formal_tts_instructions()
+                if self._tts_stable_mode_enabled():
+                    options["strict_payload"] = True
         return SpeechGatewaySelection(
             gateway=getattr(selection, "gateway"),
             provider=provider,
@@ -7611,23 +7967,81 @@ class MatchStore:
             value = default
         return max(low, min(high, value))
 
+    def _tts_runtime_settings(self) -> Dict[str, Any]:
+        try:
+            section = integration_config.active_section("tts") or {}
+        except Exception:
+            return {}
+        settings = section.get("settings") or {}
+        return dict(settings) if isinstance(settings, dict) else {}
+
+    def _tts_setting_raw(self, key: str, env_name: str, default: Any = None) -> Any:
+        settings = self._tts_runtime_settings()
+        value = settings.get(key)
+        if value is not None and value != "":
+            return value
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            return raw
+        return default
+
+    def _tts_setting_float(self, key: str, env_name: str, default: float, low: float, high: float) -> float:
+        raw = self._tts_setting_raw(key, env_name, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = default
+        return max(low, min(high, value))
+
+    def _tts_setting_int(self, key: str, env_name: str, default: int, low: int, high: int) -> int:
+        raw = self._tts_setting_raw(key, env_name, default)
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            value = default
+        return max(low, min(high, value))
+
+    def _tts_setting_bool(self, key: str, env_name: str, default: bool) -> bool:
+        raw = self._tts_setting_raw(key, env_name, default)
+        if isinstance(raw, bool):
+            return raw
+        value = str(raw).strip().lower()
+        if value in {"0", "false", "no", "off"}:
+            return False
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        return bool(default)
+
     def _formal_tts_speech_rate(self) -> float:
-        return self._env_float("PHDEBATE_FORMAL_TTS_SPEECH_RATE", FORMAL_DEBATE_TTS_SPEECH_RATE, 0.7, 2.0)
+        return self._tts_setting_float("speech_rate", "PHDEBATE_FORMAL_TTS_SPEECH_RATE", FORMAL_DEBATE_TTS_SPEECH_RATE, 0.7, 2.0)
 
     def _formal_tts_volume(self) -> int:
-        return self._env_int("PHDEBATE_FORMAL_TTS_VOLUME", FORMAL_DEBATE_TTS_VOLUME, 0, 100)
+        return self._tts_setting_int("volume", "PHDEBATE_FORMAL_TTS_VOLUME", FORMAL_DEBATE_TTS_VOLUME, 0, 100)
 
     def _formal_tts_pitch_rate(self) -> float:
-        return self._env_float("PHDEBATE_FORMAL_TTS_PITCH_RATE", FORMAL_DEBATE_TTS_PITCH_RATE, 0.5, 1.5)
+        return self._tts_setting_float("pitch_rate", "PHDEBATE_FORMAL_TTS_PITCH_RATE", FORMAL_DEBATE_TTS_PITCH_RATE, 0.5, 1.5)
 
     def _formal_tts_temperature(self) -> float:
-        return self._env_float("PHDEBATE_FORMAL_TTS_TEMPERATURE", FORMAL_DEBATE_TTS_TEMPERATURE, 0.0, 1.0)
+        return self._tts_setting_float("temperature", "PHDEBATE_FORMAL_TTS_TEMPERATURE", FORMAL_DEBATE_TTS_TEMPERATURE, 0.0, 1.0)
 
     def _formal_tts_top_p(self) -> float:
-        return self._env_float("PHDEBATE_FORMAL_TTS_TOP_P", FORMAL_DEBATE_TTS_TOP_P, 0.1, 1.0)
+        return self._tts_setting_float("top_p", "PHDEBATE_FORMAL_TTS_TOP_P", FORMAL_DEBATE_TTS_TOP_P, 0.1, 1.0)
+
+    def _formal_tts_top_k(self) -> int:
+        return self._tts_setting_int("top_k", "PHDEBATE_FORMAL_TTS_TOP_K", 20, 1, 100)
+
+    def _formal_tts_repetition_penalty(self) -> float:
+        return self._tts_setting_float("repetition_penalty", "PHDEBATE_FORMAL_TTS_REPETITION_PENALTY", 1.1, 0.8, 2.0)
+
+    def _formal_tts_chunk_size(self) -> int:
+        return self._tts_setting_int("chunk_size", "PHDEBATE_FORMAL_TTS_CHUNK_SIZE", 8, 1, 64)
+
+    def _formal_tts_max_new_tokens(self) -> int:
+        return self._tts_setting_int("max_new_tokens", "PHDEBATE_FORMAL_TTS_MAX_NEW_TOKENS", 2048, 128, 4096)
 
     def _formal_tts_instructions(self) -> str:
-        return os.getenv("PHDEBATE_FORMAL_TTS_INSTRUCTIONS", "").strip() or FORMAL_DEBATE_TTS_INSTRUCTIONS
+        raw = self._tts_setting_raw("instructions", "PHDEBATE_FORMAL_TTS_INSTRUCTIONS", FORMAL_DEBATE_TTS_INSTRUCTIONS)
+        return str(raw or FORMAL_DEBATE_TTS_INSTRUCTIONS).strip()
 
     def _tts_consistency_seed(self, provider: str, speaker: Dict[str, Any], preset: Dict[str, Any]) -> int:
         raw = "|".join(
@@ -7643,23 +8057,11 @@ class MatchStore:
         return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8], 16)
 
     def _tts_sentence_concurrency(self) -> int:
-        # Keep sentence synthesis parallel by default. Consistency for generative
-        # local Qwen TTS is handled by a locked per-speech profile plus stable
-        # sampling hints, not by serializing every segment.
-        raw = os.getenv("PHDEBATE_TTS_SENTENCE_CONCURRENCY", "4").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 4
-        return max(1, min(8, value))
+        default = 1 if self._tts_stable_mode_enabled() else 4
+        return self._tts_setting_int("sentence_concurrency", "PHDEBATE_TTS_SENTENCE_CONCURRENCY", default, 1, 8)
 
     def _tts_sentence_timeout_seconds(self) -> float:
-        raw = os.getenv("PHDEBATE_TTS_SENTENCE_TIMEOUT_S", "10").strip()
-        try:
-            value = float(raw)
-        except ValueError:
-            value = 10.0
-        return max(4.0, min(90.0, value))
+        return self._tts_setting_float("sentence_timeout_s", "PHDEBATE_TTS_SENTENCE_TIMEOUT_S", 60.0, 4.0, 120.0)
 
     def _tts_playback_start_timeout_seconds(self) -> float:
         raw = os.getenv("PHDEBATE_TTS_PLAYBACK_START_TIMEOUT_S", "25").strip()
@@ -7866,15 +8268,16 @@ class MatchStore:
         The Qwen speed parameter is not linear in practice, so the output budget
         is based on measured audio duration and the browser playback rate.
         """
-        raw = os.getenv("PHDEBATE_TTS_SPEAKING_CPS", "3.55").strip()
-        try:
-            value = float(raw)
-        except ValueError:
-            value = 3.55
-        return max(2.0, min(8.0, value))
+        return self._tts_setting_float("tts_speaking_cps", "PHDEBATE_TTS_SPEAKING_CPS", 5.4, 2.0, 8.0)
 
     def _screen_tts_playback_rate(self) -> float:
-        return self._env_float("PHDEBATE_SCREEN_TTS_PLAYBACK_RATE", FORMAL_DEBATE_SCREEN_PLAYBACK_RATE, 0.75, 1.6)
+        return self._tts_setting_float(
+            "screen_playback_rate",
+            "PHDEBATE_SCREEN_TTS_PLAYBACK_RATE",
+            FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
+            0.75,
+            1.6,
+        )
 
     def _agent_tokens_per_char(self) -> float:
         """Tokens per Chinese character for the agent model's tokenizer.
@@ -7892,12 +8295,7 @@ class MatchStore:
     def _agent_max_token_margin(self) -> float:
         """Headroom so the model finishes a sentence naturally instead of being
         hard-truncated exactly at the time budget."""
-        raw = os.getenv("PHDEBATE_AGENT_MAX_TOKEN_MARGIN", "1.05").strip()
-        try:
-            value = float(raw)
-        except ValueError:
-            value = 1.05
-        return max(1.0, min(2.0, value))
+        return self._tts_setting_float("agent_max_token_margin", "PHDEBATE_AGENT_MAX_TOKEN_MARGIN", 1.0, 1.0, 2.0)
 
     def _speaker_speech_rate(self, speaker: Dict[str, Any]) -> float:
         """Resolve the TTS speech rate for a speaker (its preset, else provider default)."""
@@ -7921,7 +8319,7 @@ class MatchStore:
         stage control. Keeping this below 1.0 reduces overrun when TTS latency or
         venue audio devices fluctuate.
         """
-        return self._env_float("PHDEBATE_AGENT_SPEECH_TIME_FACTOR", 0.78, 0.65, 1.0)
+        return self._tts_setting_float("agent_speech_time_factor", "PHDEBATE_AGENT_SPEECH_TIME_FACTOR", 0.78, 0.50, 1.0)
 
     def _agent_output_budget(self, time_limit_seconds: int, speech_rate: float) -> Dict[str, Any]:
         """Deterministically derive the char/token budget for one speech.
@@ -8317,6 +8715,85 @@ class MatchStore:
         if "mpeg" in value or "mp3" in value:
             return "mp3"
         return "bin"
+
+    async def _normalize_tts_audio_bytes(
+        self,
+        audio: bytes,
+        mime_type: str,
+        archive_dir: Path,
+        task_id: str,
+        sentence_idx: int,
+    ) -> tuple[bytes, Dict[str, Any]]:
+        if not self._tts_loudness_normalize_enabled():
+            return audio, {"status": "disabled"}
+        ext = self._audio_extension(mime_type)
+        if ext not in {"mp3", "wav", "ogg", "webm"}:
+            return audio, {"status": "unsupported", "mime_type": mime_type}
+        ffmpeg_bin = os.getenv("PHDEBATE_FFMPEG_BIN", "ffmpeg").strip() or "ffmpeg"
+        stem = f".tts_norm_{self._safe_path_part(task_id)}_{sentence_idx}"
+        input_path = archive_dir / f"{stem}_in.{ext}"
+        output_path = archive_dir / f"{stem}_out.{ext}"
+        input_path.write_bytes(audio)
+        target = self._tts_loudness_target()
+        filter_spec = f"loudnorm=I={target}:TP=-2:LRA=7"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffmpeg_bin,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(input_path),
+                "-af",
+                filter_spec,
+                str(output_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            self._unlink_quietly(input_path)
+            return audio, {"status": "missing_ffmpeg", "target_lufs": target}
+        try:
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._tts_loudness_timeout_seconds())
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            self._unlink_quietly(input_path)
+            self._unlink_quietly(output_path)
+            return audio, {"status": "timeout", "target_lufs": target}
+        if proc.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+            detail = (stderr or b"").decode("utf-8", "ignore")[:400]
+            self._unlink_quietly(input_path)
+            self._unlink_quietly(output_path)
+            return audio, {"status": "failed", "target_lufs": target, "detail": detail}
+        normalized = output_path.read_bytes()
+        self._unlink_quietly(input_path)
+        self._unlink_quietly(output_path)
+        return normalized, {
+            "status": "ok",
+            "target_lufs": target,
+            "original_size_bytes": len(audio),
+            "normalized_size_bytes": len(normalized),
+        }
+
+    def _tts_loudness_normalize_enabled(self) -> bool:
+        return self._tts_setting_bool("loudness_normalize", "PHDEBATE_TTS_LOUDNESS_NORMALIZE", True)
+
+    def _tts_loudness_target(self) -> float:
+        return self._tts_setting_float("loudness_target", "PHDEBATE_TTS_LOUDNESS_TARGET", -18.0, -30.0, -10.0)
+
+    def _tts_loudness_timeout_seconds(self) -> float:
+        return self._tts_setting_float("loudness_timeout_s", "PHDEBATE_TTS_LOUDNESS_TIMEOUT_S", 12.0, 2.0, 60.0)
+
+    @staticmethod
+    def _unlink_quietly(path: Path) -> None:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
     def _asr_supported_audio_mime(self, mime_type: str) -> bool:
         value = (mime_type or "").lower()
@@ -8947,12 +9424,30 @@ class MatchStore:
             raise MatchStateError("invalid_screen_scene", "未知的大屏场景。", {"scene": scene})
         return normalized
 
+    def _phase_by_id_or_none(self, phase_id: str) -> Optional[Dict[str, Any]]:
+        return next((item for item in self.snapshot.get("phases", []) if item.get("id") == phase_id), None)
+
+    def _is_free_debate_phase_id(self, phase_id: str) -> bool:
+        phase = self._phase_by_id_or_none(phase_id)
+        return bool(phase and phase.get("phase_type") == "free_debate")
+
+    def _live_mode_for_phase_id(self, phase_id: str) -> str:
+        return "free" if self._is_free_debate_phase_id(phase_id) else "single"
+
+    def _agent_pending_live_mode(self, phase_id: str, *, is_self_intro: bool = False) -> str:
+        if is_self_intro:
+            return "prep"
+        if self._is_free_debate_phase_id(phase_id):
+            return "free"
+        return "prep"
+
     def _start_relevant_clocks(self, side: str) -> None:
         now = utc_now()
         phase_id = self.snapshot["match"]["current_phase_id"]
+        is_free_debate = self._is_free_debate_phase_id(phase_id)
         for clock in self.snapshot["clocks"]:
             should_run = clock["name"] == "main"
-            if phase_id == "phase_free_debate":
+            if is_free_debate:
                 should_run = clock["name"] == "turn" or clock["name"] == f"{side}_total"
             if should_run and clock["remaining_ms"] > 0:
                 clock["state"] = "running"
@@ -8966,12 +9461,13 @@ class MatchStore:
         self._refresh_clocks()
         side = speech.get("side")
         phase_id = speech.get("phase_id") or self.snapshot["match"]["current_phase_id"]
+        is_free_debate = self._is_free_debate_phase_id(str(phase_id or ""))
         started_remaining = speech.get("started_clock_remaining_ms") or {}
         for clock in self.snapshot["clocks"]:
             if clock.get("phase_id") != phase_id:
                 continue
             relevant = clock["name"] == "main"
-            if phase_id == "phase_free_debate":
+            if is_free_debate:
                 relevant = clock["name"] in {"turn", f"{side}_total"}
             if not relevant:
                 continue

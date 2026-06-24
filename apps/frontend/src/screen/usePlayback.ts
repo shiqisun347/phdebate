@@ -28,7 +28,7 @@ const SILENCE_URL = "/assets/silence-24k-1s.mp3";
 const PLAYBACK_PROGRESS_EPSILON = 0.05;
 const PLAYBACK_HEARTBEAT_MS = 5000;
 const SCREEN_TTS_VOLUME = 0.86;
-export const SCREEN_TTS_PLAYBACK_RATE = 1.38;
+export const SCREEN_TTS_PLAYBACK_RATE = 1.0;
 
 export function usePlayback(
   matchId: string,

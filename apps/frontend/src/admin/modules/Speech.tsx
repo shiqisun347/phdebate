@@ -26,10 +26,10 @@ const ALICLOUD_TTS_DEFAULTS = {
     sample_rate: 24000,
     mode: "server_commit",
     language_type: "Chinese",
-    speech_rate: 1.48,
-    volume: 74,
+    speech_rate: 1.4,
+    volume: 70,
     pitch_rate: 1,
-    instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。",
+    instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，不要口音化，不要故意拉长字音，保持稳定音量和自然停顿。",
   },
 };
 
@@ -66,19 +66,24 @@ const LOCAL_QWEN_TTS_DEFAULTS = {
     model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
     response_format: "mp3",
     sample_rate: 24000,
-    speech_rate: 1.48,
-    volume: 74,
+    speech_rate: 1.4,
+    volume: 70,
     pitch_rate: 1,
-    temperature: 0.18,
-    top_p: 0.65,
-    instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。",
+    temperature: 0.05,
+    top_p: 0.5,
+    top_k: 20,
+    repetition_penalty: 1.1,
+    chunk_size: 8,
+    max_new_tokens: 2048,
+    stream: true,
+    language_type: "Chinese",
+    instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，不要口音化，不要故意拉长字音，保持稳定音量和自然停顿。",
   },
 };
 
 const ALICLOUD_VOICES = [
   { voice: "Neil", label: "Neil · 阿闻 · 清晰男声辩手" },
   { voice: "Ethan", label: "Ethan · 晨煦 · 备用男声" },
-  { voice: "Serena", label: "Serena · 苏瑶 · 女声辩手" },
   { voice: "Cherry", label: "Cherry · 芊悦 · 主持播报" },
 ];
 
@@ -88,9 +93,10 @@ const XFYUN_VOICES = [
 ];
 
 const LOCAL_QWEN_VOICES = [
+  { voice: "aiden", label: "Aiden · 本地普通男声" },
+  { voice: "ryan", label: "Ryan · 本地普通男声" },
   { voice: "dylan", label: "Dylan · 本地男声" },
-  { voice: "vivian", label: "Vivian · 本地女声" },
-  { voice: "serena", label: "Serena · 本地女声" },
+  { voice: "sohee", label: "Sohee · 本地女声候选" },
 ];
 
 type SecretDraft = {
@@ -461,12 +467,17 @@ function VoicePresetManager({
       is_default: false,
       description: "",
       sample_rate: Number(config.tts.settings?.sample_rate ?? 24000),
-      speech_rate: 1.48,
-      volume: 74,
+      speech_rate: Number(config.tts.settings?.speech_rate ?? 1.4),
+      volume: 70,
       pitch_rate: 1,
-      temperature: 0.18,
-      top_p: 0.65,
-      instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，保持稳定音量和自然停顿。",
+      temperature: 0.05,
+      top_p: 0.5,
+      top_k: 20,
+      repetition_penalty: 1.1,
+      chunk_size: 8,
+      max_new_tokens: 2048,
+      stream: true,
+      instructions: "正式、平直、清晰、克制，接近现场辩论正常发言；不要戏剧化，不要抑扬顿挫，不要夸张情绪，不要拖腔，不要口音化，不要故意拉长字音，保持稳定音量和自然停顿。",
     }),
     [config.tts.provider, config.tts.settings]
   );
@@ -476,17 +487,25 @@ function VoicePresetManager({
   const [saving, setSaving] = React.useState(false);
   const visiblePresets = config.voice_presets.filter((preset) => preset.provider === config.tts.provider);
   const baseVoices = config.tts.provider === "xfyun" ? XFYUN_VOICES : config.tts.provider === "local_qwen" ? LOCAL_QWEN_VOICES : ALICLOUD_VOICES;
+  const allowCustomVoice = config.tts.provider !== "local_qwen";
   const isBaseVoice = (voice: string) => baseVoices.some((item) => item.voice === voice);
 
   function openEditor(preset: VoicePreset | null) {
-    const next = preset ?? blank;
+    let next = preset ?? blank;
+    if (config.tts.provider === "local_qwen" && next.voice && !isBaseVoice(next.voice)) {
+      next = { ...next, voice: "dylan", enabled: false };
+    }
     setEditing(next);
-    setCustomVoice(Boolean(next.voice) && !isBaseVoice(next.voice));
+    setCustomVoice(allowCustomVoice && Boolean(next.voice) && !isBaseVoice(next.voice));
   }
 
   async function savePreset() {
     if (!editing?.name.trim() || !editing.voice.trim()) {
       toast("请填写音色名称并选择音色", "error");
+      return;
+    }
+    if (config.tts.provider === "local_qwen" && !isBaseVoice(editing.voice)) {
+      toast("本机 Qwen 目前只保留 Aiden / Ryan / Dylan / Sohee 四个音色", "error");
       return;
     }
     setSaving(true);
@@ -614,9 +633,9 @@ function VoicePresetManager({
                   {baseVoices.map((item) => (
                     <option key={item.voice} value={item.voice}>{item.label}</option>
                   ))}
-                  <option value="__custom__">✎ 自定义音色…</option>
+                  {allowCustomVoice && <option value="__custom__">✎ 自定义音色…</option>}
                 </Select>
-                {customVoice && (
+                {allowCustomVoice && customVoice && (
                   <Input
                     value={editing.voice}
                     onChange={(event) => setEditing({ ...editing, voice: event.target.value })}
@@ -624,7 +643,7 @@ function VoicePresetManager({
                       config.tts.provider === "xfyun"
                         ? "讯飞发音人 ID，如 x4_xxx"
                         : config.tts.provider === "local_qwen"
-                          ? "本地 Qwen 音色，如 dylan"
+                          ? "本地 Qwen 音色：aiden / ryan / dylan / sohee"
                           : "阿里云音色 ID，如 voice-xxxx（含复刻音色）"
                     }
                   />

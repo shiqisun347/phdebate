@@ -39,7 +39,7 @@ export function Rulesets() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">预设赛制规则库。新建比赛时从这里选择赛制，不可在比赛中自定义。</p>
+        <p className="text-sm text-muted-foreground">预设赛制规则库。保存当前比赛正在使用的赛制时，会同步到当前比赛的阶段时长。</p>
         <Button onClick={() => setCreating(true)}>
           <Plus /> 新增赛制
         </Button>
@@ -155,9 +155,14 @@ function RulesetDialog({
     setSaving(true);
     try {
       const body = { name, summary, template: tpl, flow };
-      if (initial) await updateRuleset(initial.id, body);
-      else await createRuleset(body);
-      toast(initial ? "已保存" : "已创建", "success");
+      const saved = initial ? await updateRuleset(initial.id, body) : await createRuleset(body);
+      const applied = (saved as Ruleset & { applied_current_match?: { applied?: boolean; updated_phase_count?: number } }).applied_current_match;
+      toast(
+        applied?.applied
+          ? `已保存，并同步当前比赛 ${applied.updated_phase_count ?? 0} 个环节`
+          : initial ? "已保存" : "已创建",
+        "success",
+      );
       await onSaved();
     } catch (err) {
       toast(err instanceof Error ? err.message : "保存失败", "error");

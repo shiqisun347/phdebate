@@ -104,6 +104,8 @@ def normalize_tts_text(text: str) -> str:
     content = re.sub(r"([，。！？；：、])\s+", r"\1", content)
     content = re.sub(r"[，、；：]+([。！？])", r"\1", content)
     content = re.sub(r"^[，。！？；：、\s]+", "", content)
+    content = re.sub(r"^感谢主席(?=[，,。！!？?；;\s]|$)", "感谢主持人", content)
+    content = re.sub(r"(?<=[。！？；;])感谢主席(?=[，,。！!？?；;\s]|$)", "感谢主持人", content)
     return content.strip()
 
 
@@ -266,7 +268,12 @@ class LocalQwenTTSGateway:
             "sample_rate": session["sample_rate"],
             "speed": session["speech_rate"],
         }
+        if "stream" in session:
+            base_payload["stream"] = bool(session["stream"])
+        if session.get("language_type"):
+            base_payload["language_type"] = session["language_type"]
         payloads = _local_qwen_tts_payload_variants(base_payload, session)
+        strict_payload = bool(session.get("strict_payload"))
         started = time.perf_counter()
         last_error: Optional[SpeechGatewayError] = None
         for payload_idx, payload in enumerate(payloads):
@@ -281,7 +288,7 @@ class LocalQwenTTSGateway:
                                 code=response.status_code,
                                 provider="local_qwen",
                             )
-                            if payload_idx == 0 and len(payloads) > 1:
+                            if payload_idx == 0 and len(payloads) > 1 and not strict_payload:
                                 continue
                             raise last_error
                         async for chunk in response.aiter_bytes():
@@ -320,7 +327,21 @@ class LocalQwenTTSGateway:
             "model": options.get("model") or preset.get("model") or settings.get("model") or "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
             "speech_rate": float(options.get("speech_rate") or preset.get("speech_rate") or settings.get("speech_rate") or 1.0),
         }
-        for key in ("seed", "temperature", "top_p", "volume", "pitch_rate", "instructions"):
+        for key in (
+            "seed",
+            "temperature",
+            "top_k",
+            "top_p",
+            "repetition_penalty",
+            "volume",
+            "pitch_rate",
+            "instructions",
+            "chunk_size",
+            "max_new_tokens",
+            "stream",
+            "language_type",
+            "strict_payload",
+        ):
             value = options.get(key)
             if value is None or value == "":
                 value = preset.get(key)
@@ -1122,15 +1143,24 @@ def _local_qwen_voice(voice: str) -> str:
     aliases = {
         "neil": "dylan",
         "ethan": "dylan",
-        "cherry": "vivian",
-        "serena": "serena",
+        "cherry": "aiden",
+        "aiden": "aiden",
+        "dylan": "dylan",
+        "eric": "dylan",
+        "ryan": "ryan",
+        "serena": "dylan",
+        "sohee": "sohee",
+        "vivian": "aiden",
+        "ono_anna": "sohee",
+        "uncle_fu": "dylan",
     }
-    return aliases.get(value, value or "dylan")
+    stable = aliases.get(value)
+    return stable or "dylan"
 
 
 def _local_qwen_tts_extra_payload(session: Dict[str, Any]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
-    for key in ("seed", "temperature", "top_p"):
+    for key in ("seed", "temperature", "top_k", "top_p", "repetition_penalty", "chunk_size", "max_new_tokens"):
         value = session.get(key)
         if value is not None and value != "":
             payload[key] = value

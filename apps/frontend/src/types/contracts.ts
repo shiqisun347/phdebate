@@ -602,6 +602,11 @@ export interface VoicePreset {
   pitch_rate?: number;
   temperature?: number;
   top_p?: number;
+  top_k?: number;
+  repetition_penalty?: number;
+  chunk_size?: number;
+  max_new_tokens?: number;
+  stream?: boolean;
   instructions?: string;
 }
 
