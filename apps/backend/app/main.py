@@ -736,9 +736,12 @@ async def start_speaking(match_id: str, speaker_id: str, _principal: Principal =
 
 
 @app.post("/api/matches/{match_id}/speakers/{speaker_id}/start-agent-speaking")
-async def start_agent_speaking(match_id: str, speaker_id: str, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
+async def start_agent_speaking(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_speaker_or_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
-    store.ensure_agent_speaker_for_current_phase(speaker_id)
+    if (body or {}).get("force"):
+        await store.force_restart_agent_speech(speaker_id, str((body or {}).get("reason") or "host_force_start_agent"))
+    else:
+        store.ensure_agent_speaker_for_current_phase(speaker_id)
     asyncio.create_task(store.run_agent_speech(speaker_id))
     await store.emit("agent.speech.requested", {"speaker_id": speaker_id}, "speaker", speaker_id)
     return {"ok": True, "data": await store.get_snapshot()}
@@ -1158,7 +1161,7 @@ async def request_ai_teammate(match_id: str, speaker_id: str, body: Dict[str, An
 @app.post("/api/matches/{match_id}/agent/{speaker_id}/retry")
 async def retry_agent(match_id: str, speaker_id: str, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
-    store.ensure_agent_speaker_for_current_phase(speaker_id)
+    await store.force_restart_agent_speech(speaker_id, "host_retry_agent")
     asyncio.create_task(store.run_agent_speech(speaker_id))
     return {"ok": True, "data": await store.get_snapshot()}
 
@@ -1248,6 +1251,7 @@ async def clear_request_logs(match_id: str, _principal: Principal = Depends(requ
 @app.post("/api/matches/{match_id}/agent/{speaker_id}/interrupt")
 async def interrupt_agent(match_id: str, speaker_id: str, body: Optional[Dict[str, Any]] = None, _principal: Principal = Depends(require_host)) -> Dict[str, Any]:
     await _ensure_match(match_id)
+    await store.force_restart_agent_speech(speaker_id, str((body or {}).get("reason") or "host_interrupt_agent"))
     await store.emit("agent.interrupted", {"speaker_id": speaker_id, "reason": (body or {}).get("reason", "manual")}, "host")
     return {"ok": True, "data": await store.get_snapshot()}
 

@@ -818,7 +818,7 @@ function AgentControlPanel() {
                     <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => run(() => post(`${base}/speakers/${a.id}/self-introduction`), { success: `${a.name} 开始自我介绍` })} title="赛前自我介绍：会朗读并展示，但不计入后续辩论历史">
                       <Sparkles className="size-3" /> 自我介绍
                     </Button>
-                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => run(() => post(`${base}/speakers/${a.id}/start-agent-speaking`), { success: `${a.name} 开始发言` })}>
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => run(() => post(`${base}/speakers/${a.id}/start-agent-speaking`, { force: true, reason: "host_force_start_agent" }), { success: `${a.name} 已强制重新发言` })}>
                       <UserCircle2 className="size-3" /> 发言
                     </Button>
                     <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => { if (isTurn) run(() => post(`${base}/agent/${a.id}/retry`), { success: "已重新请求" }); else toast("并非该 agent 回答环节", "info"); }}>

@@ -1718,6 +1718,107 @@ class MatchStore:
             "host",
         )
 
+    async def force_restart_agent_speech(self, speaker_id: str, reason: str = "host_force_restart_agent") -> Dict[str, Any]:
+        asr_sessions: List[Any] = []
+        async with self._lock:
+            self._ensure_match_allows_control("force_restart_agent_speech")
+            speaker = self._find_speaker(speaker_id)
+            if speaker.get("speaker_type") != "agent":
+                raise MatchStateError("invalid_speaker", "该辩手不是 AI 辩手，不能触发 Agent 发言。", {"speaker_id": speaker_id})
+            phase = self._current_phase()
+            if phase.get("phase_type") == "free_debate":
+                raise MatchStateError(
+                    "invalid_phase",
+                    "自由辩论阶段请使用自由辩论轮次控制，不使用固定环节强制重发。",
+                    {"phase_id": phase.get("id"), "speaker_id": speaker_id},
+                )
+            if phase.get("side") != speaker.get("side") or phase.get("speaker_seat") != speaker.get("seat"):
+                raise MatchStateError(
+                    "invalid_speaker",
+                    "当前环节只允许指定辩位发言。",
+                    {
+                        "phase_id": phase.get("id"),
+                        "expected_side": phase.get("side"),
+                        "expected_seat": phase.get("speaker_seat"),
+                        "speaker_id": speaker_id,
+                    },
+                )
+            config = self._agent_config_for_speaker(speaker)
+            if config and not config.get("enabled", True):
+                raise MatchStateError(
+                    "agent_config_disabled",
+                    "该 Agent 配置已停用，不能触发发言。",
+                    {"speaker_id": speaker_id, "agent_config_id": config.get("id")},
+                )
+
+            takeover = self._abandon_active_realtime_for_takeover()
+            asr_sessions = takeover.get("asr_sessions") or []
+            removed_speech_ids: Set[str] = set(str(item) for item in takeover.get("abandoned_speech_ids", []) if item)
+            removed_segment_ids: List[str] = []
+            kept_segments = []
+            for segment in self.snapshot.get("recent_transcript", []):
+                same_speech = str(segment.get("speech_id") or segment.get("id") or "") in removed_speech_ids
+                same_phase_speaker = segment.get("phase_id") == phase.get("id") and segment.get("speaker_id") == speaker_id
+                if same_speech or same_phase_speaker:
+                    speech_id = str(segment.get("speech_id") or segment.get("id") or "")
+                    if speech_id:
+                        removed_speech_ids.add(speech_id)
+                    if segment.get("id"):
+                        removed_segment_ids.append(str(segment.get("id")))
+                    continue
+                kept_segments.append(segment)
+            self.snapshot["recent_transcript"] = kept_segments
+
+            removed_audio_ids: List[str] = []
+            kept_assets = []
+            for asset in self.snapshot.get("audio_assets", []):
+                speech_id = str(asset.get("speech_id") or "")
+                same_speech = speech_id in removed_speech_ids
+                same_phase_speaker = asset.get("phase_id") == phase.get("id") and asset.get("speaker_id") == speaker_id
+                if same_speech or same_phase_speaker:
+                    if speech_id:
+                        removed_speech_ids.add(speech_id)
+                    if asset.get("id"):
+                        removed_audio_ids.append(str(asset.get("id")))
+                    continue
+                kept_assets.append(asset)
+            self.snapshot["audio_assets"] = kept_assets
+            for speech_id in removed_speech_ids:
+                self._abandoned_speech_ids.add(speech_id)
+
+            self._reset_clocks_for_phase(phase)
+            self._clear_flow_state()
+            self.snapshot["current_speech"] = None
+            self.snapshot["match"]["screen_scene"] = "live"
+            self.snapshot["match"]["live_mode"] = self._agent_pending_live_mode(phase["id"])
+            self.snapshot["speech_service"]["asr"] = {
+                "status": "ok",
+                "latency_ms": self.snapshot["speech_service"]["asr"].get("latency_ms", 0),
+                "active_sessions": 0,
+                "detail": "agent force restart",
+            }
+            self.snapshot["speech_service"]["tts"] = {
+                "status": "idle",
+                "latency_ms": self.snapshot["speech_service"]["tts"].get("latency_ms", 0),
+                "queue_size": 0,
+                "speaker_id": None,
+                "detail": "agent force restart",
+            }
+            self._set_agent_status(speaker_id, "ready", "agent force restart")
+            self.snapshot["match"]["updated_at"] = iso_now()
+            payload = {
+                "speaker_id": speaker_id,
+                "phase_id": phase["id"],
+                "reason": reason,
+                "removed_speech_ids": sorted(removed_speech_ids),
+                "removed_segment_ids": removed_segment_ids,
+                "removed_audio_ids": removed_audio_ids,
+                "cancelled_tts_tasks": takeover.get("cancelled_tts_tasks", 0),
+            }
+            self._persist_snapshot()
+        self._close_asr_sessions_soon(asr_sessions)
+        return await self.emit("agent.force_restart", payload, "host", speaker_id)
+
     async def record_free_debate_skip(self, speaker_id: str) -> Dict[str, Any]:
         """人类辩手在自由辩论里（预）跳过自己的发言轮。
 
@@ -4896,16 +4997,20 @@ class MatchStore:
                     "expired_clocks": [item["clock_name"] for item in expired_payloads],
                 }
 
-            if not expired_payloads and timeout_payload is None:
+            reconcile_payload, reconcile_flow_payload = self._reconcile_free_debate_idle_state(phase, now)
+
+            if not expired_payloads and timeout_payload is None and reconcile_payload is None:
                 return []
             expired_clock_names = [item["clock_name"] for item in expired_payloads]
-            flow_payload = self._set_flow_waiting_for_timeout(
-                phase=phase,
-                expired_clock_names=expired_clock_names,
-                speech_id=(timeout_payload or {}).get("speech_id"),
-                speaker_id=(timeout_payload or {}).get("speaker_id"),
-                now=now,
-            )
+            flow_payload = reconcile_flow_payload
+            if flow_payload is None:
+                flow_payload = self._set_flow_waiting_for_timeout(
+                    phase=phase,
+                    expired_clock_names=expired_clock_names,
+                    speech_id=(timeout_payload or {}).get("speech_id"),
+                    speaker_id=(timeout_payload or {}).get("speaker_id"),
+                    now=now,
+                )
             self._persist_snapshot()
             for payload in expired_payloads:
                 events.append(("clock.expired", payload))
@@ -4923,6 +5028,8 @@ class MatchStore:
                         },
                     )
                 )
+            if reconcile_payload:
+                events.append(("free_debate.reconciled", reconcile_payload))
             if flow_payload and flow_payload.get("awaiting_host_confirm"):
                 events.append(("flow.awaiting_host_confirm", flow_payload))
 
@@ -4930,6 +5037,81 @@ class MatchStore:
         for event_type, payload in events:
             emitted.append(await self.emit(event_type, payload, "system"))
         return emitted
+
+    def _reconcile_free_debate_idle_state(
+        self,
+        phase: Dict[str, Any],
+        now: datetime,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Heal free-debate states that can otherwise sit idle forever.
+
+        The timer loop normally advances while a speech is active. In real shows,
+        network drops or manual controls can leave free debate with no current
+        speech, the current side at 0 ms, and the other side still having a few
+        seconds. No new clock event will fire in that state, so reconcile it here.
+        """
+        if phase.get("phase_type") != "free_debate":
+            return None, None
+        if self.snapshot.get("current_speech"):
+            return None, None
+        fd = self.snapshot.setdefault("free_debate", {})
+        current_side = str(fd.get("current_turn_side") or "affirmative")
+        turn_index = int(fd.get("turn_index") or 1)
+
+        if self._free_debate_both_sides_exhausted():
+            self._pause_running_clocks()
+            flow_payload = self._set_flow_waiting_for_timeout(
+                phase=phase,
+                expired_clock_names=["affirmative_total", "negative_total"],
+                speech_id=None,
+                speaker_id=None,
+                now=now,
+            )
+            return (
+                {
+                    "action": "finish_phase",
+                    "reason": "both_sides_exhausted_idle",
+                    "from_side": current_side,
+                    "turn_index": turn_index,
+                },
+                flow_payload,
+            )
+
+        if not self._free_debate_side_has_time(current_side):
+            before_side = current_side
+            before_turn = turn_index
+            self._advance_free_debate_turn_if_needed(current_side)
+            next_fd = self.snapshot.get("free_debate") or {}
+            return (
+                {
+                    "action": "skip_exhausted_side",
+                    "reason": "current_side_exhausted_idle",
+                    "from_side": before_side,
+                    "from_turn_index": before_turn,
+                    "to_side": next_fd.get("current_turn_side"),
+                    "to_turn_index": next_fd.get("turn_index"),
+                },
+                None,
+            )
+
+        turn_clock = self._clock("turn")
+        if turn_clock and turn_clock.get("state") == "expired" and int(turn_clock.get("remaining_ms") or 0) <= 0:
+            turn_clock["remaining_ms"] = turn_clock["total_seconds"] * 1000
+            turn_clock["state"] = "paused"
+            turn_clock["deadline_at"] = None
+            turn_clock.pop("expired_notified_at", None)
+            self._arm_free_debate_auto_agent(current_side, turn_index)
+            return (
+                {
+                    "action": "reset_idle_turn_clock",
+                    "reason": "turn_clock_expired_without_speech",
+                    "side": current_side,
+                    "turn_index": turn_index,
+                },
+                None,
+            )
+
+        return None, None
 
     async def confirm_flow(self, reason: str = "host_confirm") -> Dict[str, Any]:
         async with self._lock:

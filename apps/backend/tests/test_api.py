@@ -2941,6 +2941,77 @@ def test_free_debate_one_side_total_exhausted_other_side_continues(monkeypatch) 
     assert next_start.json()["data"]["current_speech"]["speaker_id"] == "spk_neg_2"
 
 
+def test_free_debate_idle_exhausted_current_side_reconciles_to_remaining_side(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    asyncio.run(store.start_phase("phase_free_debate"))
+
+    async def seed_idle_state() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = None
+            store.snapshot["free_debate"]["current_turn_side"] = "affirmative"
+            store.snapshot["free_debate"]["turn_index"] = 7
+            for clock in store.snapshot["clocks"]:
+                if clock["name"] == "affirmative_total":
+                    clock["remaining_ms"] = 0
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                elif clock["name"] == "negative_total":
+                    clock["remaining_ms"] = 3500
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                elif clock["name"] == "turn":
+                    clock["remaining_ms"] = 0
+                    clock["state"] = "expired"
+                    clock["deadline_at"] = None
+                    clock["expired_notified_at"] = "2026-06-17T00:00:00Z"
+            store._persist_snapshot()
+
+    asyncio.run(seed_idle_state())
+    emitted = asyncio.run(store.tick_timers())
+
+    event_types = [event["type"] for event in emitted]
+    assert "free_debate.reconciled" in event_types
+    assert emitted[-1]["type"] == "free_debate.reconciled"
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["flow"]["awaiting_host_confirm"] is False
+    assert data["free_debate"]["current_turn_side"] == "negative"
+    assert data["free_debate"]["turn_index"] == 8
+    turn = next(clock for clock in data["clocks"] if clock["name"] == "turn")
+    assert turn["state"] == "paused"
+    assert turn["remaining_ms"] == turn["total_seconds"] * 1000
+
+
+def test_free_debate_idle_both_sides_exhausted_finishes_phase(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    asyncio.run(store.start_phase("phase_free_debate"))
+
+    async def seed_idle_state() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = None
+            store.snapshot["free_debate"]["current_turn_side"] = "negative"
+            store.snapshot["free_debate"]["turn_index"] = 12
+            for clock in store.snapshot["clocks"]:
+                if clock["name"] in {"affirmative_total", "negative_total", "turn"}:
+                    clock["remaining_ms"] = 0
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                    clock.pop("expired_notified_at", None)
+            store._persist_snapshot()
+
+    asyncio.run(seed_idle_state())
+    emitted = asyncio.run(store.tick_timers())
+
+    event_types = [event["type"] for event in emitted]
+    assert "free_debate.reconciled" in event_types
+    assert "flow.awaiting_host_confirm" in event_types
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["flow"]["awaiting_host_confirm"] is True
+    assert data["flow"]["next_action"] == "phase_next"
+    assert data["flow"]["reason"] == "clock_expired"
+
+
 def test_free_debate_all_skip_triggers_random_agent(monkeypatch) -> None:
     # Keep the decision timer from firing so we isolate the all-skip path.
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
@@ -3076,6 +3147,70 @@ def test_agent_speaker_console_can_request_authorized_agent_speech() -> None:
     summary = client.get("/api/matches/match_001/data-summary")
     assert summary.status_code == 200
     assert summary.json()["data"]["event_type_counts"]["agent.speech.requested"] == 1
+
+
+def test_force_agent_start_clears_bad_history_audio_and_resets_clock(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_TTS_FORMAL", "0")
+    _use_embedded_mock_agent("spk_aff_2")
+    phase = client.post("/api/matches/match_001/phases/phase_aff_statement_2/start")
+    assert phase.status_code == 200
+
+    async def seed_bad_state() -> None:
+        async with store._lock:
+            bad_speech = {
+                "id": "speech_bad_aff_2",
+                "phase_id": "phase_aff_statement_2",
+                "speaker_id": "spk_aff_2",
+                "side": "affirmative",
+                "turn_index": 1,
+                "source": "agent_text",
+                "content_final": "错误的正方二辩历史。",
+                "content_partial": "错误的正方二辩历史。",
+                "started_at": "2026-06-17T00:00:00Z",
+                "state": "ended",
+            }
+            store._upsert_transcript_segment(bad_speech, "spk_aff_2", "错误的正方二辩历史。", True, "agent_text")
+            store.snapshot.setdefault("audio_assets", []).insert(
+                0,
+                {
+                    "id": "audio_speech_bad_aff_2",
+                    "match_id": "match_001",
+                    "phase_id": "phase_aff_statement_2",
+                    "speech_id": "speech_bad_aff_2",
+                    "speaker_id": "spk_aff_2",
+                    "file_path": "/tmp/bad",
+                    "mime_type": "audio/mpeg",
+                    "duration_ms": 1000,
+                    "size_bytes": 2048,
+                    "chunk_count": 1,
+                    "status": "ready",
+                    "chunks": [{"chunk_index": 0, "audio_url": "/bad.mp3"}],
+                },
+            )
+            for clock in store.snapshot["clocks"]:
+                if clock["name"] == "main":
+                    clock["remaining_ms"] = 1234
+                    clock["state"] = "expired"
+                    clock["deadline_at"] = None
+            store.snapshot["flow"].update({"awaiting_host_confirm": True, "speech_id": "speech_bad_aff_2"})
+            store._persist_snapshot()
+
+    asyncio.run(seed_bad_state())
+    response = client.post(
+        "/api/matches/match_001/speakers/spk_aff_2/start-agent-speaking",
+        json={"force": True, "reason": "unit_force_restart"},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert all("错误的正方二辩历史" not in item.get("text", "") for item in data["recent_transcript"])
+    assert all(item.get("speech_id") != "speech_bad_aff_2" for item in data["audio_assets"])
+    main_clock = next(clock for clock in data["clocks"] if clock["name"] == "main")
+    assert main_clock["remaining_ms"] == main_clock["total_seconds"] * 1000
+    assert main_clock["state"] == "paused"
+    assert data["flow"]["awaiting_host_confirm"] is False
+    summary = client.get("/api/matches/match_001/data-summary")
+    assert summary.json()["data"]["event_type_counts"]["agent.force_restart"] == 1
 
 
 def test_agent_speaker_console_rejects_human_and_locked_speech() -> None:
