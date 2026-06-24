@@ -1,0 +1,17 @@
+[program:qwen3-tts-webui]
+priority=45
+directory=/root/autodl-tmp/qwen3-tts-webui
+command=/root/autodl-tmp/phdebate/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8008 --no-access-log
+environment=PYTHONUNBUFFERED="1",QWEN_TTS_BASE_URL="http://127.0.0.1:12302",QWEN_TTS_WEBUI_TOKEN="CHANGE_ME",QWEN_TTS_WEBUI_OUTPUT_DIR="/root/autodl-tmp/qwen3-tts-webui/outputs"
+autostart=true
+autorestart=true
+startsecs=3
+startretries=5
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/root/autodl-tmp/qwen3-tts-webui/logs/webui.stdout.log
+stderr_logfile=/root/autodl-tmp/qwen3-tts-webui/logs/webui.stderr.log
+stdout_logfile_maxbytes=20MB
+stderr_logfile_maxbytes=20MB
+stdout_logfile_backups=3
+stderr_logfile_backups=3

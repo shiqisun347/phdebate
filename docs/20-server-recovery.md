@@ -9,6 +9,8 @@ This document records the deploy/runtime split for the `117.50.221.11` phdebate 
 - FunASR streaming service code under `deploy/serve_realtime_ws_phdebate.py`.
 - Qwen3-TTS OpenAI-compatible service code under `deploy/qwen3-tts-openai/`.
 - Qwen3-TTS non-secret env template under `deploy/qwen3-tts-openai/qwen3-tts.env.example`.
+- Qwen3-TTS browser debug UI under `deploy/qwen3-tts-webui/`.
+- Runtime backup helper `scripts/backup_server_runtime.sh`.
 
 ## What Is Not In Git
 
@@ -32,23 +34,36 @@ Key files:
 
 ## Local Backup Made Before Shutdown
 
-Before the planned shutdown on 2026-06-25, a full runtime backup was downloaded outside the git repo:
+Before the planned shutdown on 2026-06-25, the latest full runtime backup was downloaded outside the git repo:
 
 ```text
-/Users/sunshiqi/code/autodl_debate/server_runtime_backup_20260625_042443/
+/Users/sunshiqi/code/autodl_debate/server_sync_20260625/
+```
+
+The server-local backup produced by the helper script is:
+
+```text
+/root/autodl-tmp/phdebate-runtime-backups/20260624T204021Z/
 ```
 
 Files:
 
-- `phdebate-backend-storage.tgz`
-- `server-config-and-tts-code.tgz`
-- `SHA256SUMS.txt`
+- `phdebate_code_20260625.tgz`
+- `phdebate_runtime_storage_20260625.tgz`
+- `phdebate_deploy_20260625.tgz`
+- `qwen3_tts_webui_code_20260625.tgz`
 
 Verify after copy:
 
 ```bash
-cd /Users/sunshiqi/code/autodl_debate/server_runtime_backup_20260625_042443
-shasum -a 256 -c SHA256SUMS.txt
+cd /Users/sunshiqi/code/autodl_debate/server_sync_20260625
+shasum -a 256 *.tgz
+```
+
+The earlier backup is also kept locally:
+
+```text
+/Users/sunshiqi/code/autodl_debate/server_runtime_backup_20260625_042443/
 ```
 
 ## Restore Sketch
@@ -57,10 +72,13 @@ On a new server, after cloning this repo and installing dependencies:
 
 ```bash
 sudo mkdir -p /root/autodl-tmp/phdebate/apps/backend
-sudo tar -C /root/autodl-tmp/phdebate/apps/backend -xzf phdebate-backend-storage.tgz
-sudo tar -C / -xzf server-config-and-tts-code.tgz
+sudo tar -C /root/autodl-tmp/phdebate -xzf phdebate_code_20260625.tgz
+sudo tar -C /root/autodl-tmp/phdebate -xzf phdebate_runtime_storage_20260625.tgz
+sudo tar -C / -xzf phdebate_deploy_20260625.tgz
+sudo tar -C /root/autodl-tmp -xzf qwen3_tts_webui_code_20260625.tgz
 sudo cp deploy/phdebate-stack.supervisor.conf /etc/supervisor/conf.d/phdebate-stack.conf
 sudo cp deploy/funasr-nano-asr.conf /etc/supervisor/conf.d/funasr-nano-asr.conf
+sudo cp deploy/qwen3-tts-webui/qwen3-tts-webui.supervisor.conf.example /etc/supervisor/conf.d/qwen3-tts-webui.conf
 sudo supervisorctl reread
 sudo supervisorctl update
 sudo supervisorctl restart phdebate qwen3-tts qwen3-tts-webui funasr-nano-asr
@@ -73,3 +91,19 @@ cp deploy/qwen3-tts-openai/qwen3-tts.env.example /root/autodl-tmp/qwen3-tts-open
 ```
 
 Then adjust machine-specific paths or tokens locally.
+
+## Fresh Backup On Server
+
+Run this before shutdown or migration:
+
+```bash
+cd /root/autodl-tmp/phdebate
+bash scripts/backup_server_runtime.sh
+```
+
+The script writes a timestamped directory under `/root/autodl-tmp/phdebate-runtime-backups/` with:
+
+- SQLite copied through the SQLite backup API.
+- Runtime storage files excluding transient WAL/SHM files.
+- Supervisor, nginx, LiveKit, FunASR, Qwen3-TTS, and Web UI service code/config.
+- `SHA256SUMS.txt` for integrity verification.
