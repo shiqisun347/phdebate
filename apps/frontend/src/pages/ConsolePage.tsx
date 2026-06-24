@@ -122,6 +122,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   const [displayName, setDisplayName] = useState(() => initialDisplayName(matchId, selectedSpeakerId));
   const [draftSpeakerId, setDraftSpeakerId] = useState(selectedSpeakerId);
   const [draftName, setDraftName] = useState(displayName);
+  const [promoteAgentToHuman, setPromoteAgentToHuman] = useState(false);
   const [apiTestStatus, setApiTestStatus] = useState<CheckStatus>("idle");
   const [micTestStatus, setMicTestStatus] = useState<CheckStatus>("idle");
   const [audioStatus, setAudioStatus] = useState("待命");
@@ -159,33 +160,22 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
 
   useEffect(() => {
     setDraftSpeakerId(selectedSpeakerId);
+    setPromoteAgentToHuman(false);
   }, [selectedSpeakerId]);
 
   useEffect(() => {
-    if (identityInitializedRef.current) return;
+    if (identityInitializedRef.current || promoteAgentToHuman) return;
     if (!snapshot) return;
     const current = snapshot.speakers.find((item) => item.id === draftSpeakerId) ?? snapshot.speakers.find((item) => item.id === selectedSpeakerId);
     if (!current) return;
     identityInitializedRef.current = true;
     if (!draftName) setDraftName(current.name);
-  }, [draftName, draftSpeakerId, selectedSpeakerId, snapshot]);
+  }, [draftName, draftSpeakerId, promoteAgentToHuman, selectedSpeakerId, snapshot]);
 
   useEffect(() => {
-    if (!snapshot || !speaker || draftName) return;
+    if (!snapshot || !speaker || draftName || promoteAgentToHuman) return;
     setDraftName(speaker.name);
-  }, [draftName, snapshot, speaker]);
-
-  // AI 辩手不可选：若当前草稿身份是 agent（或不存在），自动落到第一位人类选手。
-  useEffect(() => {
-    if (!snapshot || entryStep !== "identity") return;
-    const current = snapshot.speakers.find((item) => item.id === draftSpeakerId);
-    if (current && current.speaker_type === "human") return;
-    const firstHuman = snapshot.speakers.find((item) => item.speaker_type === "human");
-    if (firstHuman && firstHuman.id !== draftSpeakerId) {
-      setDraftSpeakerId(firstHuman.id);
-      setDraftName(firstHuman.name);
-    }
-  }, [snapshot, entryStep, draftSpeakerId]);
+  }, [draftName, promoteAgentToHuman, snapshot, speaker]);
 
   useEffect(() => {
     if (!activeSpeechId || !activeSpeakerId || speakerType !== "human" || entryStep !== "ready" || speechPaused) {
@@ -489,7 +479,11 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
       setError("请选择一个后台预设身份。");
       return;
     }
-    if (selected.speaker_type === "human" && !nextName) {
+    if (selected.speaker_type === "agent" && !promoteAgentToHuman) {
+      setError("请选择该 AI 辩手卡片并确认转为人类辩手。");
+      return;
+    }
+    if ((selected.speaker_type === "human" || promoteAgentToHuman) && !nextName) {
       setError("请输入姓名。");
       return;
     }
@@ -498,6 +492,9 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
         setError(null);
         if (selected.speaker_type === "human") {
           await patch(`/api/matches/${matchId}/speakers/${draftSpeakerId}/profile`, { name: nextName });
+          await refresh();
+        } else if (promoteAgentToHuman) {
+          await patch(`/api/matches/${matchId}/speakers/${draftSpeakerId}/profile`, { name: nextName, speaker_type: "human" });
           await refresh();
         }
       }, {
@@ -510,15 +507,15 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
     window.localStorage.setItem(identityKey(matchId, draftSpeakerId), nextName);
     window.localStorage.setItem(activeSpeakerKey(matchId), draftSpeakerId);
     setSelectedSpeakerId(draftSpeakerId);
-    setDisplayName(selected.speaker_type === "human" ? nextName : selected.name);
+    setDisplayName(nextName || selected.name);
     setError(null);
-    if (selected.speaker_type === "agent") {
-      window.localStorage.setItem(entryReadyKey(matchId, draftSpeakerId), "1");
-      setEntryStep("ready");
-      notify({ tone: "success", title: "已进入辩手端", message: "AI 发言由主持人控制，页面会自动同步状态。" });
-    } else {
-      setEntryStep("mic");
-    }
+    setEntryStep("mic");
+    notify({
+      tone: "success",
+      title: "身份已确认",
+      message: selected.speaker_type === "agent" ? "已转为人类辩手，请继续硬件测试。" : "请继续硬件测试。",
+    });
+    setPromoteAgentToHuman(false);
     setApiTestStatus("idle");
     setMicTestStatus("idle");
 
@@ -616,36 +613,47 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
                     <button
                       type="button"
                       key={item.id}
-                      disabled={isAgent}
-                      aria-disabled={isAgent}
-                      className={`identity-choice ${sideClass(item.side)} ${draftSpeakerId === item.id ? "active" : ""} ${isAgent ? "is-agent-locked" : ""}`}
+                      className={`identity-choice ${sideClass(item.side)} ${draftSpeakerId === item.id ? "active" : ""} ${isAgent ? "is-agent-convertible" : ""}`}
                       onClick={() => {
-                        if (isAgent) return;
+                        if (isAgent) {
+                          const confirmed = window.confirm(`你选择了 AI 辩手 ${sideLabel(item.side)}${seatLabel(item.seat)} · ${item.name}。是否将其转为人类辩手？`);
+                          if (!confirmed) return;
+                          setPromoteAgentToHuman(true);
+                          setDraftName("");
+                        } else {
+                          setPromoteAgentToHuman(false);
+                          setDraftName(item.name);
+                        }
                         setDraftSpeakerId(item.id);
-                        setDraftName(item.name);
                       }}
                     >
                       <span>{sideLabel(item.side)}{seatLabel(item.seat)}</span>
                       <strong>{item.name}</strong>
-                      <em>{isAgent ? `AI 辩手 · 由后台控制` : "人类选手"}</em>
+                      <em>{isAgent ? `AI 辩手 · 可转为人类` : "人类选手"}</em>
                     </button>
                   );
                 })}
               </div>
-              {snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" ? (
+              {snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" || promoteAgentToHuman ? (
                 <label>
-                  <span>姓名</span>
-                  <input value={draftName} placeholder="请输入你的姓名" onChange={(event) => setDraftName(event.target.value)} />
+                  <span>{promoteAgentToHuman ? "转为人类后的姓名" : "姓名"}</span>
+                  <input value={draftName} placeholder={promoteAgentToHuman ? "请输入转为人类后的姓名" : "请输入你的姓名"} onChange={(event) => setDraftName(event.target.value)} />
                 </label>
               ) : (
                 <div className="entry-empty">
-                  {snapshot.speakers.find((item) => item.id === draftSpeakerId)?.agent_endpoint
-                    ? "该 Agent 已配置 API 地址。"
-                    : "该 Agent 暂未配置 API 地址，请先在后台确认。"}
+                  请选择一个 AI 辩手后，可确认转换为人类辩手并输入姓名。
                 </div>
               )}
               {error && <div className="console-error">{error}</div>}
-              <button {...busyProps("console-save-identity")} type="submit" disabled={!draftSpeakerId || (snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" && !draftName.trim())}>
+              <button
+                {...busyProps("console-save-identity")}
+                type="submit"
+                disabled={
+                  !draftSpeakerId ||
+                  (snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "agent" && !promoteAgentToHuman) ||
+                  ((snapshot.speakers.find((item) => item.id === draftSpeakerId)?.speaker_type === "human" || promoteAgentToHuman) && !draftName.trim())
+                }
+              >
                 <ClipboardCheck size={18} />下一步
               </button>
             </form>

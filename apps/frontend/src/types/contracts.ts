@@ -260,6 +260,11 @@ export interface VoteState {
   audience_summary: {
     total: number;
     winner: { affirmative: number; negative: number };
+    aspects: {
+      constructive: { affirmative: number; negative: number };
+      process: { affirmative: number; negative: number };
+      conclusion: { affirmative: number; negative: number };
+    };
     best_speaker: Array<{ speaker_id: string; count: number }>;
   };
 }
@@ -274,6 +279,11 @@ export interface VoteOptions {
 export interface AudienceVotePayload {
   token?: string;
   winner_side: Side;
+  aspects: {
+    constructive: Side;
+    process: Side;
+    conclusion: Side;
+  };
   /** 8 名辩手的完整排序，rank1 在前（后端按 Borda 计分聚合）。 */
   ranking: string[];
   /** 兼容字段：排名第一的辩手，由后端从 ranking[0] 推导，无需前端单独传。 */

@@ -794,6 +794,28 @@ def test_speaker_profile_endpoint_syncs_name_with_speaker_permission(monkeypatch
     assert invalid.json()["error"]["code"] == "invalid_speaker_profile"
 
 
+def test_speaker_profile_can_convert_agent_slot_to_human(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_ENV", "production")
+    monkeypatch.setenv("PHDEBATE_SPEAKER_TOKENS", '{"spk_aff_2":"agent-slot-secret"}')
+
+    updated = client.patch(
+        "/api/matches/match_001/speakers/spk_aff_2/profile",
+        headers={"Authorization": "Bearer agent-slot-secret"},
+        json={"name": "现场二辩", "speaker_type": "human"},
+    )
+
+    assert updated.status_code == 200
+    data = updated.json()["data"]
+    speaker = next(item for item in data["speakers"] if item["id"] == "spk_aff_2")
+    assert speaker["name"] == "现场二辩"
+    assert speaker["speaker_type"] == "human"
+    assert speaker["model_name"] is None
+    assert speaker["model_kind"] is None
+    assert "agent_endpoint" not in speaker
+    assert speaker["mic_permission"] == "unknown"
+    assert not any(item["speaker_id"] == "spk_aff_2" for item in data["agent_status"])
+
+
 def test_production_auth_accepts_hashed_token_file(monkeypatch, tmp_path) -> None:
     token_file = tmp_path / "tokens.json"
     token_file.write_text(
@@ -4191,6 +4213,31 @@ def test_audience_ranking_borda_aggregation() -> None:
     counts = [item["count"] for item in summary["best_speaker"]]
     assert counts == sorted(counts, reverse=True)
     assert len({item["speaker_id"] for item in summary["best_speaker"]}) == len(summary["best_speaker"])
+
+
+def test_audience_vote_records_three_aspects() -> None:
+    opened = client.post("/api/matches/match_001/audience-votes/open")
+    assert opened.status_code == 200
+    speakers = [s["id"] for s in store.snapshot["speakers"] if s["side"] in {"affirmative", "negative"}]
+    response = client.post(
+        "/api/public/matches/match_001/audience-votes",
+        json={
+            "token": "student-aspect-001",
+            "winner_side": "affirmative",
+            "aspects": {
+                "constructive": "affirmative",
+                "process": "negative",
+                "conclusion": "negative",
+            },
+            "ranking": speakers,
+        },
+    )
+
+    assert response.status_code == 200
+    summary = client.get("/api/matches/match_001").json()["data"]["vote_state"]["audience_summary"]
+    assert summary["aspects"]["constructive"]["affirmative"] >= 1
+    assert summary["aspects"]["process"]["negative"] >= 1
+    assert summary["aspects"]["conclusion"]["negative"] >= 1
 
 
 def test_audience_vote_rejects_duplicate_token() -> None:

@@ -357,6 +357,11 @@ class MatchStore:
                 "audience_summary": {
                     "total": 137,
                     "winner": {"affirmative": 83, "negative": 54},
+                    "aspects": {
+                        "constructive": {"affirmative": 83, "negative": 54},
+                        "process": {"affirmative": 83, "negative": 54},
+                        "conclusion": {"affirmative": 83, "negative": 54},
+                    },
                     "best_speaker": [
                         {"speaker_id": "spk_neg_2", "count": 41},
                         {"speaker_id": "spk_aff_3", "count": 35},
@@ -1399,16 +1404,36 @@ class MatchStore:
         name = str(fields.get("name", "")).strip()
         if not name:
             raise MatchStateError("invalid_speaker_profile", "姓名不能为空。", {"speaker_id": speaker_id})
+        requested_type = str(fields.get("speaker_type") or "").strip()
+        if requested_type and requested_type != "human":
+            raise MatchStateError(
+                "invalid_speaker_profile",
+                "辩手端只能把席位确认为人类辩手。",
+                {"speaker_id": speaker_id, "speaker_type": requested_type},
+            )
         async with self._lock:
             speaker = self._find_speaker(speaker_id)
+            fields_changed = ["name"]
+            if requested_type == "human" and speaker.get("speaker_type") != "human":
+                speaker["speaker_type"] = "human"
+                speaker["model_name"] = None
+                speaker["model_kind"] = None
+                speaker.pop("agent_config_id", None)
+                speaker.pop("agent_endpoint", None)
+                speaker.pop("tts_voice_preset_id", None)
+                speaker["status"] = "online"
+                speaker["mic_permission"] = "unknown"
+                speaker["device_label"] = None
+                speaker.pop("mic_error_message", None)
+                fields_changed.append("speaker_type")
             speaker["name"] = name
-            if speaker["speaker_type"] == "agent":
-                self._sync_agent_status_for_speaker(speaker)
+            self._sync_agent_status_for_speaker(speaker)
+            self._recompute_console_status()
             self.snapshot["match"]["updated_at"] = iso_now()
             self._persist_snapshot()
         return await self.emit(
             "speaker.profile_updated",
-            {"speaker_id": speaker_id, "fields": ["name"]},
+            {"speaker_id": speaker_id, "fields": sorted(set(fields_changed))},
             actor_type,
             actor_id,
         )
@@ -5181,6 +5206,7 @@ class MatchStore:
                             "vote_keys": vote_keys,
                             "winner_side": body["winner_side"],
                             "best_speaker_id": body["best_speaker_id"],
+                            "aspects": self._normalize_audience_aspects(body),
                             "ranking": ranking,
                             "created_at": iso_now(),
                         }
@@ -6040,12 +6066,16 @@ class MatchStore:
             },
         )
         audience_summary = self.snapshot["vote_state"]["audience_summary"]
+        audience_summary.setdefault("aspects", self._empty_audience_aspects())
         if not self.snapshot["vote_state"]["audience_votes"] and audience_summary.get("total", 0) == 0 and self.snapshot["vote_state"].get("audience_count", 0) > 0:
             count = int(self.snapshot["vote_state"]["audience_count"])
             winner_side = self.snapshot["vote_state"].get("winner_side", "affirmative")
             audience_summary["total"] = count
             audience_summary.setdefault("winner", {"affirmative": 0, "negative": 0})
             audience_summary["winner"][winner_side] = count
+            for vote_type in ("constructive", "process", "conclusion"):
+                audience_summary["aspects"].setdefault(vote_type, {"affirmative": 0, "negative": 0})
+                audience_summary["aspects"][vote_type][winner_side] = count
         now = iso_now()
         self.snapshot.setdefault("agent_configs", [])
         config_ids = {config.get("id") for config in self.snapshot["agent_configs"]}
@@ -6227,7 +6257,15 @@ class MatchStore:
         return {
             "total": 0,
             "winner": {"affirmative": 0, "negative": 0},
+            "aspects": self._empty_audience_aspects(),
             "best_speaker": [],
+        }
+
+    def _empty_audience_aspects(self) -> Dict[str, Dict[str, int]]:
+        return {
+            "constructive": {"affirmative": 0, "negative": 0},
+            "process": {"affirmative": 0, "negative": 0},
+            "conclusion": {"affirmative": 0, "negative": 0},
         }
 
     def _empty_xiaoqi_summary(self) -> Dict[str, Any]:
@@ -6521,9 +6559,14 @@ class MatchStore:
     def _append_audience_summary(self, body: Dict[str, Any]) -> None:
         summary = self.snapshot["vote_state"].setdefault("audience_summary", self._empty_audience_summary())
         summary.setdefault("winner", {"affirmative": 0, "negative": 0})
+        summary.setdefault("aspects", self._empty_audience_aspects())
         summary.setdefault("best_speaker", [])
         summary["total"] = int(summary.get("total", self.snapshot["vote_state"].get("audience_count", 0))) + 1
         summary["winner"][body["winner_side"]] = int(summary["winner"].get(body["winner_side"], 0)) + 1
+        aspects = self._normalize_audience_aspects(body)
+        for vote_type, side in aspects.items():
+            row = summary["aspects"].setdefault(vote_type, {"affirmative": 0, "negative": 0})
+            row[side] = int(row.get(side, 0)) + 1
 
         # 辩手排行用 Borda 计分聚合：一票里排第 1 名得 N 分、第 2 名得 N-1 分……依次递减，
         # 跨所有票累加；按总分排序，第一名即"最佳辩手"。兼容旧版只含 best_speaker_id 的票（+1 分）。
@@ -6544,6 +6587,19 @@ class MatchStore:
             reverse=True,
         )
         self.snapshot["vote_state"]["audience_count"] = summary["total"]
+
+    def _normalize_audience_aspects(self, body: Dict[str, Any]) -> Dict[str, str]:
+        raw = body.get("aspects")
+        winner_side = str(body.get("winner_side") or "affirmative")
+        if winner_side not in {"affirmative", "negative"}:
+            winner_side = "affirmative"
+        result: Dict[str, str] = {}
+        for vote_type in ("constructive", "process", "conclusion"):
+            side = raw.get(vote_type) if isinstance(raw, dict) else winner_side
+            if side not in {"affirmative", "negative"}:
+                side = winner_side
+            result[vote_type] = str(side)
+        return result
 
     def _recompute_audience_summary(self) -> None:
         votes = self.snapshot.get("vote_state", {}).get("audience_votes", [])
@@ -9560,6 +9616,14 @@ class MatchStore:
                         raise MatchStateError("invalid_vote", "排序中的辩手无效。", {"speaker_id": sid})
             elif "best_speaker_id" not in body:
                 raise MatchStateError("invalid_vote", "学生投票必须包含辩手排序。")
+            aspects = body.get("aspects")
+            if aspects is not None:
+                if not isinstance(aspects, dict):
+                    raise MatchStateError("invalid_vote", "学生投票的三维度选择无效。")
+                for vote_type in ("constructive", "process", "conclusion"):
+                    side = aspects.get(vote_type)
+                    if side not in {"affirmative", "negative"}:
+                        raise MatchStateError("invalid_vote", f"学生投票缺少 {vote_type} 维度选择。")
         winner_side = body.get("winner_side")
         if winner_side is not None:
             self._validate_side(winner_side)

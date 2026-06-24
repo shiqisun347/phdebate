@@ -3187,14 +3187,15 @@ textarea {
   font-size: 18px;
 }
 
-.identity-choice.is-agent-locked {
-  cursor: not-allowed;
-  opacity: 0.5;
-  filter: grayscale(0.4);
+.identity-choice.is-agent-convertible {
+  border-style: dashed;
 }
-.identity-choice.is-agent-locked:hover {
-  border-color: rgba(218, 230, 246, 0.11);
-  background: inherit;
+.identity-choice.is-agent-convertible em {
+  color: #ffd45e;
+}
+.identity-choice.is-agent-convertible:hover {
+  border-color: rgba(255, 212, 94, 0.42);
+  background: rgba(255, 212, 94, 0.08);
 }
 
 .entry-check-list {
@@ -7585,6 +7586,52 @@ textarea {
 .vote-side-btn--affirmative.active { border-color: #4aa3ff; background: rgba(74, 163, 255, 0.18); box-shadow: 0 0 0 3px rgba(74, 163, 255, 0.18); }
 .vote-side-btn--negative.active { border-color: #a86bff; background: rgba(168, 107, 255, 0.18); box-shadow: 0 0 0 3px rgba(168, 107, 255, 0.18); }
 
+.vote-aspect-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.vote-aspect-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border-radius: 14px;
+  border: 1.5px solid rgba(140, 170, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+}
+.vote-aspect-title {
+  text-align: center;
+  color: #eaf0ff;
+  font-size: 13px;
+  font-weight: 900;
+}
+.vote-aspect-buttons {
+  display: grid;
+  gap: 6px;
+}
+.vote-aspect-btn {
+  width: 100%;
+  min-height: 34px;
+  border-radius: 10px;
+  border: 1.5px solid rgba(140, 170, 255, 0.2);
+  background: rgba(255, 255, 255, 0.045);
+  color: #c9d6ff;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+.vote-aspect-btn.affirmative.active {
+  color: #eaf6ff;
+  border-color: #4aa3ff;
+  background: rgba(74, 163, 255, 0.2);
+}
+.vote-aspect-btn.negative.active {
+  color: #f0e8ff;
+  border-color: #a86bff;
+  background: rgba(168, 107, 255, 0.2);
+}
+
 .vote-rank-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .vote-rank-col { display: grid; gap: 7px; align-content: start; min-width: 0; }
 .vote-rank-col-title { padding: 6px 8px; border-radius: 9px; text-align: center; font-size: 12px; font-weight: 800; }
@@ -7617,6 +7664,9 @@ textarea {
 
 @media (max-width: 374px) {
   .vote-card--rank { padding-inline: 10px; }
+  .vote-aspect-grid { gap: 6px; }
+  .vote-aspect-card { padding: 7px; }
+  .vote-aspect-btn { min-height: 32px; font-size: 11px; }
   .vote-rank-grid { gap: 6px; }
   .vote-rank-card { grid-template-columns: 28px 34px minmax(0, 1fr); gap: 5px; min-height: 54px; padding: 6px; }
   .vote-rank-badge { width: 28px; height: 34px; border-radius: 10px; }
@@ -7745,6 +7795,64 @@ textarea {
   border: 1.5px solid rgba(255, 212, 94, 0.55); box-shadow: 0 6px 22px rgba(255, 190, 60, 0.22);
 }
 .ar-total-badge strong { margin: 0 3px; font-size: 32px; font-weight: 900; color: #ffd45e; }
+
+.ar-aspect-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  width: 100%;
+  max-width: 1320px;
+  margin: 0 auto;
+}
+.ar-aspect-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(140, 170, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.ar-aspect-head,
+.ar-aspect-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ar-aspect-head strong {
+  color: #fff;
+  font-size: 22px;
+  font-weight: 900;
+}
+.ar-aspect-head span {
+  color: #ffd45e;
+  font-size: 16px;
+  font-weight: 900;
+}
+.ar-aspect-bar {
+  display: flex;
+  height: 18px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.ar-aspect-bar i {
+  display: block;
+  min-width: 3px;
+  transition: width 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ar-aspect-aff { background: linear-gradient(180deg, #6fc0ff, #2f7fd6); }
+.ar-aspect-neg { background: linear-gradient(180deg, #cfa6ff, #7a4fd0); }
+.ar-aspect-foot span {
+  color: #aebfe6;
+  font-size: 17px;
+  font-weight: 850;
+}
+.ar-aspect-foot span.lead {
+  color: #fff4d1;
+  text-shadow: 0 0 16px rgba(255, 212, 94, 0.35);
+}
 
 .ar-seat { width: fit-content; padding: 2px 11px; border-radius: 999px; font-size: 14px; font-weight: 800; }
 .ar-seat-affirmative { color: #bcd9ff; background: rgba(74, 163, 255, 0.18); }

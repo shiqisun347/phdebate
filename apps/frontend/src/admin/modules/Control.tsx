@@ -3,6 +3,7 @@ import {
   Play, Pause, SkipForward, RotateCcw, Square, Bot, Sparkles,
   UserCircle2, RefreshCw, Hand, Trophy, Megaphone, Clock, Undo2,
   ArrowRight, Monitor, Vote, ChevronRight, Activity, Radio, VolumeX, Upload, ClipboardCheck,
+  Mic, MicOff,
 } from "lucide-react";
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription, Badge, Select, Textarea, Input, Separator, Spinner } from "../ui/primitives";
 import { Dialog, DialogHeader, DialogBody, DialogFooter } from "../ui/Dialog";
@@ -215,6 +216,10 @@ export function Control() {
   const isPaused = m.status === "paused";
   const isRunning = m.status === "running";
   const next = computeNextStep(snapshot);
+  const currentHumanSpeaker =
+    snapshot.current_speech
+      ? snapshot.speakers.find((speaker) => speaker.id === snapshot.current_speech?.speaker_id && speaker.speaker_type === "human")
+      : undefined;
 
   return (
     <div className="space-y-4">
@@ -227,6 +232,7 @@ export function Control() {
 
       {/* 2 比赛实况状态栏 */}
       <LiveStatusBar />
+      <HumanSpeakerMonitor />
 
       {/* 3 流程控制 */}
       <Card>
@@ -306,6 +312,16 @@ export function Control() {
               }}
             >
               <Undo2 /> 回退上一步
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!currentHumanSpeaker}
+              onClick={async () => {
+                if (await confirm({ title: "结束当前人工发言？", description: currentHumanSpeaker ? `将结束 ${currentHumanSpeaker.name} 的发言并保存当前转写。` : "当前没有人工辩手在发言。" }))
+                  void run(() => post(`${base}/speeches/current/stop`, { reason: "host_end_current_human_speech" }), { success: "已结束当前人工发言" });
+              }}
+            >
+              <Square /> 结束当前人工发言
             </Button>
             <Button
               variant="outline"
@@ -394,6 +410,119 @@ function LiveStatusBar() {
       </CardContent>
     </Card>
   );
+}
+
+function HumanSpeakerMonitor() {
+  const { snapshot, matchId } = useAdminData();
+  const { run, pending } = useAction();
+  if (!snapshot) return null;
+  const base = `/api/matches/${matchId}`;
+  const humans = [...snapshot.speakers]
+    .filter((speaker) => speaker.speaker_type === "human")
+    .sort((a, b) => (a.side === b.side ? a.seat - b.seat : a.side === "affirmative" ? -1 : 1));
+  const currentSpeech = snapshot.current_speech;
+  const currentHuman = currentSpeech
+    ? humans.find((speaker) => speaker.id === currentSpeech.speaker_id)
+    : undefined;
+  const micErrors = snapshot.speech_service.consoles.mic_errors?.length ?? 0;
+  const total = snapshot.speech_service.consoles.total || humans.length;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-sm"><Mic className="size-4" /> 人工辩手状态与开麦</CardTitle>
+            <CardDescription>赛前看是否进入页面和麦克风状态；比赛中可由控场台帮当前人工辩手开麦或结束。</CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={snapshot.speech_service.consoles.online >= total && total > 0 ? "success" : "warning"}>
+              已进入 {snapshot.speech_service.consoles.online}/{total}
+            </Badge>
+            <Badge variant={micErrors ? "destructive" : "success"}>麦克风异常 {micErrors}</Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {humans.length === 0 ? (
+          <p className="py-2 text-sm text-muted-foreground">本场没有人工辩手。</p>
+        ) : (
+          <div className="grid gap-2 lg:grid-cols-2">
+            {humans.map((speaker) => {
+              const active = currentHuman?.id === speaker.id;
+              const canStart = canHostStartHumanSpeech(snapshot, speaker);
+              const micBad = speaker.status === "mic_error" || speaker.mic_permission === "denied";
+              const entered = speaker.status === "online" || speaker.status === "mic_error" || Boolean(speaker.last_seen_at);
+              return (
+                <div key={speaker.id} className={`flex items-center gap-3 rounded-lg border p-2.5 ${active ? "border-success bg-success/5" : "border-border"}`}>
+                  <img src={resolveAvatar(speaker)} alt={speaker.name} className="size-10 shrink-0 rounded-md object-cover" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="truncate text-sm font-medium text-foreground">{speaker.name}</span>
+                      <span className="text-xs text-muted-foreground">{sideLabel(speaker.side)}{seatLabel(speaker.seat)}</span>
+                      {active && <Badge variant="success">当前发言</Badge>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      <Badge variant={entered ? "success" : "muted"}>{entered ? "已进入页面" : "未进入页面"}</Badge>
+                      <Badge variant={micBad ? "destructive" : speaker.mic_permission === "granted" ? "success" : "warning"}>
+                        {micBad ? "麦克风异常" : speaker.mic_permission === "granted" ? "麦克风正常" : "麦克风待确认"}
+                      </Badge>
+                      <span className="truncate">{speaker.device_label || "未上报设备"}</span>
+                      <span>{formatSeenAt(speaker.last_seen_at)}</span>
+                    </div>
+                    {speaker.mic_error_message && <p className="mt-1 truncate text-xs text-destructive">{speaker.mic_error_message}</p>}
+                  </div>
+                  <div className="flex shrink-0 flex-col gap-1">
+                    {active ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        loading={pending}
+                        onClick={() => run(() => post(`${base}/speeches/current/stop`, { reason: "host_end_current_human_speech" }), { success: "已结束当前人工发言" })}
+                      >
+                        <Square className="size-3" /> 结束
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        loading={pending}
+                        disabled={!canStart}
+                        title={canStart ? "主持人帮该辩手开始当前发言，辩手端会进入录音状态。" : "当前环节暂不允许该辩手开麦。"}
+                        onClick={() => run(() => post(`${base}/speakers/${speaker.id}/start-speaking`), { success: `${speaker.name} 已开麦` })}
+                      >
+                        {micBad ? <MicOff className="size-3" /> : <Mic className="size-3" />} 开麦
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function canHostStartHumanSpeech(snapshot: MatchSnapshot, speaker: Speaker): boolean {
+  if (snapshot.match.status !== "running" || snapshot.current_speech) return false;
+  const phase = snapshot.phases.find((item) => item.id === snapshot.match.current_phase_id);
+  if (!phase) return false;
+  if (phase.phase_type === "free_debate") {
+    return speaker.side === snapshot.free_debate.current_turn_side;
+  }
+  return phase.side === speaker.side && phase.speaker_seat === speaker.seat;
+}
+
+function formatSeenAt(value?: string | null): string {
+  if (!value) return "无心跳";
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return "心跳未知";
+  const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (seconds < 60) return `${seconds}s 前`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}min 前`;
 }
 
 function StatusItem({ label, value }: { label: string; value: React.ReactNode }) {

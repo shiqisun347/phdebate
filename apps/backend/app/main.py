@@ -496,7 +496,7 @@ async def update_speaker_profile(match_id: str, speaker_id: str, body: Dict[str,
     await _ensure_match(match_id)
     await store.update_speaker_profile(
         speaker_id,
-        {"name": body.get("name", "")},
+        {"name": body.get("name", ""), "speaker_type": body.get("speaker_type")},
         principal.actor_type,
         principal.actor_id,
     )

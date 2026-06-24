@@ -14,6 +14,11 @@ type VoteSpeaker = VoteOptions["speakers"][number];
 export function VotePage({ matchId }: VotePageProps) {
   const [options, setOptions] = useState<VoteOptions | null>(null);
   const [winnerSide, setWinnerSide] = useState<Side | null>(null);
+  const [aspects, setAspects] = useState<Record<"constructive" | "process" | "conclusion", Side | null>>({
+    constructive: null,
+    process: null,
+    conclusion: null,
+  });
   const [ranking, setRanking] = useState<string[]>([]); // speaker_id，rank1 在前
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +75,11 @@ export function VotePage({ matchId }: VotePageProps) {
         await submitAudienceVote(matchId, {
           token,
           winner_side: winnerSide ?? "affirmative",
+          aspects: {
+            constructive: aspects.constructive ?? winnerSide ?? "affirmative",
+            process: aspects.process ?? winnerSide ?? "affirmative",
+            conclusion: aspects.conclusion ?? winnerSide ?? "affirmative",
+          },
           ranking,
           client_fingerprint: window.navigator.userAgent,
         });
@@ -87,7 +97,8 @@ export function VotePage({ matchId }: VotePageProps) {
 
   const voteUnavailableReason = audienceVoteUnavailableReason(options);
   const fullyRanked = ranking.length === allIds.length && allIds.length > 0;
-  const canSubmit = !submitting && !voteUnavailableReason && winnerSide != null && fullyRanked;
+  const fullyPickedAspects = aspects.constructive != null && aspects.process != null && aspects.conclusion != null;
+  const canSubmit = !submitting && !voteUnavailableReason && winnerSide != null && fullyPickedAspects && fullyRanked;
 
   return (
     <main className="vote-shell vote-shell--rank">
@@ -126,10 +137,35 @@ export function VotePage({ matchId }: VotePageProps) {
               </div>
             </div>
 
-            {/* 步骤二：8 人点选排序 */}
+            {/* 步骤二：三个维度 */}
             <div className="vote-step">
               <div className="vote-step-head">
-                <span className="vote-step-no">2</span>给 8 位辩手排名
+                <span className="vote-step-no">2</span>分别投出立论、过程、结辩
+                <em className="vote-step-tip">每一项都要选正方或反方</em>
+              </div>
+              <div className="vote-aspect-grid">
+                <AspectPicker
+                  title="立论"
+                  value={aspects.constructive}
+                  onChange={(side) => setAspects((current) => ({ ...current, constructive: side }))}
+                />
+                <AspectPicker
+                  title="过程"
+                  value={aspects.process}
+                  onChange={(side) => setAspects((current) => ({ ...current, process: side }))}
+                />
+                <AspectPicker
+                  title="结辩"
+                  value={aspects.conclusion}
+                  onChange={(side) => setAspects((current) => ({ ...current, conclusion: side }))}
+                />
+              </div>
+            </div>
+
+            {/* 步骤三：8 人点选排序 */}
+            <div className="vote-step">
+              <div className="vote-step-head">
+                <span className="vote-step-no">3</span>给 8 位辩手排名
                 <em className="vote-step-tip">按你的喜好依次点击（先点=名次靠前），再点可取消</em>
               </div>
               <div className="vote-rank-grid">
@@ -162,6 +198,8 @@ export function VotePage({ matchId }: VotePageProps) {
               ? "提交中…"
               : winnerSide == null
                 ? "请先选择胜方"
+                : !fullyPickedAspects
+                  ? "请补全三项投票"
                 : !fullyRanked
                   ? `还需排 ${allIds.length - ranking.length} 位辩手`
                   : "提交投票"}
@@ -169,6 +207,30 @@ export function VotePage({ matchId }: VotePageProps) {
         </div>
       )}
     </main>
+  );
+}
+
+function AspectPicker({
+  title,
+  value,
+  onChange,
+}: {
+  title: string;
+  value: Side | null;
+  onChange: (side: Side) => void;
+}) {
+  return (
+    <div className="vote-aspect-card">
+      <div className="vote-aspect-title">{title}</div>
+      <div className="vote-aspect-buttons">
+        <button type="button" className={`vote-aspect-btn affirmative ${value === "affirmative" ? "active" : ""}`} onClick={() => onChange("affirmative")}>
+          <span>正方</span>
+        </button>
+        <button type="button" className={`vote-aspect-btn negative ${value === "negative" ? "active" : ""}`} onClick={() => onChange("negative")}>
+          <span>反方</span>
+        </button>
+      </div>
+    </div>
   );
 }
 

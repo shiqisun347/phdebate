@@ -692,6 +692,11 @@ function AudienceResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
     .slice(0, 8);
   const champion = ranked[0];
   const rest = ranked.slice(1);
+  const aspectRows = [
+    { key: "constructive", title: "立论" },
+    { key: "process", title: "过程" },
+    { key: "conclusion", title: "结辩" },
+  ] as const;
   return (
     <section className="screen-scene audience-result-scene">
       <ScreenChrome match={snapshot.match} />
@@ -734,6 +739,32 @@ function AudienceResultScene({ snapshot }: { snapshot: MatchSnapshot }) {
           </span>
           <SideEmblem side="negative" />
         </div>
+      </div>
+
+      <div className="ar-aspect-grid">
+        {aspectRows.map((aspect) => {
+          const row = audience.aspects?.[aspect.key] ?? { affirmative: 0, negative: 0 };
+          const totalAspect = Math.max(1, row.affirmative + row.negative);
+          const affAspectPercent = Math.round((row.affirmative / totalAspect) * 100);
+          const negAspectPercent = 100 - affAspectPercent;
+          const lead = row.affirmative === row.negative ? "" : row.affirmative > row.negative ? "affirmative" : "negative";
+          return (
+            <div key={aspect.key} className="ar-aspect-card">
+              <div className="ar-aspect-head">
+                <strong>{aspect.title}</strong>
+                <span>{row.affirmative + row.negative} 票</span>
+              </div>
+              <div className="ar-aspect-bar">
+                <i className="ar-aspect-aff" style={{ width: `${affAspectPercent}%` }} />
+                <i className="ar-aspect-neg" style={{ width: `${negAspectPercent}%` }} />
+              </div>
+              <div className="ar-aspect-foot">
+                <span className={lead === "affirmative" ? "lead" : ""}>正方 {row.affirmative}</span>
+                <span className={lead === "negative" ? "lead" : ""}>反方 {row.negative}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <div className="ar-rank-title">辩手投票排行</div>
