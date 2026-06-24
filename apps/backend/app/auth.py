@@ -271,6 +271,80 @@ def update_runtime_auth_config(auth_required_value: bool, token_hashes: Optional
     return runtime_auth_status()
 
 
+def ensure_runtime_auth_seeded_from_env(updated_by: str = "startup_env_migration") -> Dict[str, Any]:
+    """Persist env-provided access tokens as hashes so restarts do not depend on .env.
+
+    This is a one-way migration: plaintext tokens remain in the process
+    environment, but only sha256 hashes are written to storage/runtime_auth.json.
+    """
+    current = _runtime_auth_config()
+    next_hashes = _normalize_token_hash_config(
+        current.get("token_hashes") if isinstance(current.get("token_hashes"), dict) else {}
+    )
+    changed = False
+
+    def add_hashes(key: str, tokens: Sequence[str]) -> None:
+        nonlocal changed
+        existing = set(_hash_values(next_hashes.get(key)))
+        for token in tokens:
+            digest = hash_token(token)
+            if digest not in existing:
+                existing.add(digest)
+                changed = True
+        if existing:
+            next_hashes[key] = sorted(existing)
+
+    add_hashes("admin_hashes", _tokens_from_env("PHDEBATE_ADMIN_TOKEN", "PHDEBATE_ADMIN_PASSWORD"))
+    add_hashes("host_hashes", _tokens_from_env("PHDEBATE_HOST_TOKEN", "PHDEBATE_HOST_PASSWORD"))
+    add_hashes("screen_hashes", _tokens_from_env("PHDEBATE_SCREEN_TOKEN"))
+    add_hashes("speaker_shared_hashes", _tokens_from_env("PHDEBATE_SPEAKER_TOKEN"))
+
+    speaker_hashes: Dict[str, Sequence[str]] = {}
+    raw_speaker_hashes = next_hashes.get("speaker_hashes")
+    if isinstance(raw_speaker_hashes, dict):
+        speaker_hashes = {
+            str(speaker_id): list(_hash_values(value))
+            for speaker_id, value in raw_speaker_hashes.items()
+            if _hash_values(value)
+        }
+    for speaker_id, token in _speaker_tokens().items():
+        existing = set(_hash_values(speaker_hashes.get(speaker_id)))
+        digest = hash_token(token)
+        if digest not in existing:
+            existing.add(digest)
+            changed = True
+        if existing:
+            speaker_hashes[speaker_id] = sorted(existing)
+    if speaker_hashes:
+        next_hashes["speaker_hashes"] = speaker_hashes
+
+    runtime_has_auth_required = isinstance(current.get("auth_required"), bool)
+    if not changed and runtime_has_auth_required:
+        return runtime_auth_status()
+
+    auth_required_value = bool(current["auth_required"]) if runtime_has_auth_required else _env_default_auth_required()
+    if auth_required_value and not _has_admin_token(next_hashes):
+        return runtime_auth_status()
+    if not changed and runtime_has_auth_required:
+        return runtime_auth_status()
+    if not changed and not any(next_hashes.values()):
+        return runtime_auth_status()
+
+    payload = {
+        "auth_required": auth_required_value,
+        "token_hashes": next_hashes,
+        "updated_at": int(time.time()),
+        "updated_by": updated_by,
+    }
+    path = _runtime_auth_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path.replace(path)
+    return runtime_auth_status()
+
+
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 

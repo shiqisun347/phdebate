@@ -886,6 +886,28 @@ def test_runtime_auth_toggle_persists_hashes_and_enforces_roles() -> None:
     assert admin_emergency.status_code == 200
 
 
+def test_runtime_auth_seeds_env_tokens_into_storage(monkeypatch, tmp_path) -> None:
+    runtime_auth = tmp_path / "runtime_auth.json"
+    monkeypatch.setenv("PHDEBATE_RUNTIME_AUTH_FILE", str(runtime_auth))
+    monkeypatch.setenv("PHDEBATE_ENV", "production")
+    monkeypatch.setenv("PHDEBATE_ADMIN_PASSWORD", "env-admin")
+    monkeypatch.setenv("PHDEBATE_HOST_PASSWORD", "env-host")
+    monkeypatch.setenv("PHDEBATE_SCREEN_TOKEN", "env-screen")
+    monkeypatch.setenv("PHDEBATE_SPEAKER_TOKENS", '{"spk_aff_3":"env-speaker"}')
+
+    from app.auth import ensure_runtime_auth_seeded_from_env, hash_token
+
+    status = ensure_runtime_auth_seeded_from_env("unit_test")
+    assert status["auth_required"] is True
+    data = json.loads(runtime_auth.read_text(encoding="utf-8"))
+    hashes = data["token_hashes"]
+    assert hash_token("env-admin") in hashes["admin_hashes"]
+    assert hash_token("env-host") in hashes["host_hashes"]
+    assert hash_token("env-screen") in hashes["screen_hashes"]
+    assert hash_token("env-speaker") in hashes["speaker_hashes"]["spk_aff_3"]
+    assert "env-admin" not in runtime_auth.read_text(encoding="utf-8")
+
+
 def test_host_shortcut_endpoints_advance_bell_and_force_stop_current_speech() -> None:
     before = client.get("/api/matches/match_001").json()["data"]
     assert before["audio_output"]["mode"] == "host"

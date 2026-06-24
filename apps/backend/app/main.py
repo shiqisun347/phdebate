@@ -31,6 +31,7 @@ from app.auth import (
     Principal,
     authorize_speaker_or_host,
     authorize_websocket,
+    ensure_runtime_auth_seeded_from_env,
     hash_token,
     require_admin,
     require_host,
@@ -61,6 +62,7 @@ _timer_task: Optional[asyncio.Task] = None
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    ensure_runtime_auth_seeded_from_env()
     await start_timer_loop()
     await store.resume_runtime_tasks()
     try:
