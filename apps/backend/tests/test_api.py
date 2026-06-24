@@ -3056,6 +3056,54 @@ def test_free_debate_idle_both_sides_exhausted_finishes_phase(monkeypatch) -> No
     assert data["flow"]["reason"] == "clock_expired"
 
 
+def test_free_debate_idle_rearms_missing_decision_timer(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    asyncio.run(store.start_phase("phase_free_debate"))
+
+    calls = []
+
+    def fake_arm(side: str, turn_index: int) -> bool:
+        calls.append((side, turn_index))
+        return True
+
+    monkeypatch.setattr(store, "_arm_free_debate_auto_agent", fake_arm)
+
+    async def seed_idle_state() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = None
+            store.snapshot["free_debate"]["current_turn_side"] = "affirmative"
+            store.snapshot["free_debate"]["turn_index"] = 3
+            store._free_debate_auto_tasks.clear()
+            for clock in store.snapshot["clocks"]:
+                if clock["name"] == "affirmative_total":
+                    clock["remaining_ms"] = 3500
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                elif clock["name"] == "negative_total":
+                    clock["remaining_ms"] = 4200
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                elif clock["name"] == "turn":
+                    clock["remaining_ms"] = clock["total_seconds"] * 1000
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                    clock.pop("expired_notified_at", None)
+            store._persist_snapshot()
+
+    asyncio.run(seed_idle_state())
+    emitted = asyncio.run(store.tick_timers())
+
+    assert calls == [("affirmative", 3)]
+    assert [event["type"] for event in emitted] == ["free_debate.reconciled"]
+    payload = emitted[0]["payload"]
+    assert payload["action"] == "rearm_idle_decision_timer"
+    assert payload["reason"] == "decision_timer_missing_while_idle"
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert data["current_speech"] is None
+    assert data["flow"]["awaiting_host_confirm"] is False
+    assert data["free_debate"]["current_turn_side"] == "affirmative"
+
+
 def test_free_debate_all_skip_triggers_random_agent(monkeypatch) -> None:
     # Keep the decision timer from firing so we isolate the all-skip path.
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
@@ -3407,7 +3455,12 @@ def test_timer_tick_emits_expiry_and_auto_ends_current_speech() -> None:
     assert data["flow"]["awaiting_host_confirm"] is False  # 自动，无需主持确认
 
     emitted_again = asyncio.run(store.tick_timers())
-    assert emitted_again == []
+    # Unit tests close the previous asyncio loop after tick_timers(), which can
+    # discard the just-armed decision task. The production timer loop stays
+    # alive; if the task is missing, the idle reconciler may safely rearm it.
+    if emitted_again:
+        assert [event["type"] for event in emitted_again] == ["free_debate.reconciled"]
+        assert emitted_again[0]["payload"]["action"] == "rearm_idle_decision_timer"
 
 
 def test_timer_tick_cuts_off_agent_tts_playback_at_timeout() -> None:

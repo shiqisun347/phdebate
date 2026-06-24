@@ -143,6 +143,7 @@ class MatchStore:
         self._conn_senders: Dict[WebSocket, asyncio.Task] = {}
         self._asr_streams: Dict[str, Any] = {}
         self._tts_grace_tasks: Dict[str, asyncio.Task] = {}
+        self._free_debate_auto_tasks: Dict[str, asyncio.Task] = {}
         self._tts_request_lock = asyncio.Lock()
         self._last_tts_request_at = 0.0
         # 预取缓存：在空档提前生成 agent 文本 + 归档 TTS，进入该环节时直接促活（见 _prefetch_speech）。
@@ -176,6 +177,7 @@ class MatchStore:
         self.events: List[Dict[str, Any]] = []
         self._asr_streams = {}
         self._clear_prepared_speeches()
+        self._cancel_free_debate_auto_tasks()
         self._voice_agent_closed_speeches.clear()
         self._abandoned_speech_ids.clear()
         self.repo.clear_match_history("match_001")
@@ -865,6 +867,7 @@ class MatchStore:
             self.events = []
             self._asr_streams = {}
             self._clear_prepared_speeches()
+            self._cancel_free_debate_auto_tasks()
             self._voice_agent_closed_speeches.clear()
             self._abandoned_speech_ids.clear()
             self.snapshot = new_snapshot
@@ -991,6 +994,7 @@ class MatchStore:
             self._asr_streams = {}
             self._abandoned_speech_ids.clear()
             self._clear_prepared_speeches()
+            self._cancel_free_debate_auto_tasks()
             self.snapshot = new_snapshot
             self._persist_snapshot()
             self._upsert_registry(self.snapshot)
@@ -1007,6 +1011,7 @@ class MatchStore:
                     raise MatchStateError("match_not_found", "未找到该比赛，无法切换。", {"match_id": target_id})
                 self._stash_active()
                 self._clear_prepared_speeches()
+                self._cancel_free_debate_auto_tasks()
                 self.snapshot = target
                 self.seq = int(target.get("last_seq", 0))
                 self._ensure_runtime_fields()
@@ -1033,6 +1038,7 @@ class MatchStore:
             self.repo.clear_match_history(target_id)
             if is_active:
                 self._clear_prepared_speeches()
+                self._cancel_free_debate_auto_tasks()
                 # 删除当前比赛：切到最近的其它比赛；没有了就回到"空白起步"（无比赛，须手动新建）。
                 remaining.sort(key=lambda m: m.get("created_at") or "", reverse=True)
                 nxt = next((m for m in remaining if self.repo.get_app_state(self._match_slot_key(str(m.get("id"))))), None)
@@ -2300,6 +2306,36 @@ class MatchStore:
                 task.cancel()
                 cancelled += 1
         self._tts_grace_tasks.clear()
+        return cancelled
+
+    def _free_debate_auto_task_key(
+        self,
+        side: str,
+        turn_index: int,
+        *,
+        match_id: Optional[str] = None,
+        phase_id: Optional[str] = None,
+    ) -> str:
+        resolved_match_id = match_id or str(self.snapshot.get("match", {}).get("id") or "")
+        resolved_phase_id = phase_id or str(self.snapshot.get("match", {}).get("current_phase_id") or "")
+        return f"{resolved_match_id}:{resolved_phase_id}:{side}:{int(turn_index)}"
+
+    def _has_free_debate_auto_task(self, side: str, turn_index: int) -> bool:
+        key = self._free_debate_auto_task_key(side, turn_index)
+        task = self._free_debate_auto_tasks.get(key)
+        if task and not task.done():
+            return True
+        if task:
+            self._free_debate_auto_tasks.pop(key, None)
+        return False
+
+    def _cancel_free_debate_auto_tasks(self) -> int:
+        cancelled = 0
+        for task in list(self._free_debate_auto_tasks.values()):
+            if not task.done():
+                task.cancel()
+                cancelled += 1
+        self._free_debate_auto_tasks.clear()
         return cancelled
 
     def _abandon_active_realtime_for_takeover(self, *, preserve_speech_id: str = "") -> Dict[str, Any]:
@@ -5135,6 +5171,18 @@ class MatchStore:
                 },
                 None,
             )
+
+        if self._free_debate_side_has_time(current_side) and not self._has_free_debate_auto_task(current_side, turn_index):
+            if self._arm_free_debate_auto_agent(current_side, turn_index):
+                return (
+                    {
+                        "action": "rearm_idle_decision_timer",
+                        "reason": "decision_timer_missing_while_idle",
+                        "side": current_side,
+                        "turn_index": turn_index,
+                    },
+                    None,
+                )
 
         return None, None
 
@@ -9428,14 +9476,30 @@ class MatchStore:
         except Exception:
             pass
 
-    def _arm_free_debate_auto_agent(self, side: str, turn_index: int) -> None:
+    def _arm_free_debate_auto_agent(self, side: str, turn_index: int) -> bool:
         """Schedule a background task: if the side has not started speaking within the
         decision window (and has not all-skipped), a random agent on that side answers."""
         try:
-            asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            return
-        asyncio.create_task(self._free_debate_auto_agent_after_delay(side, turn_index))
+            return False
+        match_id = str(self.snapshot.get("match", {}).get("id") or "")
+        phase_id = str(self.snapshot.get("match", {}).get("current_phase_id") or "")
+        key = self._free_debate_auto_task_key(side, turn_index, match_id=match_id, phase_id=phase_id)
+        existing = self._free_debate_auto_tasks.get(key)
+        if existing and not existing.done():
+            return False
+        if existing:
+            self._free_debate_auto_tasks.pop(key, None)
+        task = loop.create_task(self._free_debate_auto_agent_after_delay(side, turn_index))
+        self._free_debate_auto_tasks[key] = task
+
+        def _forget(done: asyncio.Task) -> None:
+            if self._free_debate_auto_tasks.get(key) is done:
+                self._free_debate_auto_tasks.pop(key, None)
+
+        task.add_done_callback(_forget)
+        return True
 
     async def _free_debate_auto_agent_after_delay(self, side: str, turn_index: int) -> None:
         import random
