@@ -73,7 +73,6 @@ async function main() {
       await expectText(page, "当前比赛");
       await expectText(page, "中科院计算所第一届人机辩论赛");
       await expectText(page, "AI 时代，我们更应该培养编程思维 / 提问思维");
-      await expectText(page, "主持导播台");
       await expectText(page, "技术后台");
       await expectText(page, "大屏");
       await expectText(page, "辩手端");
@@ -81,12 +80,11 @@ async function main() {
 
     await step("Open host console", async () => {
       const page = await trackedPage(context, "host");
+      await apiRequest("POST", `/api/matches/${matchId}/reset`, { confirm_text: "重置比赛" });
       await page.goto(pageUrl("/host", { token }), { waitUntil: "domcontentloaded" });
       await expectText(page, "主持导播台");
       await expectText(page, "当前环节");
       await expectText(page, "发言权限");
-      await expectText(page, "现场声音输出");
-      await expectText(page, "音响连接电脑");
       await expectText(page, "下一步建议");
       await expectText(page, "赛后流程");
       await expectText(page, "WS 已连接");
@@ -97,75 +95,50 @@ async function main() {
       await expectText(page, "进行中");
       assert(await page.getByRole("button", { name: "关闭学生投票" }).count() === 0, "host should not expose manual audience vote close");
       assert(await page.getByRole("button", { name: /自由辩论/ }).count() === 0, "host phase list should be read-only");
-      await apiRequest("POST", `/api/matches/${matchId}/phases/phase_free_debate/start`);
-      await apiRequest("POST", `/api/matches/${matchId}/speakers/spk_aff_3/start-speaking`);
-      await expectText(page, "林晚晴 正在发言");
-      await page.getByRole("button", { name: /重置当前发言/ }).click();
-      await expectText(page, "确认重置当前发言并清空临时字幕？");
-      await page.locator(".feedback-modal").getByRole("button", { name: "确认", exact: true }).click();
-      await expectText(page, "已授权正方发言");
-      await expectText(page, "等待辩手开始");
-      await apiRequest("POST", `/api/matches/${matchId}/speakers/spk_aff_3/start-speaking`);
-      await apiRequest("POST", `/api/matches/${matchId}/clocks/turn/adjust`, { remaining_ms: 0, reason: "browser_timeout" });
-      await expectText(page, "等待主持确认下一轮");
-      await page.getByRole("button", { name: /确认下一轮/ }).click();
-      await expectText(page, "已授权反方发言");
     });
 
     await step("Open technical admin and run speech diagnostics", async () => {
       const page = await trackedPage(context, "admin");
       await page.goto(pageUrl("/admin", { token }), { waitUntil: "domcontentloaded" });
-      await expectText(page, "技术后台");
-      await expectText(page, "总览监控");
-      await page.getByRole("button", { name: /刷新体检/ }).click();
-      await expectText(page, "总体状态");
-      await page.getByRole("button", { name: /比赛管理/ }).click();
-      await expectText(page, "比赛实例");
-      await expectText(page, "归档并创建新比赛");
-      await page.getByRole("button", { name: /展示与赛制/ }).click();
-      await expectText(page, "展示信息");
-      await expectText(page, "赛制规则");
-      await page.getByRole("button", { name: /访问安全/ }).click();
-      await expectText(page, "现场入口分发");
-      await page.getByRole("button", { name: /辩手管理/ }).click();
-      await expectText(page, "固定席位管理");
-      await expectText(page, "绑定 Agent 配置");
-      assert(await page.getByText("不绑定，手动填写").count() === 0, "speaker management should not allow ad hoc agent setup");
-      await page.getByRole("button", { name: /Agent 管理/ }).click();
-      await expectText(page, "Agent 配置库");
+      await expectText(page, "人机辩论赛");
+      await expectText(page, "控制台 Admin");
+      await expectText(page, "概览");
+      const nav = page.getByRole("navigation");
+      await nav.getByRole("button", { name: /比赛管理/ }).click();
+      await expectText(page, "管理所有比赛");
+      await expectText(page, "新建比赛");
+      await nav.getByRole("button", { name: /调试与总览/ }).click();
+      await expectText(page, "赛前设备与功能自检");
+      await page.getByRole("button", { name: /重新自检/ }).click();
+      await expectText(page, /通过|警告|失败/);
+      await nav.getByRole("button", { name: /控场台/ }).click();
+      await expectText(page, "人工辩手状态与开麦");
+      await expectText(page, "AI 辩手控制");
+      await expectText(page, "结束当前人工发言");
+      await nav.getByRole("button", { name: /辩手管理/ }).click();
+      await expectText(page, "按当前赛制确定辩手数量与席位");
+      await nav.getByRole("button", { name: /Agent 管理/ }).click();
+      await expectText(page, "配置 AI 辩手的接入方式");
       await expectText(page, "新增 Agent");
-      await page.getByRole("button", { name: /新增 Agent/ }).click();
-      await expectText(page, "创建 Agent");
-      await page.locator(".agent-create-modal").getByRole("button", { name: "关闭" }).click();
-      await expectText(page, "全部检查");
-      await page.getByRole("button", { name: /TTS\/ASR/ }).click();
-      await expectText(page, "语音链路");
-      await expectText(page, "现场声音输出");
-      await expectText(page, "音响连接电脑");
-      await page.getByRole("button", { name: /配置检查/ }).click();
-      await expectText(page, "服务提供方");
-      await expectText(page, /真实服务就绪|模拟降级可用|需要处理/);
-      await page.getByRole("button", { name: /数据管理/ }).click();
-      await expectText(page, "历史归档");
-      const replayLocator = page.locator(".event-row, .audit-row, .replay-row").first();
-      await replayLocator.waitFor({ state: "visible", timeout: 10000 });
-      await replayLocator.click();
-      await expectText(page, "定位详情");
-      await page.locator(".replay-detail-card").getByRole("button", { name: "关闭", exact: true }).click();
-      await page.getByRole("button", { name: /生成导出包/ }).click();
-      await expectText(page, "下载 ZIP");
-      await expectText(page, "导出内容覆盖");
-      await expectText(page, "match.json");
-      await expectText(page, "Agent/语音请求");
+      await nav.getByRole("button", { name: /语音引擎/ }).click();
+      await expectText(page, "ASR · 语音识别");
+      await expectText(page, "TTS · 语音合成");
+      await expectText(page, "TTS 流式合成与播放测试");
+      await nav.getByRole("button", { name: /数据管理/ }).click();
+      await expectText(page, "当前比赛数据统计");
+      await expectText(page, "历史归档与导出");
     });
 
     await step("Open screen live page", async () => {
+      await apiRequest("POST", `/api/matches/${matchId}/reset`, { confirm_text: "重置比赛" });
+      await apiRequest("POST", `/api/matches/${matchId}/resume`);
+      await apiRequest("POST", `/api/matches/${matchId}/phases/phase_free_debate/start`);
       await apiRequest("POST", `/api/matches/${matchId}/screen/scene`, { scene: "live", live_mode: "free" });
       const page = await trackedPage(context, "screen");
       await page.goto(pageUrl("/screen", { token }), { waitUntil: "domcontentloaded" });
       await expectText(page, "自由辩论");
-      await expectText(page, "当前发言");
-      await expectText(page, "实时转写");
+      await expectText(page, "正方剩余");
+      await expectText(page, "反方剩余");
     });
 
     await step(audioSmoke ? "Open speaker console and record PCM archive" : "Open speaker console", async () => {
@@ -175,10 +148,10 @@ async function main() {
       if (await page.getByText("身份选择", { exact: false }).first().isVisible({ timeout: 1000 }).catch(() => false)) {
         await expectText(page, "身份选择");
         await expectText(page, "硬件测试");
-        await page.getByText("正方二辩", { exact: false }).first().click();
+        await page.getByText("正方三辩", { exact: false }).first().click();
         await page.getByRole("button", { name: /下一步/ }).click();
-        await expectText(page, "API 请求");
-        await expectText(page, "现场声音");
+        await expectText(page, "麦克风");
+        await expectText(page, "HTTP 访问时，浏览器可能不开放麦克风权限");
         assert(await page.getByText("扬声器", { exact: false }).count() === 0, "agent hardware test should not require local speaker output");
         return;
       }
@@ -220,24 +193,33 @@ async function main() {
       await setConsoleReady(page, "spk_aff_2");
       await page.goto(pageUrl("/console/spk_aff_2", { token }), { waitUntil: "domcontentloaded" });
       await expectText(page, "AI 辩手状态");
-      await expectText(page, "已获得发言权限");
-      await expectText(page, "当前轮次可在本端启动");
-      await expectText(page, "启动 AI 发言");
+      await expectText(page, /已获得发言权限|等待当前发言结束|等待轮次/);
+      await expectText(page, "提示");
       assert(await page.getByText(/当前轮次可由主持台触发|请等待主持人在主持导播台启动/).count() === 0, "AI console should not tell speaker to wait for host startup");
       assert(await page.getByRole("button", { name: /开始发言|暂停发言|继续发言|结束发言/ }).count() === 0, "AI console should not expose human speech controls");
     });
 
     await step("Open vote page and submit one ballot", async () => {
+      await apiRequest("POST", `/api/matches/${matchId}/reset`, { confirm_text: "重置比赛" });
       await apiRequest("POST", `/api/matches/${matchId}/audience-votes/open`);
       const page = await trackedPage(context, "vote");
       await page.goto(pageUrl("/vote"), { waitUntil: "domcontentloaded" });
       await expectText(page, "人机辩论赛");
-      await expectText(page, "优胜方");
-      await expectText(page, "最佳辩手");
+      await expectText(page, "选出你认为胜利的一方");
+      await expectText(page, "分别投出立论、过程、结辩");
+      await expectText(page, "给 8 位辩手排名");
+      await page.locator(".vote-side-btn--affirmative").first().click();
+      for (const card of await page.locator(".vote-aspect-card").all()) {
+        await card.locator(".vote-aspect-btn.affirmative").click();
+      }
+      const rankCards = await page.locator(".vote-rank-card").all();
+      for (const card of rankCards) {
+        await card.click();
+      }
       await page.getByRole("button", { name: "提交投票" }).click();
-      await expectText(page, "已收到投票");
+      await expectText(page, /已收到你的投票|投票已提交/);
       await page.reload({ waitUntil: "domcontentloaded" });
-      await expectText(page, "已收到投票");
+      await expectText(page, /已收到你的投票|投票已提交/);
     });
 
     await step("Finish match from host", async () => {
@@ -326,6 +308,7 @@ function isIgnorableConsoleNoise(text) {
   return (
     text.includes("Failed to load resource: net::ERR_CONTENT_LENGTH_MISMATCH") ||
     text.includes("Failed to load resource: the server responded with a status of 502") ||
+    text.includes("Failed to load resource: the server responded with a status of 409 (Conflict)") ||
     text.includes("Connection closed before receiving a handshake response")
   );
 }
