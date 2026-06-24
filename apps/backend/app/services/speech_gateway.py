@@ -1144,6 +1144,7 @@ def _local_qwen_voice(voice: str) -> str:
         "neil": "dylan",
         "ethan": "dylan",
         "cherry": "aiden",
+        "adien": "aiden",
         "aiden": "aiden",
         "dylan": "dylan",
         "eric": "dylan",

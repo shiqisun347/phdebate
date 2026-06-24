@@ -93,7 +93,7 @@ const XFYUN_VOICES = [
 ];
 
 const LOCAL_QWEN_VOICES = [
-  { voice: "aiden", label: "Aiden · 本地普通男声" },
+  { voice: "aiden", label: "Aiden / Adien · 本地普通男声" },
   { voice: "ryan", label: "Ryan · 本地普通男声" },
   { voice: "dylan", label: "Dylan · 本地男声" },
   { voice: "sohee", label: "Sohee · 本地女声候选" },
@@ -643,7 +643,7 @@ function VoicePresetManager({
                       config.tts.provider === "xfyun"
                         ? "讯飞发音人 ID，如 x4_xxx"
                         : config.tts.provider === "local_qwen"
-                          ? "本地 Qwen 音色：aiden / ryan / dylan / sohee"
+                          ? "本地 Qwen 音色：aiden(adien) / ryan / dylan / sohee"
                           : "阿里云音色 ID，如 voice-xxxx（含复刻音色）"
                     }
                   />

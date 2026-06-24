@@ -24,7 +24,7 @@ TTS_BASE_URL = os.getenv("QWEN_TTS_BASE_URL", "http://127.0.0.1:12302").rstrip("
 WEBUI_TOKEN = os.getenv("QWEN_TTS_WEBUI_TOKEN", "").strip()
 DEFAULT_MODEL = os.getenv("QWEN_TTS_WEBUI_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
 
-RECOMMENDED_VOICES = {"aiden", "ryan", "dylan", "sohee"}
+RECOMMENDED_VOICES = {"aiden", "adien", "ryan", "dylan", "sohee"}
 PROBLEM_VOICES = {"serena", "eric", "uncle_fu", "vivian", "ono_anna"}
 
 app = FastAPI(title="Qwen3-TTS Web UI", version="0.1.0")
@@ -501,7 +501,7 @@ INDEX_HTML = r"""<!doctype html>
       </label>
       <div class="cols3">
         <label>语速 speed
-          <input id="speed" type="number" min="0.5" max="2.2" step="0.05" value="1.95" />
+          <input id="speed" type="number" min="0.5" max="2.2" step="0.05" value="1.4" />
         </label>
         <label>温度 temperature
           <input id="temperature" type="number" min="0" max="1" step="0.01" value="0.05" />
@@ -827,7 +827,7 @@ INDEX_HTML = r"""<!doctype html>
     $("historyRefresh").onclick = loadHistory;
     $("copy").onclick = () => navigator.clipboard?.writeText(JSON.stringify(payload(), null, 2));
     $("reset").onclick = () => {
-      $("speed").value = "1.95";
+      $("speed").value = "1.4";
       $("temperature").value = "0.05";
       $("top_k").value = "20";
       $("top_p").value = "0.5";

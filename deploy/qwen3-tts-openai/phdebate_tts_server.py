@@ -70,7 +70,12 @@ VOICE_ALIASES = {
     "host": "Aiden",
     "system": "Aiden",
     "debater_male": "Dylan",
-    "debater_female": "Serena",
+    "debater_female": "Sohee",
+    "aiden": "Aiden",
+    "adien": "Aiden",
+    "ryan": "Ryan",
+    "dylan": "Dylan",
+    "sohee": "Sohee",
     # phdebate's current AliCloud-style preset names.
     "neil": "Dylan",
     "cherry": "Aiden",
@@ -135,6 +140,8 @@ class GenerationOptions:
     top_p: float = 1.0
     repetition_penalty: float = 1.1
     speed: float = 1.0
+    volume: Optional[float] = None
+    pitch_rate: float = 1.0
 
 
 def _torch_dtype() -> torch.dtype:
@@ -320,6 +327,67 @@ def _tempo_pcm(raw_pcm: bytes, sr: int, speed: float) -> bytes:
     return proc.stdout
 
 
+def _volume_pcm(raw_pcm: bytes, volume: Optional[float]) -> bytes:
+    if volume is None or not raw_pcm:
+        return raw_pcm
+    try:
+        value = float(volume)
+    except (TypeError, ValueError):
+        return raw_pcm
+    value = max(0.0, min(100.0, value))
+    gain = value / 70.0
+    if 0.98 <= gain <= 1.02:
+        return raw_pcm
+    pcm = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32)
+    pcm = np.clip(pcm * gain, -32768, 32767).astype(np.int16)
+    return pcm.tobytes()
+
+
+def _pitch_pcm(raw_pcm: bytes, sr: int, pitch_rate: float) -> bytes:
+    try:
+        value = float(pitch_rate or 1.0)
+    except (TypeError, ValueError):
+        value = 1.0
+    value = max(0.5, min(2.0, value))
+    if 0.98 <= value <= 1.02 or not raw_pcm:
+        return raw_pcm
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(sr),
+            "-ac",
+            "1",
+            "-i",
+            "pipe:0",
+            "-filter:a",
+            f"asetrate={int(sr * value)},aresample={sr},{_atempo_chain(1.0 / value)}",
+            "-f",
+            "s16le",
+            "-ar",
+            str(sr),
+            "-ac",
+            "1",
+            "pipe:1",
+        ],
+        input=raw_pcm,
+        capture_output=True,
+        check=True,
+    )
+    return proc.stdout
+
+
+def _postprocess_pcm(raw_pcm: bytes, sr: int, opts: GenerationOptions) -> bytes:
+    raw_pcm = _pitch_pcm(raw_pcm, sr, opts.pitch_rate)
+    raw_pcm = _tempo_pcm(raw_pcm, sr, opts.speed)
+    return _volume_pcm(raw_pcm, opts.volume)
+
+
 async def _acquire_generation_slot() -> None:
     global _queue_waiters
     assert _sem is not None
@@ -367,14 +435,14 @@ def _generate_audio_chunks(opts: GenerationOptions) -> Iterable[tuple[bytes, dic
             yield _to_pcm16(audio_chunk), meta
 
 
-async def _tempo_pcm_stream(source: AsyncGenerator[bytes, None], sr: int, speed: float) -> AsyncGenerator[bytes, None]:
+async def _tempo_pcm_stream(source: AsyncGenerator[bytes, None], sr: int, speed: float, volume: Optional[float] = None) -> AsyncGenerator[bytes, None]:
     try:
         value = float(speed or 1.0)
     except (TypeError, ValueError):
         value = 1.0
     if 0.98 <= value <= 1.02:
         async for chunk in source:
-            yield chunk
+            yield _volume_pcm(chunk, volume)
         return
 
     proc = await asyncio.create_subprocess_exec(
@@ -422,7 +490,7 @@ async def _tempo_pcm_stream(source: AsyncGenerator[bytes, None], sr: int, speed:
             data = await proc.stdout.read(8192)
             if not data:
                 break
-            yield data
+            yield _volume_pcm(data, volume)
         await writer
         stderr = b""
         if proc.stderr is not None:
@@ -509,6 +577,8 @@ def _build_options(req: SpeechRequest) -> GenerationOptions:
         top_p=max(0.05, min(1.0, float(req.top_p or 1.0))),
         repetition_penalty=req.repetition_penalty,
         speed=max(0.5, min(3.0, float(req.speed or 1.0))),
+        volume=max(0.0, min(100.0, float(req.volume))) if req.volume is not None else None,
+        pitch_rate=max(0.5, min(2.0, float(req.pitch_rate or 1.0))),
     )
 
 
@@ -595,17 +665,17 @@ async def create_speech(req: SpeechRequest) -> Response:
 
     if fmt == "pcm":
         if req.stream:
-            return StreamingResponse(_tempo_pcm_stream(_pcm_stream(opts), sample_rate, opts.speed), media_type="audio/L16")
+            return StreamingResponse(_tempo_pcm_stream(_pcm_stream(opts), sample_rate, opts.speed, opts.volume), media_type="audio/L16")
         raw = await _collect_pcm(opts)
-        raw = _tempo_pcm(raw, sample_rate, opts.speed)
+        raw = _postprocess_pcm(raw, sample_rate, opts)
         return Response(content=raw, media_type="audio/L16")
     if fmt == "wav":
         raw = await _collect_pcm(opts)
-        raw = _tempo_pcm(raw, sample_rate, opts.speed)
+        raw = _postprocess_pcm(raw, sample_rate, opts)
         return Response(content=_wav_header(sample_rate, len(raw)) + raw, media_type="audio/wav")
 
     raw = await _collect_pcm(opts)
-    raw = _tempo_pcm(raw, sample_rate, opts.speed)
+    raw = _postprocess_pcm(raw, sample_rate, opts)
     return Response(content=_mp3_encode(raw, sample_rate), media_type="audio/mpeg")
 
 
@@ -662,9 +732,18 @@ async def dashscope_compatible_ws(websocket: WebSocket) -> None:
             language=str(session.get("language_type") or DEFAULT_LANGUAGE),
             instructions=str(session.get("instructions") or ""),
             speed=float(session.get("speed") or session.get("speech_rate") or 1.0),
+            chunk_size=int(session.get("chunk_size") or STREAM_CHUNK_SIZE),
+            max_new_tokens=int(session.get("max_new_tokens") or MAX_NEW_TOKENS),
+            temperature=float(session.get("temperature") or 0.7),
+            top_k=int(session.get("top_k") or 20),
+            top_p=float(session.get("top_p") or 1.0),
+            repetition_penalty=float(session.get("repetition_penalty") or 1.1),
+            volume=float(session.get("volume")) if session.get("volume") not in {None, ""} else None,
+            pitch_rate=float(session.get("pitch_rate") or 1.0),
         )
         opts = _build_options(req)
         raw_pcm = await _collect_pcm(opts)
+        raw_pcm = _postprocess_pcm(raw_pcm, sample_rate, opts)
         await _ws_send_audio(websocket, raw_pcm, req.response_format)
         await websocket.send_text(json.dumps({"type": "session.finished", "latency_ms": int((time.perf_counter() - started) * 1000)}))
     except WebSocketDisconnect:

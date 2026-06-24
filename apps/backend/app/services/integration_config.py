@@ -33,6 +33,15 @@ FORMAL_DEBATE_TTS_CHUNK_SIZE = 8
 FORMAL_DEBATE_TTS_MAX_NEW_TOKENS = 2048
 FORMAL_DEBATE_SCREEN_PLAYBACK_RATE = 1.0
 
+LOCAL_QWEN_STABLE_VOICES = {"aiden", "ryan", "dylan", "sohee"}
+LOCAL_QWEN_VOICE_ALIASES = {
+    "adien": "aiden",
+    "aiden": "aiden",
+    "ryan": "ryan",
+    "dylan": "dylan",
+    "sohee": "sohee",
+}
+
 
 ALICLOUD_ASR_DEFAULTS = {
     "provider": "alicloud",
@@ -345,6 +354,7 @@ class IntegrationConfigStore:
         self._load_file()
         self._normalize()
         self._apply_to_env()
+        self._save_file()
 
     def _seed_from_env(self) -> Dict[str, Any]:
         xfyun_secrets = {key: os.getenv(env, "").strip() for key, env in _XFYUN_ENV_KEYS.items()}
@@ -461,7 +471,10 @@ class IntegrationConfigStore:
                 section["settings"].setdefault(key, deepcopy(value))
             if kind == "tts" and provider in {"alicloud", "local_qwen"}:
                 for key, value in self._formal_tts_settings(provider).items():
-                    section["settings"].setdefault(key, deepcopy(value))
+                    if provider == "local_qwen":
+                        section["settings"][key] = deepcopy(value)
+                    else:
+                        section["settings"].setdefault(key, deepcopy(value))
             section["secrets"] = self._merge_secrets(section.get("secrets") or {}, {})
         presets = [self._normalize_voice_preset(item) for item in self.config.get("voice_presets", []) if isinstance(item, dict)]
         seen = {item["id"] for item in presets}
@@ -483,28 +496,33 @@ class IntegrationConfigStore:
         self.config["voice_presets"] = presets
 
     def _enforce_local_qwen_voice_whitelist(self, presets: List[Dict[str, Any]]) -> None:
-        stable_voices = {"aiden", "dylan", "ryan", "sohee"}
+        formal = self._formal_tts_settings("local_qwen")
         presets[:] = [
             item for item in presets
             if not (
                 item.get("provider") == "local_qwen"
-                and (
-                    str(item.get("voice") or "").strip().lower() in {"eric", "ono_anna"}
-                    or item.get("id") in {"voice_local_qwen_eric_debater", "voice_local_qwen_ono_anna_debater"}
-                )
+                and self._canonical_local_qwen_voice(item.get("voice")) not in LOCAL_QWEN_STABLE_VOICES
             )
         ]
         for item in presets:
             if item.get("provider") != "local_qwen":
                 continue
-            voice = str(item.get("voice") or "").strip().lower()
-            if voice not in stable_voices:
-                item["enabled"] = False
-                item["is_default"] = False
-                if not str(item.get("description") or "").startswith("已禁用"):
-                    item["description"] = "已禁用：现场测试音色不稳定。"
-                continue
+            voice = self._canonical_local_qwen_voice(item.get("voice"))
+            item["voice"] = voice
+            item["model"] = item.get("model") or LOCAL_QWEN_TTS_DEFAULTS["settings"]["model"]
+            for key, value in formal.items():
+                item[key] = deepcopy(value)
+            item["sample_rate"] = 24000
+            item["mode"] = "server_commit"
+            item["enabled"] = True
             item["is_default"] = voice == "dylan"
+            if not str(item.get("description") or "").strip() or str(item.get("description") or "").startswith("已禁用"):
+                item["description"] = "本地 Qwen3-TTS 稳定白名单音色，使用统一正式辩论参数。"
+
+    @staticmethod
+    def _canonical_local_qwen_voice(value: Any) -> str:
+        voice = str(value or "").strip().lower()
+        return LOCAL_QWEN_VOICE_ALIASES.get(voice, voice)
 
     def _formal_tts_settings(self, provider: str) -> Dict[str, Any]:
         settings: Dict[str, Any] = {

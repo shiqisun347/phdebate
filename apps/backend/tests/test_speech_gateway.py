@@ -14,6 +14,7 @@ from app.services.speech_gateway import (
     FunASRASRGateway,
     LocalQwenTTSGateway,
     SpeechGatewayError,
+    _local_qwen_voice,
     _local_qwen_tts_extra_payload,
     _local_qwen_tts_payload_variants,
     _prepare_local_qwen_asr_audio,
@@ -360,6 +361,11 @@ def test_local_qwen_tts_payload_variants_keep_seed_without_losing_compatibility(
     assert variants[0]["top_p"] == 0.8
     assert variants[1] == {**base, "seed": 12345}
     assert variants[2] == base
+
+
+def test_local_qwen_voice_accepts_adien_alias() -> None:
+    assert _local_qwen_voice("adien") == "aiden"
+    assert _local_qwen_voice("Aiden") == "aiden"
 
 
 def test_local_qwen_tts_strict_payload_does_not_silently_drop_formal_params(monkeypatch) -> None:
