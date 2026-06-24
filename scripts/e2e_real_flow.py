@@ -184,6 +184,7 @@ class Api:
         role: str = "host",
         speaker_id: str = "",
         json_body: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
         expected: Iterable[int] = (200,),
         name: Optional[str] = None,
         allowed_failure: bool = False,
@@ -194,7 +195,7 @@ class Api:
             response = await self.client.request(
                 method,
                 url,
-                headers=bearer(self.token_for(role, speaker_id)),
+                headers={**bearer(self.token_for(role, speaker_id)), **(headers or {})},
                 json=json_body,
             )
             latency = int((time.perf_counter() - started) * 1000)
@@ -469,8 +470,28 @@ async def recover_or_finish_agent(api: Api, speaker_ids: Iterable[str], *, fallb
             f"/api/matches/current/agent/{speaker_id}/manual-input",
             role="host",
             json_body={"content": fallback_text, "reason": fallback_reason},
+            expected=(200, 409),
+            allowed_failure=True,
             name=f"{label} manual fallback",
         )
+        if not recovered.get("ok"):
+            code = (recovered.get("error") or {}).get("code")
+            if code != "speaker_locked":
+                raise AssertionError(f"{label} manual fallback failed with {recovered}")
+            await api.request(
+                "POST",
+                "/api/matches/current/speeches/current/reset",
+                role="host",
+                json_body={"reason": f"{fallback_reason}_unlock_current"},
+                name=f"{label} reset locked speech before fallback",
+            )
+            recovered = await api.request(
+                "POST",
+                f"/api/matches/current/agent/{speaker_id}/manual-input",
+                role="host",
+                json_body={"content": fallback_text, "reason": fallback_reason},
+                name=f"{label} manual fallback retry",
+            )
         api.rec.require(f"{label} manual fallback finalized", recovered["data"]["current_speech"] is None, "current_speech cleared")
         return recovered["data"]
     api.rec.add(f"{label} remote agent completed", True, f"{speaker_id} generated final text")
@@ -509,8 +530,19 @@ async def simulate_human_turn(
     final_latency: int = 680,
     partial_count: int = 3,
     partial_delay_seconds: float = 0.08,
+    start_role: str = "speaker",
+    stop_role: str = "speaker",
+    stop_via_current: bool = False,
+    label: str = "",
 ) -> Dict[str, Any]:
-    started = await api.request("POST", f"/api/matches/current/speakers/{speaker_id}/start-speaking", role="speaker", speaker_id=speaker_id, name=f"{speaker_id} start speaking")
+    step_label = label or speaker_id
+    started = await api.request(
+        "POST",
+        f"/api/matches/current/speakers/{speaker_id}/start-speaking",
+        role=start_role,
+        speaker_id=speaker_id,
+        name=f"{step_label} start speaking",
+    )
     speech_id = started["data"]["current_speech"]["id"]
     for idx, partial in enumerate(progressive_partials(text, partial_count), start=1):
         await api.request(
@@ -519,7 +551,7 @@ async def simulate_human_turn(
             role="speaker",
             speaker_id=speaker_id,
             json_body={"text": partial, "latency_ms": 180 + idx * 80},
-            name=f"{speaker_id} asr partial {idx}",
+            name=f"{step_label} asr partial {idx}",
         )
         await asyncio.sleep(partial_delay_seconds)
     await api.request(
@@ -528,11 +560,27 @@ async def simulate_human_turn(
         role="speaker",
         speaker_id=speaker_id,
         json_body={"text": text, "latency_ms": final_latency},
-        name=f"{speaker_id} asr final",
+        name=f"{step_label} asr final",
     )
-    stopped = await api.request("POST", f"/api/matches/current/speakers/{speaker_id}/stop-speaking", role="speaker", speaker_id=speaker_id, name=f"{speaker_id} stop speaking")
+    if stop_via_current:
+        stopped = await api.request(
+            "POST",
+            "/api/matches/current/speeches/current/stop",
+            role=stop_role,
+            speaker_id=speaker_id,
+            json_body={"reason": "e2e_host_end_current_human_speech"},
+            name=f"{step_label} host stop current speech",
+        )
+    else:
+        stopped = await api.request(
+            "POST",
+            f"/api/matches/current/speakers/{speaker_id}/stop-speaking",
+            role=stop_role,
+            speaker_id=speaker_id,
+            name=f"{step_label} stop speaking",
+        )
     top = stopped["data"]["recent_transcript"][0]
-    api.rec.require(f"{speaker_id} transcript finalized", top.get("speech_id") == speech_id and top.get("text") == text, top.get("text", "")[:80])
+    api.rec.require(f"{step_label} transcript finalized", top.get("speech_id") == speech_id and top.get("text") == text, top.get("text", "")[:80])
     return stopped["data"]
 
 
@@ -593,6 +641,47 @@ def speakers_on_side(snapshot: Dict[str, Any], side: str, speaker_type: Optional
     ]
 
 
+def ranked_speaker_ids(snapshot: Dict[str, Any]) -> list[str]:
+    speakers = [
+        speaker
+        for speaker in snapshot.get("speakers", [])
+        if speaker.get("side") in {"affirmative", "negative"}
+    ]
+    return [
+        str(speaker["id"])
+        for speaker in sorted(
+            speakers,
+            key=lambda item: (0 if item.get("side") == "affirmative" else 1, int(item.get("seat") or 0)),
+        )
+    ]
+
+
+async def exercise_speaker_identity_conversion(api: Api, snapshot: Dict[str, Any]) -> None:
+    """辩手端选择 AI 卡片后确认转成人类辩手，并保存新姓名。"""
+    agent = next((speaker for speaker in snapshot.get("speakers", []) if speaker.get("speaker_type") == "agent"), None)
+    if not agent:
+        api.rec.add("speaker terminal AI-to-human conversion", True, "current lineup has no agent slot")
+        return
+    speaker_id = str(agent["id"])
+    converted = await api.request(
+        "PATCH",
+        f"/api/matches/current/speakers/{speaker_id}/profile",
+        role="speaker",
+        speaker_id=speaker_id,
+        json_body={"name": "E2E 转人工辩手", "speaker_type": "human"},
+        name="speaker terminal AI-to-human conversion",
+    )
+    speaker = next(item for item in converted["data"]["speakers"] if item["id"] == speaker_id)
+    api.rec.require(
+        "speaker terminal conversion persisted",
+        speaker.get("speaker_type") == "human"
+        and speaker.get("name") == "E2E 转人工辩手"
+        and speaker.get("mic_permission") == "unknown"
+        and not any(item.get("speaker_id") == speaker_id for item in converted["data"].get("agent_status", [])),
+        str(speaker),
+    )
+
+
 def phase_reference_text(sections: Dict[str, str], phase: Dict[str, Any], speaker: Optional[Dict[str, Any]]) -> str:
     name = str(phase.get("name") or "")
     candidates = [
@@ -607,19 +696,20 @@ def phase_reference_text(sections: Dict[str, str], phase: Dict[str, Any], speake
     return section_text(sections, candidates, fallback)
 
 
-async def maybe_start_agent_turn(api: Api, speaker_id: str, label: str) -> None:
+async def maybe_start_agent_turn(api: Api, speaker_id: str, label: str, *, force: bool = False) -> None:
     snapshot = await wait_snapshot(api)
     current = snapshot.get("current_speech") or {}
-    if current.get("speaker_id") == speaker_id:
+    if current.get("speaker_id") == speaker_id and not force:
         return
     await api.request(
         "POST",
         f"/api/matches/current/speakers/{speaker_id}/start-agent-speaking",
         role="speaker",
         speaker_id=speaker_id,
-        expected=(200, 409),
-        allowed_failure=True,
-        name=f"{label} ensure agent started",
+        json_body={"force": True, "reason": "e2e_force_agent_restart"} if force else None,
+        expected=(200,) if force else (200, 409),
+        allowed_failure=not force,
+        name=f"{label} {'force restart' if force else 'ensure agent started'}",
     )
 
 
@@ -630,6 +720,8 @@ async def complete_configured_single_phase(
     *,
     partial_count_fn,
     latency_fn,
+    host_control: bool = False,
+    force_agent: bool = False,
 ) -> Dict[str, Any]:
     snapshot = await wait_snapshot(api)
     current_phase_id = snapshot["match"]["current_phase_id"]
@@ -648,6 +740,10 @@ async def complete_configured_single_phase(
             text,
             final_latency=latency_fn(text),
             partial_count=partial_count_fn(text),
+            start_role="host" if host_control else "speaker",
+            stop_role="host" if host_control else "speaker",
+            stop_via_current=host_control,
+            label=f"{label} {'host-control' if host_control else 'speaker-control'}",
         )
         await api.request(
             "POST",
@@ -658,7 +754,7 @@ async def complete_configured_single_phase(
         )
         return data
 
-    await maybe_start_agent_turn(api, str(speaker["id"]), label)
+    await maybe_start_agent_turn(api, str(speaker["id"]), label, force=force_agent)
     return await recover_or_finish_agent(
         api,
         [str(speaker["id"])],
@@ -705,6 +801,79 @@ async def complete_free_debate_turn(
     return snapshot
 
 
+async def exercise_audience_vote_results(api: Api) -> Dict[str, Any]:
+    """真实走观众三维投票、评委票发布、观众结果页发布。"""
+    snapshot = await wait_snapshot(api)
+    ranking = ranked_speaker_ids(snapshot)
+    if len(ranking) < 8:
+        api.rec.add("audience 3-aspect voting skipped", True, f"not enough ranked speakers: {ranking}")
+        return snapshot
+
+    await api.request("POST", "/api/matches/current/audience-votes/open", role="host", name="open audience 3-aspect voting")
+    ballots = [
+        {
+            "token": "e2e-audience-aspect-001",
+            "winner_side": "affirmative",
+            "aspects": {"constructive": "affirmative", "process": "negative", "conclusion": "affirmative"},
+            "ranking": ranking,
+            "request_ip": "10.0.0.21",
+            "request_user_agent": "e2e-audience/1",
+        },
+        {
+            "token": "e2e-audience-aspect-002",
+            "winner_side": "negative",
+            "aspects": {"constructive": "negative", "process": "negative", "conclusion": "negative"},
+            "ranking": list(reversed(ranking)),
+            "request_ip": "10.0.0.22",
+            "request_user_agent": "e2e-audience/2",
+        },
+    ]
+    for idx, ballot in enumerate(ballots, start=1):
+        await api.request(
+            "POST",
+            "/api/public/matches/current/audience-votes",
+            role="screen",
+            json_body=ballot,
+            headers={"X-Forwarded-For": ballot["request_ip"]},
+            name=f"submit audience 3-aspect ballot {idx}",
+        )
+    snapshot = await wait_snapshot(api)
+    aspects = ((snapshot.get("vote_state") or {}).get("audience_summary") or {}).get("aspects") or {}
+    api.rec.require(
+        "audience aspect summary accumulated",
+        aspects.get("constructive", {}).get("affirmative", 0) >= 1
+        and aspects.get("constructive", {}).get("negative", 0) >= 1
+        and aspects.get("process", {}).get("negative", 0) >= 2
+        and aspects.get("conclusion", {}).get("negative", 0) >= 1,
+        str(aspects),
+    )
+    await api.request("POST", "/api/matches/current/audience-votes/close", role="host", name="close audience 3-aspect voting")
+    await api.request(
+        "POST",
+        "/api/matches/current/votes",
+        role="host",
+        json_body={
+            "items": [
+                {"vote_type": "constructive", "target_side": "affirmative"},
+                {"vote_type": "process", "target_side": "negative"},
+                {"vote_type": "conclusion", "target_side": "negative"},
+                {"vote_type": "winner", "target_side": "negative"},
+                {"vote_type": "best_speaker", "target_speaker_id": ranking[0]},
+            ]
+        },
+        name="submit judge result before audience publishing",
+    )
+    await api.request("POST", "/api/matches/current/votes/publish", role="host", json_body={"scope": "judge"}, name="publish judge result")
+    published = await api.request("POST", "/api/matches/current/votes/publish", role="host", json_body={"scope": "audience"}, name="publish audience result")
+    api.rec.require(
+        "audience result scene includes 3-aspect data",
+        published["data"]["match"].get("screen_scene") == "audience_result"
+        and bool(((published["data"].get("vote_state") or {}).get("audience_summary") or {}).get("aspects")),
+        str((published["data"].get("vote_state") or {}).get("audience_summary")),
+    )
+    return published["data"]
+
+
 async def run(args: argparse.Namespace) -> int:
     if args.env_file:
         load_env_file(Path(args.env_file))
@@ -741,6 +910,21 @@ async def run(args: argparse.Namespace) -> int:
         match_id = created["data"]["match_id"]
         snapshot = await wait_snapshot(api)
         rec.require("isolated match active", snapshot["match"]["id"] == match_id, match_id)
+
+        await exercise_speaker_identity_conversion(api, snapshot)
+        recreated = await api.request(
+            "POST",
+            "/api/matches",
+            role="admin",
+            json_body={
+                "title": f"phdebate E2E Real Flow {int(time.time())} clean after identity conversion",
+                "topic": "AI 时代，我们更应该培养编程思维还是提问思维",
+            },
+            name="create clean match after identity conversion",
+        )
+        match_id = recreated["data"]["match_id"]
+        snapshot = await wait_snapshot(api)
+        rec.require("clean match active after identity conversion", snapshot["match"]["id"] == match_id, match_id)
 
         await configure_all_agents(api, snapshot, args.agent_endpoint)
 
@@ -824,7 +1008,7 @@ async def run(args: argparse.Namespace) -> int:
         phase_names = [phase.get("name") for phase in snapshot.get("phases", [])]
         rec.require(
             "standard flow names match rehearsal baseline",
-            phase_names
+            phase_names[:9]
             == [
                 "正方一辩立论",
                 "反方一辩立论",
@@ -835,7 +1019,8 @@ async def run(args: argparse.Namespace) -> int:
                 "自由辩论",
                 "反方四辩总结",
                 "正方四辩总结",
-            ],
+            ]
+            and all("点评" in str(name) or "评委" in str(name) for name in phase_names[9:]),
             " -> ".join(str(name) for name in phase_names),
         )
 
@@ -882,6 +1067,8 @@ async def run(args: argparse.Namespace) -> int:
         free_phase = next((phase for phase in phases if phase.get("phase_type") == "free_debate"), None)
         rec.require("flow contains free debate phase", bool(free_phase), str([phase.get("name") for phase in phases]))
         free_entered: Optional[Dict[str, Any]] = None
+        human_host_control_done = False
+        agent_force_restart_done = False
         for phase in phases:
             if phase.get("phase_type") == "free_debate":
                 free_entered = await wait_snapshot(api)
@@ -894,13 +1081,20 @@ async def run(args: argparse.Namespace) -> int:
                     )
                     free_entered = free_entered["data"]
                 break
+            phase_speaker = speaker_for_phase(snapshot, phase)
             await complete_configured_single_phase(
                 api,
                 phase,
                 reference_sections,
                 partial_count_fn=partial_count,
                 latency_fn=synthetic_latency,
+                host_control=not human_host_control_done and phase_speaker is not None and phase_speaker.get("speaker_type") == "human",
+                force_agent=not agent_force_restart_done and phase_speaker is not None and phase_speaker.get("speaker_type") == "agent",
             )
+            if phase_speaker and phase_speaker.get("speaker_type") == "human" and not human_host_control_done:
+                human_host_control_done = True
+            if phase_speaker and phase_speaker.get("speaker_type") == "agent" and not agent_force_restart_done:
+                agent_force_restart_done = True
             advanced = await api.request("POST", "/api/matches/current/phases/next", role="host", name=f"advance after {phase['name']}")
             if free_phase and advanced["data"]["match"].get("current_phase_id") == free_phase["id"]:
                 free_entered = advanced["data"]
@@ -1027,9 +1221,18 @@ async def run(args: argparse.Namespace) -> int:
         advanced = await api.request("POST", "/api/matches/current/phases/next", role="host", name="advance after free debate")
         finished = advanced
         post_free_phases = [phase for phase in phases if free_phase and int(phase.get("display_order") or 0) > int(free_phase.get("display_order") or 0)]
-        for phase in post_free_phases:
+        audience_voting_done = False
+        for index, phase in enumerate(post_free_phases):
             snapshot = await wait_snapshot(api)
             if snapshot["match"].get("current_phase_id") != phase["id"]:
+                continue
+            phase_speaker = speaker_for_phase(snapshot, phase)
+            if phase_speaker is None and phase.get("phase_type") not in {"constructive", "statement", "summary"}:
+                rec.add(f"{phase['name']} non-speech phase reached", True, str(phase))
+                if index == len(post_free_phases) - 1:
+                    await exercise_audience_vote_results(api)
+                    audience_voting_done = True
+                finished = await api.request("POST", "/api/matches/current/phases/next", role="host", name=f"advance after {phase['name']}")
                 continue
             await complete_configured_single_phase(
                 api,
@@ -1037,8 +1240,23 @@ async def run(args: argparse.Namespace) -> int:
                 reference_sections,
                 partial_count_fn=partial_count,
                 latency_fn=synthetic_latency,
+                force_agent=not agent_force_restart_done and phase_speaker is not None and phase_speaker.get("speaker_type") == "agent",
+                host_control=not human_host_control_done and phase_speaker is not None and phase_speaker.get("speaker_type") == "human",
             )
+            if phase_speaker and phase_speaker.get("speaker_type") == "human" and not human_host_control_done:
+                human_host_control_done = True
+            if phase_speaker and phase_speaker.get("speaker_type") == "agent" and not agent_force_restart_done:
+                agent_force_restart_done = True
+            if index == len(post_free_phases) - 1:
+                await exercise_audience_vote_results(api)
+                audience_voting_done = True
             finished = await api.request("POST", "/api/matches/current/phases/next", role="host", name=f"advance after {phase['name']}")
+        if not audience_voting_done and finished["data"]["match"]["status"] != "finished":
+            await exercise_audience_vote_results(api)
+            audience_voting_done = True
+        rec.require("host human speech controls exercised", human_host_control_done or not human_speakers, f"human_host_control_done={human_host_control_done}")
+        rec.require("force agent fixed-phase restart exercised", agent_force_restart_done or not agent_speakers, f"agent_force_restart_done={agent_force_restart_done}")
+        rec.require("audience 3-aspect result workflow exercised", audience_voting_done, f"audience_voting_done={audience_voting_done}")
         if finished["data"]["match"]["status"] != "finished":
             rec.add(
                 "phase next left match running",
