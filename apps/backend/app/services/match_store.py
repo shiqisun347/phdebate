@@ -5769,6 +5769,9 @@ class MatchStore:
             speaker["last_seen_at"] = None
             speaker.pop("mic_error_message", None)
 
+        agent_configs = deepcopy(archived.get("agent_configs", []))
+        self._ensure_agent_config_links(speakers, agent_configs, to_iso(now))
+
         agent_status = []
         for speaker in speakers:
             if speaker.get("speaker_type") != "agent":
@@ -5803,7 +5806,7 @@ class MatchStore:
             "match": match,
             "teams": deepcopy(archived.get("teams", [])),
             "speakers": speakers,
-            "agent_configs": deepcopy(archived.get("agent_configs", [])),
+            "agent_configs": agent_configs,
             "phases": phases,
             "clocks": [],
             "current_speech": None,
@@ -5833,6 +5836,45 @@ class MatchStore:
             snapshot = self.snapshot
             self.snapshot = previous_snapshot
         return snapshot
+
+    def _ensure_agent_config_links(self, speakers: List[Dict[str, Any]], agent_configs: List[Dict[str, Any]], now: str) -> None:
+        configs_by_id = {str(config.get("id") or ""): config for config in agent_configs if config.get("id")}
+        used_ids: set[str] = set()
+        for speaker in speakers:
+            if speaker.get("speaker_type") != "agent":
+                continue
+            speaker_id = str(speaker.get("id") or "")
+            desired_id = self._default_agent_config_id(speaker_id)
+            current_id = str(speaker.get("agent_config_id") or "")
+            # A speaker reusing another speaker's config is how现场配置会在重置/新建比赛时串号。
+            # New matches must keep each agent independently configurable and persistent.
+            if current_id != desired_id:
+                source = configs_by_id.get(current_id) or configs_by_id.get(desired_id)
+                if source:
+                    config = deepcopy(source)
+                    config["id"] = desired_id
+                    config["name"] = f"{speaker.get('name') or '未命名'} Agent"
+                    if speaker.get("model_name"):
+                        config["model_name"] = speaker.get("model_name")
+                    if speaker.get("model_kind"):
+                        config["model_kind"] = speaker.get("model_kind")
+                    config["updated_at"] = now
+                    config.setdefault("created_at", now)
+                    configs_by_id[desired_id] = config
+                speaker["agent_config_id"] = desired_id
+            if desired_id not in configs_by_id:
+                configs_by_id[desired_id] = self._agent_config_from_speaker(speaker, now)
+            config = configs_by_id[desired_id]
+            speaker["agent_config_id"] = desired_id
+            speaker["agent_endpoint"] = config.get("endpoint") or speaker.get("agent_endpoint") or ""
+            speaker["model_name"] = speaker.get("model_name") or config.get("model_name")
+            speaker["model_kind"] = speaker.get("model_kind") or config.get("model_kind")
+            used_ids.add(desired_id)
+        agent_configs[:] = [config for config in agent_configs if str(config.get("id") or "") in used_ids]
+        existing_ids = {str(config.get("id") or "") for config in agent_configs}
+        for config_id in sorted(used_ids):
+            if config_id not in existing_ids:
+                agent_configs.append(configs_by_id[config_id])
 
     def _fresh_vote_state(self, speakers: List[Dict[str, Any]]) -> Dict[str, Any]:
         first_speaker = next((speaker["id"] for speaker in speakers if speaker.get("side") in {"affirmative", "negative"}), "")

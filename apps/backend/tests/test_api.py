@@ -1308,6 +1308,22 @@ def test_current_match_reset_archives_old_match_and_keeps_export_downloadable() 
     assert summary_data["recent_events"][0]["match_id"] == data["match"]["id"]
 
 
+def test_current_match_reset_does_not_carry_shared_agent_config_links() -> None:
+    for speaker in store.snapshot["speakers"]:
+        if speaker["id"] == "spk_neg_1":
+            speaker["speaker_type"] = "agent"
+            speaker["agent_config_id"] = "agent_spk_aff_2"
+            speaker["model_name"] = "误串模型"
+
+    reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
+    assert reset.status_code == 200
+    data = reset.json()["data"]
+    neg1 = next(speaker for speaker in data["speakers"] if speaker["id"] == "spk_neg_1")
+    assert neg1["speaker_type"] == "agent"
+    assert neg1["agent_config_id"] == "agent_spk_neg_1"
+    assert "agent_spk_neg_1" in {config["id"] for config in data["agent_configs"]}
+
+
 def test_start_match_from_ready_goes_live_but_does_not_auto_start_clock() -> None:
     reset = client.post("/api/matches/current/reset", json={"confirm_text": "重置比赛"})
     assert reset.status_code == 200
