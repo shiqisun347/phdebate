@@ -254,11 +254,36 @@ def test_tts_speech_profile_is_stable_for_same_speaker(monkeypatch) -> None:
     assert first.options["speech_rate"] == 1.4
     assert first.options["volume"] == 70
     assert first.options["pitch_rate"] == 1.0
-    assert first.options["temperature"] == 0.05
-    assert first.options["top_p"] == 0.5
+    assert first.options["temperature"] == 0.01
+    assert first.options["top_p"] == 0.35
+    assert first.options["top_k"] == 10
+    assert first.options["stream"] is False
     assert first.options["strict_payload"] is True
     assert "不要抑扬顿挫" in first.options["instructions"]
     assert first.options["seed"] != other_speaker.options["seed"]
+
+
+def test_stable_tts_segments_use_large_chunks(monkeypatch) -> None:
+    from app.services.integration_config import integration_config
+
+    monkeypatch.delenv("PHDEBATE_TTS_MIN_SEGMENT_CHARS", raising=False)
+    monkeypatch.delenv("PHDEBATE_TTS_MAX_SEGMENT_CHARS", raising=False)
+    monkeypatch.delenv("PHDEBATE_TTS_FIRST_STABLE_SEGMENT_CHARS", raising=False)
+    integration_config.config["tts"]["provider"] = "local_qwen"
+    integration_config.config["tts"]["settings"].pop("min_segment_chars", None)
+    integration_config.config["tts"]["settings"].pop("max_segment_chars", None)
+    integration_config.config["tts"]["settings"].pop("first_segment_chars", None)
+
+    text = (
+        "感谢主席，各位评委同学大家好。我方将用正式、清晰、平直的语气完成本轮发言。"
+        "第一，AI时代的交互范式已从指令执行转向意图对齐，提问思维是驾驭AI的核心接口。"
+        "对于绝大多数非技术人员，决定输出质量的不是能否写出循环，而是能否提出精准、有边界、含上下文的问题。"
+        "第二，编程思维固有的确定性逻辑难以应对概率性现实，提问思维具备更强的适应性与纠错力。"
+    )
+    first, pos = store._next_stable_tts_segment(text, 0, final=False)
+    assert len(first) >= 80
+    assert pos == len(text)
+    assert len(store._stable_tts_segments(text)) <= 3
 
 
 def test_fallback_status_loads_history_and_reports_agent_items(monkeypatch, tmp_path) -> None:

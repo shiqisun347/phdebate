@@ -7524,14 +7524,14 @@ class MatchStore:
         return raw not in {"0", "false", "no", "off", "realtime", "fast", "legacy"}
 
     def _tts_min_segment_chars(self) -> int:
-        return self._tts_setting_int("min_segment_chars", "PHDEBATE_TTS_MIN_SEGMENT_CHARS", 32, 24, 180)
+        return self._tts_setting_int("min_segment_chars", "PHDEBATE_TTS_MIN_SEGMENT_CHARS", 160, 100, 320)
 
     def _tts_max_segment_chars(self) -> int:
-        value = self._tts_setting_int("max_segment_chars", "PHDEBATE_TTS_MAX_SEGMENT_CHARS", 72, 32, 260)
-        return max(self._tts_min_segment_chars(), min(260, value))
+        value = self._tts_setting_int("max_segment_chars", "PHDEBATE_TTS_MAX_SEGMENT_CHARS", 360, 180, 520)
+        return max(self._tts_min_segment_chars(), min(520, value))
 
     def _tts_first_stable_segment_chars(self) -> int:
-        return self._tts_setting_int("first_segment_chars", "PHDEBATE_TTS_FIRST_STABLE_SEGMENT_CHARS", 24, 16, 80)
+        return self._tts_setting_int("first_segment_chars", "PHDEBATE_TTS_FIRST_STABLE_SEGMENT_CHARS", 160, 100, 320)
 
     def _stable_tts_segments(self, full_text: str) -> List[str]:
         text = normalize_tts_text(full_text)
@@ -7590,12 +7590,12 @@ class MatchStore:
         for match in self._TTS_NATURAL_BREAK_RE.finditer(window):
             if match.end() >= min_chars:
                 cut = match.end()
-        if cut <= 0:
+        if cut <= 0 and len(tail.strip()) >= max_chars:
             for match in self._TTS_ANY_BREAK_RE.finditer(window):
                 if match.end() >= min_chars:
                     cut = match.end()
-        if cut <= 0 and len(tail.strip()) >= max_chars:
-            cut = max_chars
+            if cut <= 0:
+                cut = max_chars
         if cut <= 0 and final:
             cut = len(tail)
         if cut <= 0:
@@ -8264,7 +8264,7 @@ class MatchStore:
                 options["repetition_penalty"] = self._formal_tts_repetition_penalty()
                 options["chunk_size"] = self._formal_tts_chunk_size()
                 options["max_new_tokens"] = self._formal_tts_max_new_tokens()
-                options["stream"] = True
+                options["stream"] = not self._tts_stable_mode_enabled()
                 options["language_type"] = "Chinese"
                 options["response_format"] = "mp3"
                 options["instructions"] = self._formal_tts_instructions()
@@ -8389,7 +8389,7 @@ class MatchStore:
         return self._tts_setting_int("sentence_concurrency", "PHDEBATE_TTS_SENTENCE_CONCURRENCY", default, 1, 8)
 
     def _tts_sentence_timeout_seconds(self) -> float:
-        return self._tts_setting_float("sentence_timeout_s", "PHDEBATE_TTS_SENTENCE_TIMEOUT_S", 60.0, 4.0, 120.0)
+        return self._tts_setting_float("sentence_timeout_s", "PHDEBATE_TTS_SENTENCE_TIMEOUT_S", 90.0, 8.0, 180.0)
 
     def _tts_playback_start_timeout_seconds(self) -> float:
         raw = os.getenv("PHDEBATE_TTS_PLAYBACK_START_TIMEOUT_S", "25").strip()
