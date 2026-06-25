@@ -25,9 +25,9 @@ FORMAL_DEBATE_TTS_INSTRUCTIONS = (
 FORMAL_DEBATE_TTS_SPEECH_RATE = 1.4
 FORMAL_DEBATE_TTS_VOLUME = 70
 FORMAL_DEBATE_TTS_PITCH_RATE = 1.0
-FORMAL_DEBATE_TTS_TEMPERATURE = 0.01
-FORMAL_DEBATE_TTS_TOP_P = 0.35
-FORMAL_DEBATE_TTS_TOP_K = 10
+FORMAL_DEBATE_TTS_TEMPERATURE = 0.05
+FORMAL_DEBATE_TTS_TOP_P = 0.5
+FORMAL_DEBATE_TTS_TOP_K = 20
 FORMAL_DEBATE_TTS_REPETITION_PENALTY = 1.1
 FORMAL_DEBATE_TTS_CHUNK_SIZE = 8
 FORMAL_DEBATE_TTS_MAX_NEW_TOKENS = 2048
@@ -532,18 +532,18 @@ class IntegrationConfigStore:
             "screen_playback_rate": FORMAL_DEBATE_SCREEN_PLAYBACK_RATE,
             "instructions": FORMAL_DEBATE_TTS_INSTRUCTIONS,
             "response_format": "mp3",
-            "stream": False,
+            "stream": True,
             "language_type": "Chinese",
             "chunk_size": FORMAL_DEBATE_TTS_CHUNK_SIZE,
             "max_new_tokens": FORMAL_DEBATE_TTS_MAX_NEW_TOKENS,
             "top_k": FORMAL_DEBATE_TTS_TOP_K,
             "repetition_penalty": FORMAL_DEBATE_TTS_REPETITION_PENALTY,
             "stability_mode": "stable",
-            "first_segment_chars": 160,
-            "min_segment_chars": 160,
-            "max_segment_chars": 360,
+            "first_segment_chars": 24,
+            "min_segment_chars": 32,
+            "max_segment_chars": 72,
             "sentence_concurrency": 1,
-            "sentence_timeout_s": 90,
+            "sentence_timeout_s": 60,
             "loudness_normalize": True,
             "loudness_target": -18,
             "loudness_timeout_s": 12,
