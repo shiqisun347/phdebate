@@ -24,7 +24,7 @@ if "pytest" not in _sys.modules:
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import (
@@ -568,30 +568,6 @@ async def serve_tts_audio(match_id: str, path: str) -> FileResponse:
     # 归档音频是内容寻址、写一次（文件名含 task_id + 句序号，重合成会换新 task_id→新 URL），可安全缓存。
     # 设为可缓存后，大屏「播当前句时预取下一句」能命中缓存→切换秒开，消除句间停顿。
     return FileResponse(target, media_type=media_type, headers={"Cache-Control": "public, max-age=3600"})
-
-
-@app.get("/api/tts-live/{match_id}/{speech_id}/{task_id}/{sentence_idx}")
-async def serve_live_tts_audio(match_id: str, speech_id: str, task_id: str, sentence_idx: int) -> StreamingResponse:
-    """Stream live TTS bytes directly to the screen audio element.
-
-    The archived /api/audio URL is still emitted when synthesis finishes, but this
-    endpoint lets the first audio bytes play while local Qwen is still generating.
-    """
-    snapshot = await store.get_snapshot()
-    resolved_match_id = snapshot["match"]["id"] if match_id == "current" else match_id
-    if resolved_match_id != snapshot["match"]["id"]:
-        raise HTTPException(status_code=404, detail="live TTS stream not found")
-
-    async def audio_stream():
-        async for message in tts_live_manager.subscribe((resolved_match_id, speech_id, task_id, sentence_idx)):
-            if message.get("type") == "chunk":
-                raw = message.get("audio_base64")
-                if raw:
-                    yield base64.b64decode(str(raw))
-            if message.get("type") in {"done", "error"}:
-                break
-
-    return StreamingResponse(audio_stream(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.patch("/api/matches/{match_id}/phases/{phase_id}")

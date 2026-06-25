@@ -257,7 +257,7 @@ def test_tts_speech_profile_is_stable_for_same_speaker(monkeypatch) -> None:
     assert first.options["temperature"] == 0.01
     assert first.options["top_p"] == 0.35
     assert first.options["top_k"] == 10
-    assert first.options["stream"] is True
+    assert first.options["stream"] is False
     assert first.options["strict_payload"] is True
     assert "不要抑扬顿挫" in first.options["instructions"]
     assert first.options["seed"] != other_speaker.options["seed"]
@@ -281,9 +281,9 @@ def test_stable_tts_segments_use_large_chunks(monkeypatch) -> None:
         "第二，编程思维固有的确定性逻辑难以应对概率性现实，提问思维具备更强的适应性与纠错力。"
     )
     first, pos = store._next_stable_tts_segment(text, 0, final=False)
-    assert len(first) >= 40
-    assert pos < len(text)
-    assert len(store._stable_tts_segments(text)) <= 4
+    assert len(first) >= 80
+    assert pos == len(text)
+    assert len(store._stable_tts_segments(text)) <= 3
 
 
 def test_fallback_status_loads_history_and_reports_agent_items(monkeypatch, tmp_path) -> None:

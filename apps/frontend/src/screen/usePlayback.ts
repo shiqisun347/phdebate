@@ -14,8 +14,7 @@ import {
  * 再把决策落到真实音频上。播放"逻辑"全在 reducer；这里只剩"起播/停/上报"等副作用。
  *
  * 关键点：
- *  - 快照是唯一真相；tts.sentence_stream_started 可提供同序号的临时流式 audio_url，
- *    播放器先播它，归档 URL 到达后仍作为刷新/重播兜底。
+ *  - 快照是唯一真相；live MSE 流式已废弃（忽略 tts.sentence_stream_started）。
  *  - **单个可复用的 <audio> 元素**：每段直接 `src=url; play()`。绝不为多段并行创建多个
  *    <audio> 各自 preload —— 那会在投影机浏览器上同时打开多个取流，叠加生成期间的快照刷新
  *    撑爆「同一主机并发连接上限（HTTP/1.1 约 6）」，导致中间段音频取不到而 stall/error 连环
@@ -411,21 +410,14 @@ export function usePlayback(
       // 「继续播放」也重新打开音频开关：若此前因自动播放被拦而被置 false，这里恢复。
       audioEnabledRef.current = true;
       setAudioEnabled(true);
-    } else if (lastEvent.type === "tts.sentence_ready" || lastEvent.type === "tts.sentence_stream_started") {
+    } else if (lastEvent.type === "tts.sentence_ready") {
       const url = String(p.audio_url ?? "");
       const idx = Number(p.sentence_idx ?? NaN);
       if (Number.isFinite(idx) && speechId && taskId) {
         const key = `${speechId}:${taskId}`;
         if (url) {
           if (eventChunksRef.current.key !== key) eventChunksRef.current = { key, map: new Map() };
-          const existing = eventChunksRef.current.map.get(idx);
-          const liveUrl = existing?.includes("/api/tts-live/");
-          const archivedUrl = url.includes("/api/audio/");
-          // live URL is the fast-start playback source. When the archived URL
-          // arrives for the same segment, keep the live URL so the active audio
-          // element is not reset mid-sentence. A refresh still has the archived
-          // URL in the snapshot as durable fallback.
-          if (!(liveUrl && archivedUrl)) eventChunksRef.current.map.set(idx, url);
+          eventChunksRef.current.map.set(idx, url);
         } else if (p.skipped) {
           if (eventSkipsRef.current.key !== key) eventSkipsRef.current = { key, set: new Set() };
           eventSkipsRef.current.set.add(idx);
