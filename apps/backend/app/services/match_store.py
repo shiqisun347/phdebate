@@ -5172,6 +5172,27 @@ class MatchStore:
                 None,
             )
 
+        turn_key = f"{current_side}_{turn_index}"
+        auto_handled = fd.setdefault("auto_handled", {})
+        if auto_handled.get(turn_key) and self._free_debate_side_has_time(current_side):
+            # The marker is written before run_agent_speech starts, so a failed
+            # agent request or a manual takeover can leave the round marked as
+            # handled with no active speech. Clear it so the decision window can
+            # retry instead of freezing with a few seconds left.
+            previous = auto_handled.pop(turn_key, None)
+            armed = self._arm_free_debate_auto_agent(current_side, turn_index)
+            return (
+                {
+                    "action": "retry_failed_auto_agent",
+                    "reason": "auto_handled_without_active_speech",
+                    "side": current_side,
+                    "turn_index": turn_index,
+                    "previous_speaker_id": previous,
+                    "rearmed": armed,
+                },
+                None,
+            )
+
         if self._free_debate_side_has_time(current_side) and not self._has_free_debate_auto_task(current_side, turn_index):
             if self._arm_free_debate_auto_agent(current_side, turn_index):
                 return (

@@ -161,7 +161,11 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
   useEffect(() => {
     setDraftSpeakerId(selectedSpeakerId);
     setPromoteAgentToHuman(false);
-  }, [selectedSpeakerId]);
+    identityInitializedRef.current = false;
+    const cachedName = initialDisplayName(matchId, selectedSpeakerId);
+    setDraftName(cachedName);
+    setDisplayName(cachedName);
+  }, [matchId, selectedSpeakerId]);
 
   useEffect(() => {
     if (identityInitializedRef.current || promoteAgentToHuman) return;
@@ -605,7 +609,7 @@ export function ConsolePage({ matchId, speakerId }: ConsolePageProps) {
             >
               <UserRound size={34} />
               <h1>身份选择</h1>
-              <p>请选择后台提前预设好的人类选手身份。AI 辩手由后台统一控制，仅作展示、不可选择。</p>
+              <p>请选择后台预设身份。选择 AI 席位时需确认转为人类辩手，并输入现场姓名。</p>
               <div className="identity-card-grid">
                 {snapshot.speakers.map((item) => {
                   const isAgent = item.speaker_type === "agent";

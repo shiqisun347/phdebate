@@ -1330,11 +1330,15 @@ function AudienceStats() {
   const vs = snapshot?.vote_state;
   const audience = vs?.audience_summary;
   if (!vs || !audience) return null;
+  const aspectRows = JUDGE_ASPECTS.map((aspect) => ({
+    ...aspect,
+    value: audience.aspects?.[aspect.key] ?? { affirmative: 0, negative: 0 },
+  }));
   return (
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm"><Vote className="size-4" /> 观众投票实时统计</CardTitle>
-        <CardDescription>观众扫码投票实时汇总。</CardDescription>
+        <CardDescription>观众扫码投票实时汇总，含立论 / 过程 / 结辩三项选择。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
         <div className="flex items-center justify-between text-sm">
@@ -1354,6 +1358,20 @@ function AudienceStats() {
             <p className="text-xs text-muted-foreground">反方</p>
             <p className="text-lg font-semibold text-foreground">{audience.winner.negative}</p>
           </div>
+        </div>
+        <div className="space-y-1.5 rounded-md border border-border p-2">
+          <div className="grid grid-cols-[1fr_4rem_4rem] gap-2 text-xs font-medium text-muted-foreground">
+            <span>单项票</span>
+            <span className="text-center text-sky-400">正方</span>
+            <span className="text-center text-rose-400">反方</span>
+          </div>
+          {aspectRows.map((row) => (
+            <div key={row.key} className="grid grid-cols-[1fr_4rem_4rem] items-center gap-2 text-sm">
+              <span className="text-foreground">{row.label}</span>
+              <span className="text-center font-semibold text-sky-400">{row.value.affirmative}</span>
+              <span className="text-center font-semibold text-rose-400">{row.value.negative}</span>
+            </div>
+          ))}
         </div>
       </CardContent>
     </Card>

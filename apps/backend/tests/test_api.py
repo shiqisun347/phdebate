@@ -3120,6 +3120,55 @@ def test_free_debate_idle_rearms_missing_decision_timer(monkeypatch) -> None:
     assert data["free_debate"]["current_turn_side"] == "affirmative"
 
 
+def test_free_debate_idle_retries_stale_auto_handled_turn(monkeypatch) -> None:
+    monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
+    asyncio.run(store.start_phase("phase_free_debate"))
+
+    calls = []
+
+    def fake_arm(side: str, turn_index: int) -> bool:
+        calls.append((side, turn_index))
+        return True
+
+    monkeypatch.setattr(store, "_arm_free_debate_auto_agent", fake_arm)
+
+    async def seed_idle_state() -> None:
+        async with store._lock:
+            store.snapshot["current_speech"] = None
+            store.snapshot["free_debate"]["current_turn_side"] = "negative"
+            store.snapshot["free_debate"]["turn_index"] = 8
+            store.snapshot["free_debate"].setdefault("auto_handled", {})["negative_8"] = "spk_neg_1"
+            store._free_debate_auto_tasks.clear()
+            for clock in store.snapshot["clocks"]:
+                if clock["name"] == "negative_total":
+                    clock["remaining_ms"] = 3200
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                elif clock["name"] == "affirmative_total":
+                    clock["remaining_ms"] = 2500
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                elif clock["name"] == "turn":
+                    clock["remaining_ms"] = clock["total_seconds"] * 1000
+                    clock["state"] = "paused"
+                    clock["deadline_at"] = None
+                    clock.pop("expired_notified_at", None)
+            store._persist_snapshot()
+
+    asyncio.run(seed_idle_state())
+    emitted = asyncio.run(store.tick_timers())
+
+    assert calls == [("negative", 8)]
+    assert [event["type"] for event in emitted] == ["free_debate.reconciled"]
+    payload = emitted[0]["payload"]
+    assert payload["action"] == "retry_failed_auto_agent"
+    assert payload["previous_speaker_id"] == "spk_neg_1"
+    data = client.get("/api/matches/match_001").json()["data"]
+    assert "negative_8" not in data["free_debate"].get("auto_handled", {})
+    assert data["current_speech"] is None
+    assert data["flow"]["awaiting_host_confirm"] is False
+
+
 def test_free_debate_all_skip_triggers_random_agent(monkeypatch) -> None:
     # Keep the decision timer from firing so we isolate the all-skip path.
     monkeypatch.setenv("PHDEBATE_FREE_DEBATE_DECISION_SECONDS", "99")
