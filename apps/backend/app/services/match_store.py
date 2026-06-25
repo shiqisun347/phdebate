@@ -7524,14 +7524,14 @@ class MatchStore:
         return raw not in {"0", "false", "no", "off", "realtime", "fast", "legacy"}
 
     def _tts_min_segment_chars(self) -> int:
-        return self._tts_setting_int("min_segment_chars", "PHDEBATE_TTS_MIN_SEGMENT_CHARS", 160, 100, 320)
+        return self._tts_setting_int("min_segment_chars", "PHDEBATE_TTS_MIN_SEGMENT_CHARS", 90, 60, 220)
 
     def _tts_max_segment_chars(self) -> int:
-        value = self._tts_setting_int("max_segment_chars", "PHDEBATE_TTS_MAX_SEGMENT_CHARS", 360, 180, 520)
+        value = self._tts_setting_int("max_segment_chars", "PHDEBATE_TTS_MAX_SEGMENT_CHARS", 160, 90, 320)
         return max(self._tts_min_segment_chars(), min(520, value))
 
     def _tts_first_stable_segment_chars(self) -> int:
-        return self._tts_setting_int("first_segment_chars", "PHDEBATE_TTS_FIRST_STABLE_SEGMENT_CHARS", 160, 100, 320)
+        return self._tts_setting_int("first_segment_chars", "PHDEBATE_TTS_FIRST_STABLE_SEGMENT_CHARS", 45, 30, 120)
 
     def _stable_tts_segments(self, full_text: str) -> List[str]:
         text = normalize_tts_text(full_text)
@@ -7829,10 +7829,15 @@ class MatchStore:
                         "speaker_id": speaker_id,
                         "sentence_idx": sentence_idx,
                         "mime_type": live_mime_type,
+                        "audio_url": f"/api/tts-live/{match_id}/{speech_id}/{task_id}/{sentence_idx}",
                     },
                     "screen",
                     speaker_id,
                 )
+                if sentence_idx == 0 and live_mime_type == "audio/mpeg":
+                    lead = self._tts_lead_silence_bytes()
+                    if lead:
+                        await tts_live_manager.publish_chunk(live_key, lead, 0)
                 result = await self._stream_tts_live_with_retry(selection, normalized_text, live_key, live_mime_type)
                 await tts_live_manager.finish(live_key, {"mime_type": result.mime_type, "latency_ms": result.latency_ms, "chunk_count": result.chunk_count})
             else:
@@ -8264,7 +8269,7 @@ class MatchStore:
                 options["repetition_penalty"] = self._formal_tts_repetition_penalty()
                 options["chunk_size"] = self._formal_tts_chunk_size()
                 options["max_new_tokens"] = self._formal_tts_max_new_tokens()
-                options["stream"] = not self._tts_stable_mode_enabled()
+                options["stream"] = True
                 options["language_type"] = "Chinese"
                 options["response_format"] = "mp3"
                 options["instructions"] = self._formal_tts_instructions()
@@ -8389,7 +8394,7 @@ class MatchStore:
         return self._tts_setting_int("sentence_concurrency", "PHDEBATE_TTS_SENTENCE_CONCURRENCY", default, 1, 8)
 
     def _tts_sentence_timeout_seconds(self) -> float:
-        return self._tts_setting_float("sentence_timeout_s", "PHDEBATE_TTS_SENTENCE_TIMEOUT_S", 90.0, 8.0, 180.0)
+        return self._tts_setting_float("sentence_timeout_s", "PHDEBATE_TTS_SENTENCE_TIMEOUT_S", 60.0, 8.0, 180.0)
 
     def _tts_playback_start_timeout_seconds(self) -> float:
         raw = os.getenv("PHDEBATE_TTS_PLAYBACK_START_TIMEOUT_S", "25").strip()
@@ -8537,13 +8542,12 @@ class MatchStore:
         skipped.sort()
 
     def _tts_live_mime_type(self, selection: Any) -> str:
-        # 默认关闭 live MSE 流式：投影机浏览器上它会"解码成静音/超慢"，且一旦首块不可解码，
-        # 大屏严格队列会卡在该分段永不前进。归档文件路径才是可靠的唯一真相。要试验可在进程
-        # 环境设 PHDEBATE_TTS_LIVE_STREAM=1 并重启后端（不需要改码）。
-        raw = os.getenv("PHDEBATE_TTS_LIVE_STREAM", "0").strip().lower()
+        # 本地 Qwen 的 WebUI 已验证 HTTP MP3 边生成边播放更快；这里给大屏同样的
+        # StreamingResponse URL，同时保留最终归档音频作为耐久兜底。
+        raw = os.getenv("PHDEBATE_TTS_LIVE_STREAM", "1").strip().lower()
         if raw in {"0", "false", "no", "off"}:
             return ""
-        if getattr(selection, "provider", "") != "alicloud":
+        if getattr(selection, "provider", "") not in {"alicloud", "local_qwen"}:
             return ""
         gateway = getattr(selection, "gateway", None)
         if not hasattr(gateway, "synthesize_stream") or not hasattr(gateway, "stream_mime_type"):
