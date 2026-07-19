@@ -1,0 +1,663 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-17T20:13:40.480241+00:00",
+  "dataset": {
+    "id": "AISHELL/AISHELL-3",
+    "commit": "f20d5db4a31fe779ef07bb1af4ea92da5c786622",
+    "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/tree/f20d5db4a31fe779ef07bb1af4ea92da5c786622",
+    "metadata_transport": "hf-mirror API metadata; audio bytes fetched through official Hugging Face Git LFS batch URLs",
+    "official_project_url": "https://www.openslr.org/93/",
+    "license": "Apache License 2.0",
+    "license_url": "https://www.openslr.org/93/",
+    "cosyvoice_reference": "https://github.com/FunAudioLLM/CosyVoice",
+    "metadata_sha256": {
+      "README.md": "ee88d6b71c491fd972ee4a591043b6b971384bb219629cb111c25d2ee6fb2753",
+      "spk-info.txt": "86148f95beab318ad9d08bf945b1d56ffba8c97b09137ae784cc62b0cd6539ef",
+      "train-content.txt": "ed70f67d5558124ee22e609260177eaf20aa63391dd9df8df0a7e22b9213aca0",
+      "test-content.txt": "3cd4504905becdbe4efb90b530fad0eb38e5ef7a7b2d09cf136d1ee22f53917f"
+    }
+  },
+  "processing": {
+    "target_format": "24kHz mono PCM16 WAV",
+    "same_speaker_gap_ms": 120,
+    "target_peak_dbfs": -3.5,
+    "pitch_shift": false,
+    "voice_conversion": false,
+    "synthetic_source": false,
+    "cross_speaker_mixing": false
+  },
+  "distinct_speaker_ids": [
+    "SSB0273",
+    "SSB0241",
+    "SSB0073",
+    "SSB0629",
+    "SSB0016",
+    "SSB0534",
+    "SSB0380",
+    "SSB0200"
+  ],
+  "candidates": [
+    {
+      "candidate_id": "candidate_voice_1",
+      "speaker_id": "SSB0273",
+      "speaker": {
+        "age_group": "B",
+        "gender": "male",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB02730019.wav",
+          "relative_path": "train/wav/SSB0273/SSB02730019.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0273/SSB02730019.wav",
+          "source_sha256": "904a369b748b35552f832ad98e1a4b4278a43bd54b33e695f8f8c0357af70101",
+          "duration_seconds": 3.4750113378684806,
+          "transcript": "斩断利益输送会有很大作用",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02730055.wav",
+          "relative_path": "train/wav/SSB0273/SSB02730055.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0273/SSB02730055.wav",
+          "source_sha256": "cb451488c9060df7c1f7d9ab35ab7ee4f938a65cb712feb368df19d13ada685e",
+          "duration_seconds": 3.591065759637188,
+          "transcript": "除了拍戏大多时间就是运动",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02730078.wav",
+          "relative_path": "train/wav/SSB0273/SSB02730078.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0273/SSB02730078.wav",
+          "source_sha256": "78649763ae2c074e9996d1912eb1136f753b4a2ba2e7e5d8418cb6dbb67f9054",
+          "duration_seconds": 3.8790249433106574,
+          "transcript": "包括公司全面风险管理要求",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02730029.wav",
+          "relative_path": "train/wav/SSB0273/SSB02730029.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0273/SSB02730029.wav",
+          "source_sha256": "86616616da2c31827b48c636072444e7e9a13447546c617617d2089200434d90",
+          "duration_seconds": 3.5709297052154194,
+          "transcript": "今年四十八岁的瓦达加马表示",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "67db118696aa8f0c637344871d1343374f262db87cf9451a9939773f688b053a",
+        "bytes": 542774,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 11.306875,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -21.549,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 210,
+        "silence_run_p95_ms": 210.0
+      },
+      "transcript": {
+        "text": "斩断利益输送会有很大作用，除了拍戏大多时间就是运动，包括公司全面风险管理要求，今年四十八岁的瓦达加马表示",
+        "sha256": "4a08b8053e963399466b16a5b5b79e52fc76c2dfdc1a5824c13a9db96c2742b0",
+        "cosyvoice_prompt_text_sha256": "06cc1f28e7352f4cae75ed259427937fa5e88e346d8b312a702e249c9443b77b",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_2",
+      "speaker_id": "SSB0241",
+      "speaker": {
+        "age_group": "B",
+        "gender": "male",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB02410016.wav",
+          "relative_path": "train/wav/SSB0241/SSB02410016.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0241/SSB02410016.wav",
+          "source_sha256": "dac7309f4261c2268a31bfb327981fba80d4e8c576bb1fff5e4654222c85c706",
+          "duration_seconds": 4.014988662131519,
+          "transcript": "三万五千二百二十九点五七",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02410093.wav",
+          "relative_path": "train/wav/SSB0241/SSB02410093.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0241/SSB02410093.wav",
+          "source_sha256": "8ec85bda94a21f0af96b2e303418f79bfa8b7d47faec872f628d236b04cdefe5",
+          "duration_seconds": 3.8649886621315193,
+          "transcript": "要全面贯彻落实科学发展观",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02410106.wav",
+          "relative_path": "train/wav/SSB0241/SSB02410106.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0241/SSB02410106.wav",
+          "source_sha256": "8878138e58773c9fab2006081a24ddfb1c20cdbb8376c140f84bd25b8fb14acd",
+          "duration_seconds": 3.94,
+          "transcript": "三万五千六百七十八点四八",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "2e05e8ab9919e5fd9d6d765b62ada6891afffdfb82b5173789a19ee4e9d5e67f",
+        "bytes": 507368,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 10.56925,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -23.452,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 480,
+        "silence_run_p95_ms": 320.0
+      },
+      "transcript": {
+        "text": "三万五千二百二十九点五七，要全面贯彻落实科学发展观，三万五千六百七十八点四八",
+        "sha256": "125cd30e859d338a9431014483e198efc239f3de07c9e1108480152dd8d84687",
+        "cosyvoice_prompt_text_sha256": "0153c9fdae19915f375931dcdafd271d58a61169b469bfe77b5edab936f31828",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_3",
+      "speaker_id": "SSB0073",
+      "speaker": {
+        "age_group": "B",
+        "gender": "male",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB00730047.wav",
+          "relative_path": "train/wav/SSB0073/SSB00730047.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0073/SSB00730047.wav",
+          "source_sha256": "a2f93cb411e15f67060a83db9896eff786c9e638a0dd63afc678a40fe40abb4f",
+          "duration_seconds": 3.2770521541950113,
+          "transcript": "创下东莞单月房价最高纪录",
+          "split": "train"
+        },
+        {
+          "filename": "SSB00730063.wav",
+          "relative_path": "train/wav/SSB0073/SSB00730063.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0073/SSB00730063.wav",
+          "source_sha256": "5df7bacc32e900548732ae1feddb31b00824c50cb63c82e92233daa853e4280b",
+          "duration_seconds": 5.502018140589569,
+          "transcript": "七百八十六万五千八百八十七",
+          "split": "train"
+        },
+        {
+          "filename": "SSB00730084.wav",
+          "relative_path": "train/wav/SSB0073/SSB00730084.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0073/SSB00730084.wav",
+          "source_sha256": "a7f4c6c725e5ee19fd4ffc3f9906716e2e7c0f0af13f102b5bda906922b7cb12",
+          "duration_seconds": 4.423038548752834,
+          "transcript": "七百八十一万五千四百九十八",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "7531485676b9fe9ed4af46c523f16e0f7faf0173dc8bcf417747a4f17c7ac883",
+        "bytes": 502612,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 10.470167,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -27.484,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 520,
+        "silence_run_p95_ms": 400.0
+      },
+      "transcript": {
+        "text": "创下东莞单月房价最高纪录，七百八十六万五千八百八十七，七百八十一万五千四百九十八",
+        "sha256": "b1943a79f7d53116626a8537fa28cd8dabe22f153e83c457053bf9913a92be3c",
+        "cosyvoice_prompt_text_sha256": "d91b33bea222ed6adf39d63d5a6be861951c830c429982cd64b0f0a16bda160c",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_4",
+      "speaker_id": "SSB0629",
+      "speaker": {
+        "age_group": "B",
+        "gender": "male",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB06290018.wav",
+          "relative_path": "train/wav/SSB0629/SSB06290018.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0629/SSB06290018.wav",
+          "source_sha256": "232eafa07a65551b2ecc643ce26e670f4c1df2d7c6cade05b782324224980395",
+          "duration_seconds": 4.331972789115646,
+          "transcript": "查清事故造成的危害及损失",
+          "split": "train"
+        },
+        {
+          "filename": "SSB06290019.wav",
+          "relative_path": "train/wav/SSB0629/SSB06290019.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0629/SSB06290019.wav",
+          "source_sha256": "a0edfd7d50d62e0065e4a47382b0543edce530e29540de6be463bc184c90ebb6",
+          "duration_seconds": 4.366938775510204,
+          "transcript": "比如流程的缩短平台化的应用",
+          "split": "train"
+        },
+        {
+          "filename": "SSB06290055.wav",
+          "relative_path": "train/wav/SSB0629/SSB06290055.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0629/SSB06290055.wav",
+          "source_sha256": "c9a7e8bbbc1f8b6fa629fc40a08afa0f2a55d36b06b498238985583aa6f6e496",
+          "duration_seconds": 4.300045351473923,
+          "transcript": "充分征求专家和社会公众意见",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "1d32c88e4bd1427e3834180b329e9fb887a915802f62d68c014b087f21977a1b",
+        "bytes": 533160,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 11.106583,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -20.286,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 340,
+        "silence_run_p95_ms": 260.0
+      },
+      "transcript": {
+        "text": "查清事故造成的危害及损失，比如流程的缩短平台化的应用，充分征求专家和社会公众意见",
+        "sha256": "6ee987eae305873d4af0954a456b8d0d27649b1df7aea81d4b279c247d2a90cb",
+        "cosyvoice_prompt_text_sha256": "a15ec1a3bad0e155696bba40511ff57d5da58b2123c14aaafa9919a1762d5ffd",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_5",
+      "speaker_id": "SSB0016",
+      "speaker": {
+        "age_group": "B",
+        "gender": "female",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB00160005.wav",
+          "relative_path": "train/wav/SSB0016/SSB00160005.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0016/SSB00160005.wav",
+          "source_sha256": "c8c64b31312ed733583131e1d6ac7fc8eeb7efbf3a67755586c906a1b1acf812",
+          "duration_seconds": 3.4399319727891156,
+          "transcript": "把体育当成未来的朝阳产业",
+          "split": "train"
+        },
+        {
+          "filename": "SSB00160068.wav",
+          "relative_path": "train/wav/SSB0016/SSB00160068.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0016/SSB00160068.wav",
+          "source_sha256": "46ad26349c477e284d2fc0b351c6224e7931656288c57de577d338461a4bb327",
+          "duration_seconds": 3.095827664399093,
+          "transcript": "这些女人怎么会找不到对象",
+          "split": "train"
+        },
+        {
+          "filename": "SSB00160092.wav",
+          "relative_path": "train/wav/SSB0016/SSB00160092.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0016/SSB00160092.wav",
+          "source_sha256": "e4fa2705b6442804af515bd164441ab6a073fb8637fe5ba99877d507b3ed6dd6",
+          "duration_seconds": 3.350090702947846,
+          "transcript": "有十个座位的小型公共汽车",
+          "split": "train"
+        },
+        {
+          "filename": "SSB00160015.wav",
+          "relative_path": "train/wav/SSB0016/SSB00160015.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0016/SSB00160015.wav",
+          "source_sha256": "4597ae39403474c9fbef125c0196327cdd43398259a2432d7f6f026c3bcd8633",
+          "duration_seconds": 3.3200680272108842,
+          "transcript": "抗日战争类型的电视剧有什么",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "41105727db43a32b8289783f00915a0f1c199fb406b1ff90542404f446cc4e1a",
+        "bytes": 501470,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 10.446375,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -18.725,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 110,
+        "silence_run_p95_ms": 110.0
+      },
+      "transcript": {
+        "text": "把体育当成未来的朝阳产业，这些女人怎么会找不到对象，有十个座位的小型公共汽车，抗日战争类型的电视剧有什么",
+        "sha256": "9b7a4569a35d8f1ce7d16fda71616d2cd378e92f347ace3f58cb434a07863ca8",
+        "cosyvoice_prompt_text_sha256": "d9472f164e29752cf7aaf4e7faf8d4cd1db6522047b185f04d746ed09e9c4bfc",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_6",
+      "speaker_id": "SSB0534",
+      "speaker": {
+        "age_group": "C",
+        "gender": "female",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB05340017.wav",
+          "relative_path": "train/wav/SSB0534/SSB05340017.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0534/SSB05340017.wav",
+          "source_sha256": "13d08dee58ca43befcf09e270b60c563c7f0a104dabe30a9d36869872e6a72a1",
+          "duration_seconds": 3.0499773242630384,
+          "transcript": "一线城市地价上涨最为明显",
+          "split": "train"
+        },
+        {
+          "filename": "SSB05340049.wav",
+          "relative_path": "train/wav/SSB0534/SSB05340049.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0534/SSB05340049.wav",
+          "source_sha256": "fd5b1d7f72db8ec0028e552467b9a51b9e08316329a18a804bead97c64d4e789",
+          "duration_seconds": 3.0800226757369615,
+          "transcript": "四宗溢价在百分之四十以上",
+          "split": "train"
+        },
+        {
+          "filename": "SSB05340056.wav",
+          "relative_path": "train/wav/SSB0534/SSB05340056.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0534/SSB05340056.wav",
+          "source_sha256": "423c07f623faab844df1c7fffe40941d365212ef90198e288413daf8a4c63d42",
+          "duration_seconds": 3.290045351473923,
+          "transcript": "搜狐娱乐讯据台湾媒体报道",
+          "split": "train"
+        },
+        {
+          "filename": "SSB05340068.wav",
+          "relative_path": "train/wav/SSB0534/SSB05340068.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0534/SSB05340068.wav",
+          "source_sha256": "ca210ae54346fec8db625b5c207f2d63174473ff32799d050f573bfb256d5eed",
+          "duration_seconds": 3.4100226757369616,
+          "transcript": "或者休息日之前晚上出来玩",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "74335f280e30f127ab4bb7e7df8fa4852bf1cd5a45354ef07b4f929244b2d7ea",
+        "bytes": 506100,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 10.542833,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -17.85,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 110,
+        "silence_run_p95_ms": 110.0
+      },
+      "transcript": {
+        "text": "一线城市地价上涨最为明显，四宗溢价在百分之四十以上，搜狐娱乐讯据台湾媒体报道，或者休息日之前晚上出来玩",
+        "sha256": "90448e37a6592d629b4ae5b69f988567f3fe5c97bb26cf0f8522fc16f24ef650",
+        "cosyvoice_prompt_text_sha256": "646f324e045a76520ee0cb5b3d5e977e03a45513ccbf796051273aa3ddedd660",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_7",
+      "speaker_id": "SSB0380",
+      "speaker": {
+        "age_group": "B",
+        "gender": "female",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB03800034.wav",
+          "relative_path": "train/wav/SSB0380/SSB03800034.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0380/SSB03800034.wav",
+          "source_sha256": "76aa4401a669a26bb032db4f7b7e563c85d25d218e55234ac1988ebe0421a0d3",
+          "duration_seconds": 3.5600680272108844,
+          "transcript": "两个分站赛分获亚军和季军",
+          "split": "train"
+        },
+        {
+          "filename": "SSB03800039.wav",
+          "relative_path": "train/wav/SSB0380/SSB03800039.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0380/SSB03800039.wav",
+          "source_sha256": "e0d77d86dd431dbd854b516c3d883706f924314cef5cb8802dd103ada281b283",
+          "duration_seconds": 3.155532879818594,
+          "transcript": "四百九十七万一千四百二十",
+          "split": "train"
+        },
+        {
+          "filename": "SSB03800094.wav",
+          "relative_path": "train/wav/SSB0380/SSB03800094.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0380/SSB03800094.wav",
+          "source_sha256": "cfdf0ea78596d7394cf347d3a9569529de7349b2a27466809498f563b548b4d9",
+          "duration_seconds": 3.3499773242630386,
+          "transcript": "这次招考录用工作已经恢复",
+          "split": "train"
+        },
+        {
+          "filename": "SSB03800095.wav",
+          "relative_path": "train/wav/SSB0380/SSB03800095.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0380/SSB03800095.wav",
+          "source_sha256": "b79fe3420321df75877ca9ba350a2110551168650edd2942ba45cb377134489c",
+          "duration_seconds": 3.1999546485260772,
+          "transcript": "金泰熙出演的电视剧有什么",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "fee596cfbc031eb52abec47fa128d0f71298cb226dc9d0a87bf29c4394141dac",
+        "bytes": 507138,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 10.564458,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -22.688,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 120,
+        "silence_run_p95_ms": 114.0
+      },
+      "transcript": {
+        "text": "两个分站赛分获亚军和季军，四百九十七万一千四百二十，这次招考录用工作已经恢复，金泰熙出演的电视剧有什么",
+        "sha256": "c788d65e3240f5fde53d8fb5dd734c869d8c565248fe4a7a581df71a12867dc1",
+        "cosyvoice_prompt_text_sha256": "335277659d50e46448446799ba9a276edd926f8588f6fd52cc0c216facf3d490",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    },
+    {
+      "candidate_id": "candidate_voice_8",
+      "speaker_id": "SSB0200",
+      "speaker": {
+        "age_group": "B",
+        "gender": "female",
+        "accent": "north"
+      },
+      "source_components": [
+        {
+          "filename": "SSB02000014.wav",
+          "relative_path": "train/wav/SSB0200/SSB02000014.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0200/SSB02000014.wav",
+          "source_sha256": "6a89a4fde06aed38db808c293b6335a03623b15895cdb4c9a6379653486ac6d1",
+          "duration_seconds": 3.3039682539682538,
+          "transcript": "三十一岁的刘女士是北碚人",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02000022.wav",
+          "relative_path": "train/wav/SSB0200/SSB02000022.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0200/SSB02000022.wav",
+          "source_sha256": "d2926e2a852895925a02801e6e8246d9d85f4d3d27aea956e1f1b51be137d3c4",
+          "duration_seconds": 3.649047619047619,
+          "transcript": "搜狐娱乐讯据香港媒体报道",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02000042.wav",
+          "relative_path": "train/wav/SSB0200/SSB02000042.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0200/SSB02000042.wav",
+          "source_sha256": "dd1b7c41ba986c8ea2f7bc5a266b6c6a8cba5ed39a6f8135709ec22bac897577",
+          "duration_seconds": 3.395986394557823,
+          "transcript": "设立行业共享的禁拔数据库",
+          "split": "train"
+        },
+        {
+          "filename": "SSB02000028.wav",
+          "relative_path": "train/wav/SSB0200/SSB02000028.wav",
+          "source_url": "https://huggingface.co/datasets/AISHELL/AISHELL-3/resolve/f20d5db4a31fe779ef07bb1af4ea92da5c786622/train/wav/SSB0200/SSB02000028.wav",
+          "source_sha256": "fab1fbd30dc5999b7c14cb852cac0c0c5055e341d8e7e1587b78084d09061398",
+          "duration_seconds": 4.270997732426304,
+          "transcript": "十月二日消息据香港媒体报道",
+          "split": "train"
+        }
+      ],
+      "converted_audio": {
+        "sha256": "aec2efcfb1aec4acfd5a5a62baa68fb8ebdb387dc1d2bce2d348182d09cde523",
+        "bytes": 503118,
+        "codec": "pcm_s16le",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "bit_depth": 16,
+        "duration_seconds": 10.480708,
+        "peak_dbfs": -3.5,
+        "rms_dbfs": -24.591,
+        "clipping_samples": 0,
+        "silence_run_max_ms": 550,
+        "silence_run_p95_ms": 249.0
+      },
+      "transcript": {
+        "text": "三十一岁的刘女士是北碚人，搜狐娱乐讯据香港媒体报道，设立行业共享的禁拔数据库，十月二日消息据香港媒体报道",
+        "sha256": "2b39c6ba901bd7d724b808a4b72b0bd9db73f478ced8fcf3b1c98ce3f983f15a",
+        "cosyvoice_prompt_text_sha256": "e9f47f924009cb0f426a4ad6d81e4b00d838e58cb0c2abbe26e5974db478e25f",
+        "confidence": "high: official AISHELL-3 manually transcribed character labels (>98% word/tone accuracy claim)"
+      },
+      "static_checks": {
+        "duration_8_to_15_seconds": true,
+        "sample_rate_24000_hz": true,
+        "mono": true,
+        "pcm16_wav": true,
+        "peak_at_or_below_minus_3_dbfs": true,
+        "no_clipping": true,
+        "rms_between_minus_32_and_minus_14_dbfs": true,
+        "internal_silence_run_at_most_600ms": true,
+        "transcript_present": true,
+        "neutrality_lexicon_filter_passed": true,
+        "cosyvoice_end_marker_present": true
+      },
+      "static_gate_passed": true
+    }
+  ],
+  "static_gate_passed": true
+}

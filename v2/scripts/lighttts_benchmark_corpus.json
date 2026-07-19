@@ -1,0 +1,109 @@
+{
+  "version": "2026-07-17-v1",
+  "language": "zh-CN",
+  "notes": "固定、无隐私的 LightTTS 质量语料。smoke 用于四音色快速门禁，core 用于常规质量回归，full 额外覆盖极短、长文本和特殊符号。",
+  "cases": [
+    {
+      "id": "CN_STANDARD",
+      "category": "标准中文立论",
+      "profiles": ["smoke", "core", "full"],
+      "cer_eligible": true,
+      "text": "技术进步是否增进公共利益，不能只看效率，还要考察机会是否公平，以及风险由谁承担。"
+    },
+    {
+      "id": "NAMES_PUNCTUATION",
+      "category": "人名与标点",
+      "profiles": ["smoke", "core", "full"],
+      "cer_eligible": true,
+      "text": "陈思远说：乾元、明川与知微负责立论；景行、若谷、清和、见山负责质询、驳论和总结，大家同意吗？"
+    },
+    {
+      "id": "NUMBERS_ENGLISH",
+      "category": "数字与中英文混读",
+      "profiles": ["core", "full"],
+      "cer_eligible": false,
+      "text": "二零二六年七月十七日十四点三十分，房间号五八六一零九的第三项数据增长百分之十二点五；AI、LLM、GPT、API、ASR、LightTTS、WebSocket 和 Python 都要接受复核。"
+    },
+    {
+      "id": "POLYPHONES_TERMS",
+      "category": "多音字与辩论术语",
+      "profiles": ["core", "full"],
+      "cer_eligible": true,
+      "text": "银行门口的一行人重新衡量长期数据：音乐带来快乐，重要角色仍要给予对方充分质询，并在驳论中说明证据。"
+    },
+    {
+      "id": "SIMILAR_REPETITION",
+      "category": "相似音与重复",
+      "profiles": ["core", "full"],
+      "cer_eligible": true,
+      "text": "支持不等于只知支持，质疑也不等于拒绝质询；事实是事实，价值是价值，请清楚区分前提、推理与结论。"
+    },
+    {
+      "id": "EMOTIONAL_QUESTION",
+      "category": "强势质询语气",
+      "profiles": ["core", "full"],
+      "cer_eligible": true,
+      "text": "请正面回答！如果效率提高却让弱者承担全部代价，这样的进步，真的公平吗？"
+    },
+    {
+      "id": "ONE_CHARACTER",
+      "category": "一字边界",
+      "profiles": ["full"],
+      "cer_eligible": false,
+      "text": "好"
+    },
+    {
+      "id": "FIVE_CHARACTERS",
+      "category": "五字边界",
+      "profiles": ["full"],
+      "cer_eligible": false,
+      "text": "证据最重要"
+    },
+    {
+      "id": "THIRTY_CHARACTERS",
+      "category": "三十字分段边界",
+      "profiles": ["full"],
+      "cer_eligible": true,
+      "target_visible_characters": 30,
+      "text_pattern": "证据支持结论，逻辑回应质疑。"
+    },
+    {
+      "id": "EXACT_100_CHARACTERS",
+      "category": "一百字边界",
+      "profiles": ["full"],
+      "cer_eligible": true,
+      "target_visible_characters": 100,
+      "text_pattern": "公共政策需要兼顾效率公平与长期责任，辩论必须保留事实依据和完整推理。"
+    },
+    {
+      "id": "EXACT_300_CHARACTERS",
+      "category": "三百字边界",
+      "profiles": ["full"],
+      "cer_eligible": true,
+      "target_visible_characters": 300,
+      "text_pattern": "技术能够提高效率，但学校仍要保护知情权选择权和申诉权，并让每项结论可以复核。"
+    },
+    {
+      "id": "LONG_ARGUMENT",
+      "category": "长文本多段论证",
+      "profiles": ["full"],
+      "cer_eligible": true,
+      "text": "我方首先讨论判断标准。公共政策不能只追求短期速度，还应保护参与者的知情权、选择权和申诉权。其次讨论现实效果。技术工具确实能够降低重复劳动，但如果数据来源不透明、错误无法纠正，效率就可能放大既有偏差。再次讨论长期影响。学校需要让学生理解工具如何工作，也要保留独立思考、合作表达与责任判断的训练。对方把是否使用技术误解成是否相信技术，而我方主张的是有条件地使用、持续地审计、明确地追责。综上，真正稳健的进步不是把决定全部交给系统，而是让系统帮助人作出更清楚、更公平、也更可复核的决定。"
+    },
+    {
+      "id": "SPECIAL_MARKUP",
+      "category": "模型特殊符号",
+      "profiles": ["full"],
+      "cer_eligible": false,
+      "text": "第一点：**证据**；第二点：`API`；项目符号包括一、二、三。参考地址是 https://example.com/test ，结论是可复核，而不是✅就算完成。"
+    },
+    {
+      "id": "NEAR_SYSTEM_LIMIT",
+      "category": "接近系统分段上限",
+      "profiles": ["extreme"],
+      "cer_eligible": true,
+      "target_visible_characters": 3780,
+      "text_pattern": "事实依据必须清楚，价值判断必须公开，执行结果必须允许复核。"
+    }
+  ]
+}

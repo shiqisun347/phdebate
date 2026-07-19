@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.deps import current_user, optional_user
+from app.models.entities import (
+    Competition,
+    CompetitionTopic,
+    JudgeScorecard,
+    Match,
+    RatingChange,
+    Room,
+    RoomSeat,
+    Season,
+    SeatRestoreRequest,
+    Speech,
+    User,
+)
+from app.services.match_archive import MatchArchiveNotFound, read_match_archive
+from app.services.room_service import (
+    can_control,
+    can_view_room,
+    leaderboard,
+    load_room,
+    serialize_competition,
+    serialize_room,
+    serialize_scorecard,
+    serialize_user,
+    use_public_projection,
+)
+from app.services.seasons import serialize_season
+from app.services.system_health import system_readiness
+
+router = APIRouter(prefix="/api", tags=["public"])
+API_INSTANCE_ID = os.getenv("API_INSTANCE_ID", "api-local")
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)) -> dict:
+    db.scalar(select(func.count(Competition.id)))
+    return {
+        "ok": True,
+        "service": "phdebate-v2",
+        "version": "2.0.0",
+        "instance": API_INSTANCE_ID,
+    }
+
+
+@router.get("/health/live")
+def health_live() -> dict:
+    return {
+        "ok": True,
+        "service": "phdebate-v2",
+        "version": "2.0.0",
+        "instance": API_INSTANCE_ID,
+    }
+
+
+@router.get("/health/ready")
+async def health_ready(db: Session = Depends(get_db)) -> JSONResponse:
+    result = await system_readiness(db)
+    return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
+
+
+@router.get("/competitions")
+def competitions(db: Session = Depends(get_db)) -> dict:
+    rows = db.scalars(
+        select(Competition).where(Competition.is_active.is_(True), Competition.is_public.is_(True)).order_by(Competition.created_at)
+    ).all()
+    result = []
+    for item in rows:
+        live_count = (
+            db.scalar(
+                select(func.count(Room.id)).where(
+                    Room.competition_id == item.id, Room.status.in_(["preparing", "running", "paused", "judging"])
+                )
+            )
+            or 0
+        )
+        result.append(serialize_competition(item, live_count=live_count))
+    return {"items": result}
+
+
+@router.get("/competitions/{slug}")
+def competition_detail(slug: str, db: Session = Depends(get_db)) -> dict:
+    competition = db.scalar(select(Competition).where(Competition.slug == slug, Competition.is_public.is_(True)))
+    if not competition:
+        raise HTTPException(status_code=404, detail="赛事不存在。")
+    topics = db.scalars(
+        select(CompetitionTopic).where(CompetitionTopic.competition_id == competition.id, CompetitionTopic.is_active.is_(True))
+    ).all()
+    live_rooms = db.scalars(
+        select(Room)
+        .where(
+            Room.competition_id == competition.id,
+            Room.visibility == "public",
+            Room.status.in_(["preparing", "running", "paused", "judging"]),
+        )
+        .order_by(Room.updated_at.desc())
+        .limit(20)
+    ).all()
+    return {
+        "competition": serialize_competition(competition, topics=list(topics), live_count=len(live_rooms)),
+        "season": serialize_season(competition.season) if competition.season else None,
+        "leaderboard": leaderboard(db, competition.id, competition.season_id, limit=20),
+        "live_rooms": [
+            {"code": room.code, "topic": room.topic, "status": room.status, "updated_at": room.updated_at.isoformat()}
+            for room in live_rooms
+        ],
+    }
+
+
+@router.get("/seasons")
+def seasons(db: Session = Depends(get_db)) -> dict:
+    rows = db.scalars(select(Season).order_by(Season.starts_at.desc(), Season.id)).all()
+    return {"items": [serialize_season(item) for item in rows]}
+
+
+@router.get("/rankings")
+def rankings(competition_slug: str | None = None, season_slug: str | None = None, db: Session = Depends(get_db)) -> dict:
+    competition_id = None
+    competition = None
+    if competition_slug:
+        competition = db.scalar(select(Competition).where(Competition.slug == competition_slug))
+        if not competition:
+            raise HTTPException(status_code=404, detail="赛事不存在。")
+        competition_id = competition.id
+    if season_slug:
+        season = db.scalar(select(Season).where(Season.slug == season_slug))
+        if not season:
+            raise HTTPException(status_code=404, detail="赛季不存在。")
+    elif competition and competition.season_id:
+        season = db.get(Season, competition.season_id)
+    else:
+        season = db.scalar(select(Season).where(Season.is_active.is_(True)).order_by(Season.starts_at.desc(), Season.id).limit(1))
+    return {
+        "season": serialize_season(season) if season else None,
+        "items": leaderboard(db, competition_id, season.id if season else None),
+    }
+
+
+@router.get("/live-rooms")
+def live_rooms(db: Session = Depends(get_db)) -> dict:
+    rows = db.scalars(
+        select(Room)
+        .where(
+            Room.visibility == "public",
+            Room.status.in_(["preparing", "running", "paused", "judging"]),
+        )
+        .order_by(Room.updated_at.desc())
+        .limit(30)
+    ).all()
+    return {
+        "items": [
+            {
+                "code": room.code,
+                "topic": room.topic,
+                "status": room.status,
+                "competition_name": room.competition.name,
+                "stage": room.template_snapshot[room.current_stage_index]["name"]
+                if 0 <= room.current_stage_index < len(room.template_snapshot)
+                else "准备中",
+            }
+            for room in rows
+        ]
+    }
+
+
+@router.get("/rooms/{code}/public")
+def public_room(code: str, db: Session = Depends(get_db), user: User | None = Depends(optional_user)) -> dict:
+    room = load_room(db, code)
+    if not can_view_room(db, room, user):
+        raise HTTPException(status_code=401 if not user else 403, detail="该房间不是公开房间。")
+    return {"room": serialize_room(db, room, user, public=True)}
+
+
+@router.get("/me")
+def me(
+    page: int = Query(default=1, ge=1, le=100000),
+    page_size: int = Query(default=20, ge=1, le=50),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    active_rooms = db.execute(
+        select(Room)
+        .add_columns(RoomSeat)
+        .join(RoomSeat, RoomSeat.room_id == Room.id)
+        .where(
+            RoomSeat.user_id == user.id,
+            Room.status.in_(["lobby", "preparing", "running", "paused", "judging"]),
+        )
+        .order_by(Room.updated_at.desc(), Room.id.desc())
+    ).all()
+    history_filter = (
+        select(Match.id)
+        .join(Room, Match.room_id == Room.id)
+        .join(RoomSeat, RoomSeat.room_id == Room.id)
+        .where(
+            RoomSeat.user_id == user.id,
+            Match.status.in_(["completed", "review_required", "terminated"]),
+        )
+    )
+    history_total = db.scalar(select(func.count()).select_from(history_filter.subquery())) or 0
+    history = db.execute(
+        select(Match, Room)
+        .join(Room, Match.room_id == Room.id)
+        .join(RoomSeat, RoomSeat.room_id == Room.id)
+        .where(
+            RoomSeat.user_id == user.id,
+            Match.status.in_(["completed", "review_required", "terminated"]),
+        )
+        .order_by(Match.updated_at.desc(), Match.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    rating_changes = db.scalars(
+        select(RatingChange)
+        .where(RatingChange.user_id == user.id)
+        .order_by(RatingChange.created_at.desc(), RatingChange.id.desc())
+        .limit(50)
+    ).all()
+    total_points = db.scalar(select(func.coalesce(func.sum(RatingChange.points_delta), 0)).where(RatingChange.user_id == user.id)) or 0
+    active_seat_ids = [seat.id for _room, seat in active_rooms]
+    latest_restore_by_seat: dict[str, SeatRestoreRequest] = {}
+    if active_seat_ids:
+        for request in db.scalars(
+            select(SeatRestoreRequest)
+            .where(
+                SeatRestoreRequest.seat_id.in_(active_seat_ids),
+                SeatRestoreRequest.requester_user_id == user.id,
+            )
+            .order_by(SeatRestoreRequest.created_at.desc())
+        ).all():
+            latest_restore_by_seat.setdefault(request.seat_id, request)
+    return {
+        "user": serialize_user(user),
+        "summary": {
+            "history_total": history_total,
+            "active_total": len(active_rooms),
+            "total_points": total_points,
+        },
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": history_total,
+            "pages": max(1, (history_total + page_size - 1) // page_size),
+        },
+        "active_rooms": [
+            {
+                "code": room.code,
+                "topic": room.topic,
+                "status": room.status,
+                "seat_key": seat.seat_key,
+                "occupant_type": seat.occupant_type,
+                "can_resume": seat.occupant_type == "human",
+                "restore_request": (
+                    {
+                        "id": latest_restore_by_seat[seat.id].id,
+                        "status": latest_restore_by_seat[seat.id].status,
+                        "resolution_reason": latest_restore_by_seat[seat.id].resolution_reason,
+                    }
+                    if seat.id in latest_restore_by_seat
+                    else None
+                ),
+            }
+            for room, seat in active_rooms
+        ],
+        "history": [
+            {
+                "match_id": match.id,
+                "room_code": room.code,
+                "topic": room.topic,
+                "status": match.status,
+                "winner": match.winner,
+                "completed_at": room.completed_at.isoformat() if room.completed_at else None,
+            }
+            for match, room in history
+        ],
+        "rating_changes": [
+            {
+                "match_id": item.match_id,
+                "points_delta": item.points_delta,
+                "score": item.score,
+                "reason": item.reason,
+                "source": item.source,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in rating_changes
+        ],
+    }
+
+
+@router.get("/matches/{match_id}/history")
+def match_history(match_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    match = db.get(Match, match_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="比赛不存在。")
+    room = db.get(Room, match.room_id)
+    if not can_view_room(db, room, user):
+        raise HTTPException(status_code=403, detail="无权查看该比赛。")
+    speeches = db.scalars(select(Speech).where(Speech.match_id == match.id).order_by(Speech.created_at, Speech.id)).all()
+    scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
+    return {
+        "match": {"id": match.id, "status": match.status, "winner": match.winner, "topic": room.topic, "room_code": room.code},
+        "speeches": [
+            {"seat_key": item.seat_key, "stage_key": item.stage_key, "content": item.content, "audio_url": item.audio_url}
+            for item in speeches
+        ],
+        "scorecard": serialize_scorecard(
+            scorecard,
+            expose_internal_details=user.role == "system_admin",
+            allowed_seat_keys={item.seat_key for item in room.seats},
+        ),
+    }
+
+
+@router.get("/matches/{match_id}/result")
+def match_result(match_id: str, user: User | None = Depends(optional_user), db: Session = Depends(get_db)) -> dict:
+    match = db.get(Match, match_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="比赛不存在。")
+    room = db.get(Room, match.room_id)
+    if not can_view_room(db, room, user):
+        raise HTTPException(status_code=401 if not user else 403, detail="无权查看该比赛。")
+    scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
+    changes = db.scalars(
+        select(RatingChange).where(RatingChange.match_id == match.id).order_by(RatingChange.created_at, RatingChange.id)
+    ).all()
+    rating_names = {
+        item.id: item.real_name for item in db.scalars(select(User).where(User.id.in_({change.user_id for change in changes}))).all()
+    }
+    expose_participant_ids = not use_public_projection(db, room, user)
+    return {
+        "match": {
+            "id": match.id,
+            "room_code": room.code,
+            "topic": room.topic,
+            "status": match.status,
+            "winner": match.winner,
+            "reason": match.result_reason,
+        },
+        "scorecard": serialize_scorecard(
+            scorecard,
+            expose_internal_details=bool(user and user.role == "system_admin"),
+            allowed_seat_keys={item.seat_key for item in room.seats},
+        ),
+        "rating_changes": [
+            ({"user_id": item.user_id} if expose_participant_ids else {})
+            | {
+                "display_name": rating_names.get(item.user_id, "参赛选手"),
+                "points_delta": item.points_delta,
+                "score": item.score,
+                "reason": item.reason,
+                "source": item.source,
+            }
+            for item in changes
+        ],
+    }
+
+
+@router.get("/matches/{match_id}/archive")
+def download_match_archive(match_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> Response:
+    match = db.get(Match, match_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="比赛不存在。")
+    room = db.get(Room, match.room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="比赛缺少对应房间。")
+    participant = db.scalar(select(RoomSeat.id).where(RoomSeat.room_id == room.id, RoomSeat.user_id == user.id))
+    if not participant and not can_control(db, room, user):
+        raise HTTPException(status_code=403, detail="仅参赛者、房主或系统管理员可下载比赛归档。")
+    try:
+        payload = read_match_archive(match.id)
+    except MatchArchiveNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    archive = payload.result
+    return Response(
+        content=payload.content,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="debate-{room.code}-{match.id}.json"',
+            "Cache-Control": "private, no-cache",
+            "ETag": f'"{archive.sha256}"',
+            "X-Archive-SHA256": archive.sha256,
+            "X-Archive-Source-SHA256": archive.source_sha256,
+        },
+    )

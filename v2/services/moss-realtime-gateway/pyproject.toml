@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phdebate-moss-realtime-gateway"
+version = "0.1.0"
+description = "Single-active lifecycle gateway for OpenMOSS MOSS-TTS-Realtime"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "pydantic>=2.10",
+  "uvicorn>=0.34",
+  "websockets>=15,<16",
+]
+
+[project.optional-dependencies]
+test = ["httpx>=0.28", "numpy>=1.26", "pytest>=8", "pytest-asyncio>=0.25", "ruff>=0.11"]
+
+[tool.setuptools.packages.find]
+include = ["moss_realtime_gateway*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

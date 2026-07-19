@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"apps/api/tests/conftest.py" = ["E402"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["apps/api/tests"]
+
+[tool.bandit]
+exclude_dirs = ["apps/api/tests", ".venv"]

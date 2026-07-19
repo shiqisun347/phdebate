@@ -1,0 +1,17 @@
+# Single-node, default-off LiveKit template for the 2-3 room canary.
+# Supply keys through a protected generated file; do not commit real secrets.
+port: 7880
+bind_addresses:
+  - 0.0.0.0
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+room:
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 30
+keys:
+  replace-with-livekit-api-key: replace-with-livekit-api-secret
+# Deliberately no Redis: configuring Redis switches LiveKit into distributed
+# mode and is unnecessary for the initial single-node 2-3 room deployment.

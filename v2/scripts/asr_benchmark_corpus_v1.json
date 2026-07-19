@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "language": "zh-CN",
+  "description": "稷下辩论平台固定中文 ASR 基准语料。reference 文本用于字符级评分；TTS 回转只验证系统链路，不替代真人麦克风语料。",
+  "cases": [
+    {
+      "id": "opening_education",
+      "category": "standard_chinese",
+      "reference": "开场先说明，教育公平不仅是资源数量，更是每个学生真正获得支持的机会。",
+      "voice": "debate_voice_1",
+      "head_anchor": "开场先说明",
+      "tail_anchor": "支持的机会"
+    },
+    {
+      "id": "numbers_and_units",
+      "category": "numbers",
+      "reference": "本轮有四个核心数据：二零二六年，百分之八十，耗时三点五秒，以及第七号样本。",
+      "voice": "debate_voice_2",
+      "head_anchor": "本轮有四个核心数据",
+      "tail_anchor": "第七号样本"
+    },
+    {
+      "id": "names_and_terms",
+      "category": "names_and_terms",
+      "reference": "钱学森与竺可桢都重视科学教育，本轮还要准确识别博弈论、机会成本和因果推断。",
+      "voice": "debate_voice_3",
+      "head_anchor": "钱学森与竺可桢",
+      "tail_anchor": "因果推断"
+    },
+    {
+      "id": "mixed_chinese_english",
+      "category": "mixed_language",
+      "reference": "我们使用 AI、ChatGPT、Python 和 GPU 分析数据，但结论仍需人工复核。",
+      "voice": "debate_voice_4",
+      "head_anchor": "我们使用AI",
+      "tail_anchor": "人工复核"
+    },
+    {
+      "id": "polyphonic_characters",
+      "category": "polyphonic_characters",
+      "reference": "重庆银行的行长重新审视项目，认为重量增加会影响车辆安全，我们需要作出合理判断。",
+      "voice": "debate_voice_1",
+      "head_anchor": "重庆银行的行长",
+      "tail_anchor": "合理判断"
+    },
+    {
+      "id": "head_tail_anchors",
+      "category": "boundary_integrity",
+      "reference": "句首锚点青松，正方认为人工智能能够提高课堂反馈效率，但不能替代教师的价值判断，句尾锚点白鹭。",
+      "voice": "debate_voice_3",
+      "head_anchor": "句首锚点青松",
+      "tail_anchor": "句尾锚点白鹭"
+    },
+    {
+      "id": "controlled_repetition",
+      "category": "repetition",
+      "reference": "我们反对为了效率牺牲公平，也反对为了公平忽视效率；效率与公平需要同时衡量。",
+      "voice": "debate_voice_4",
+      "head_anchor": "我们反对",
+      "tail_anchor": "同时衡量"
+    },
+    {
+      "id": "long_argument",
+      "category": "long_sentence",
+      "reference": "如果学校只追求答题速度，就可能忽略学生提出问题、核验证据和修正观点的过程；因此我们主张在保留基础训练的同时，引入同伴质询、公开论证、教师反馈和赛后复盘，让效率指标与理解深度共同进入课程评价体系，最终帮助不同基础的学生都能持续进步。",
+      "voice": "debate_voice_2",
+      "head_anchor": "如果学校只追求答题速度",
+      "tail_anchor": "都能持续进步"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+"""Initial Debate Agent control-plane schema."""
+
+from alembic import op
+from app.database import Base
+from app import models  # noqa: F401
+
+revision = "0001_initial"
+down_revision = None
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    Base.metadata.create_all(bind=bind, checkfirst=True)
+
+
+def downgrade() -> None:
+    Base.metadata.drop_all(bind=op.get_bind(), checkfirst=True)
