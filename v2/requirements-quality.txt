@@ -1,0 +1,8 @@
+-r apps/api/requirements.txt
+
+bandit==1.8.6
+hypothesis==6.141.1
+pip-audit==2.9.0
+pytest==9.0.3
+pytest-asyncio==1.4.0
+ruff==0.15.21

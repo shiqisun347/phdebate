@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="utf-8"><title>Realtime audio probe fixture</title></head>
+  <body>
+    <button id="sound">开启比赛声音</button>
+    <button id="interrupt">中断音频</button>
+    <audio data-jixia-agent-audio="fixture" playsinline></audio>
+    <script>
+      let sourceContext;
+      let oscillator;
+      const audio = document.querySelector("audio");
+      document.querySelector("#sound").addEventListener("click", async (event) => {
+        if (event.currentTarget.textContent === "关闭比赛声音") {
+          audio.muted = true;
+          event.currentTarget.textContent = "开启比赛声音";
+          return;
+        }
+        sourceContext ||= new AudioContext({ latencyHint: "interactive" });
+        await sourceContext.resume();
+        const destination = sourceContext.createMediaStreamDestination();
+        oscillator = sourceContext.createOscillator();
+        const gain = sourceContext.createGain();
+        gain.gain.value = 0.2;
+        oscillator.frequency.value = 440;
+        oscillator.connect(gain).connect(destination);
+        audio.srcObject = destination.stream;
+        audio.muted = false;
+        await audio.play();
+        window.__jixiaRealtimeAudioGate.ingestEvent({
+          type: "audio.rtc.started",
+          speech_id: "fixture-speech",
+          generation: "fixture-generation",
+          server_first_capture_at: new Date().toISOString(),
+          agent_first_readable_delta_at: new Date(Date.now() - 300).toISOString(),
+        });
+        oscillator.start();
+        event.currentTarget.textContent = "关闭比赛声音";
+      });
+      document.querySelector("#interrupt").addEventListener("click", () => {
+        window.__jixiaRealtimeAudioGate.ingestEvent({
+          type: "audio.rtc.interrupt",
+          generation: "fixture-generation",
+        });
+        oscillator?.stop();
+        audio.pause();
+        audio.srcObject = null;
+      });
+    </script>
+  </body>
+</html>
