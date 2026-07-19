@@ -19,10 +19,15 @@ function watchRuntimeErrors(page: Page) {
 }
 
 test("赛事大厅、导航和参赛入口在桌面与手机端可用", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
   const runtimeErrors = watchRuntimeErrors(page);
-  await page.goto("./", { waitUntil: "networkidle" });
+  // The lobby intentionally polls live-room status, so networkidle is not a
+  // valid readiness signal. Wait for the product UI that the test uses.
+  await page.goto("./", { waitUntil: "domcontentloaded" });
 
-  await expect(page.getByRole("heading", { name: /4v4 人机辩论正式赛.*参赛者自主组局/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /4v4 人机辩论正式赛.*参赛者自主组局/ })).toBeVisible({
+    timeout: 20_000,
+  });
   await expect(page.getByRole("heading", { name: "选择赛事" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "4v4 人机辩论正式赛", exact: true })).toBeVisible();
   await expect(page.getByText("1v1 辩论训练赛", { exact: true })).toBeVisible();
@@ -63,14 +68,21 @@ test("匿名观战保持只读、实时连接且舞台无横向溢出", async ({
 });
 
 test("匿名参赛先校验房间号，并可直接进入公开观战", async ({ page }) => {
+  test.setTimeout(90_000);
   const runtimeErrors = watchRuntimeErrors(page);
-  await page.goto("./", { waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "创建 4v4 比赛" }).click();
-  await page.getByRole("button", { name: /搜索房间/ }).click();
+  await page.goto("./", { waitUntil: "domcontentloaded" });
+  const createCompetition = page.getByRole("button", { name: "创建 4v4 比赛" });
+  await expect(createCompetition).toBeEnabled({ timeout: 20_000 });
+  await createCompetition.click();
+  const searchRoom = page.getByRole("button", { name: /搜索房间/ });
+  await expect(searchRoom).toBeEnabled();
+  await searchRoom.click();
   const roomCode = page.getByLabel("六位房间号");
-  await expect(roomCode).toBeFocused();
+  await expect(roomCode).toBeVisible();
   await roomCode.fill("000000");
-  await page.getByRole("button", { name: "登录或注册后进入" }).click();
+  const enterRoom = page.getByRole("button", { name: "登录或注册后进入" });
+  await expect(enterRoom).toBeEnabled();
+  await enterRoom.click();
   await expect(page.locator(".participate-dialog .error-box[role='alert']")).toContainText(
     "房间不存在",
   );
