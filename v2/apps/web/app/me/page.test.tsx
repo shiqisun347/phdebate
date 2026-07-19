@@ -1,0 +1,118 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import axe from "axe-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import MePage from "@/app/me/page";
+
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => navigation,
+}));
+
+function response(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+const meData = {
+  user: { id: "user-1", account: "real_user", real_name: "真实选手", role: "user", is_active: true },
+  summary: { history_total: 0, active_total: 0, total_points: 0 },
+  pagination: { page: 1, page_size: 20, total: 0, pages: 1 },
+  active_rooms: [],
+  history: [],
+  rating_changes: [],
+};
+
+describe("personal account", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    navigation.push.mockReset();
+  });
+
+  it("changes the password and can revoke other devices", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/me?page=1&page_size=20")) return Promise.resolve(response(meData));
+      if (url.endsWith("/api/auth/password") && init?.method === "POST") {
+        return Promise.resolve(response({ ok: true, other_sessions_revoked: true }));
+      }
+      if (url.endsWith("/api/auth/sessions/revoke-others") && init?.method === "POST") {
+        return Promise.resolve(response({ ok: true, revoked: 2 }));
+      }
+      return Promise.resolve(response({ detail: "unexpected request" }, 500));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(<MePage />);
+    expect(await screen.findByRole("heading", { name: "账号安全" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("当前密码"), { target: { value: "Password-1234" } });
+    fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "New-password-5678" } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "New-password-5678" } });
+    fireEvent.click(screen.getByRole("button", { name: /更新密码/ }));
+    expect(await screen.findByText("密码已更新，其他设备的登录会话已全部撤销。")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /退出其他设备/ }));
+    expect(await screen.findByText("已退出 2 个其他设备。")).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  });
+
+  it("returns an AI-substituted participant to the read-only watch page", async () => {
+    const substituted = {
+      ...meData,
+      summary: { ...meData.summary, active_total: 1 },
+      active_rooms: [{
+        code: "654321",
+        topic: "断线后是否应允许 AI 接替？",
+        status: "running",
+        seat_key: "aff_1",
+        occupant_type: "ai_substitute",
+        can_resume: false,
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(substituted)));
+    render(<MePage />);
+    const link = await screen.findByRole("link", { name: /AI 已接替 · 返回观战或申请恢复/ });
+    expect(link).toHaveAttribute("href", "/rooms/654321/watch");
+    expect(screen.getByRole("button", { name: "申请恢复真人席位" })).toBeEnabled();
+  });
+
+  it("keeps the personal center focused on competitions and account security", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(meData));
+    vi.stubGlobal("fetch", fetchMock);
+    const { container } = render(<MePage />);
+
+    expect(await screen.findByRole("heading", { name: "继续比赛" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "最近积分" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "历史比赛" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "账号安全" })).toBeInTheDocument();
+    expect(screen.queryByText(/课堂|教师|教学活动/)).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/me?page=1&page_size=20");
+    expect((await axe.run(container, { rules: { "color-contrast": { enabled: false } } })).violations).toEqual([]);
+  });
+
+  it("renders historical matches as readable list items with a specific return link", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({
+      ...meData,
+      summary: { ...meData.summary, history_total: 1 },
+      history: [{
+        match_id: "match-1",
+        room_code: "192885",
+        topic: "人工智能是否提升了人类创作者的价值？",
+        status: "terminated",
+        winner: null,
+        completed_at: "2026-07-19T07:30:04Z",
+      }],
+    })));
+    render(<MePage />);
+
+    expect(await screen.findByRole("list", { name: "历史比赛列表" })).toBeInTheDocument();
+    const item = screen.getByRole("listitem");
+    expect(item).toHaveTextContent("#192885");
+    expect(item).toHaveTextContent("人工智能是否提升了人类创作者的价值？");
+    expect(item).toHaveTextContent("比赛已终止");
+    expect(item).toHaveTextContent("已终止");
+    expect(screen.getByRole("link", { name: "查看房间 192885 的比赛记录" })).toHaveAttribute("href", "/rooms/192885/result");
+  });
+});

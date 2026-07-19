@@ -1,0 +1,145 @@
+import type { ReactNode } from "react";
+
+export type HealthCheck = {
+  ok: boolean;
+  latency_ms?: number;
+  age_seconds?: number;
+  age_hours?: number;
+  free_percent?: number;
+  current?: string;
+  expected?: string;
+  message?: string;
+  skipped?: boolean;
+  workers?: number;
+  queued_messages?: number;
+  dead_letters?: number;
+  configured_max_active?: number;
+  ready_endpoints?: number;
+  required_endpoints?: number;
+  service?: string;
+};
+
+export type AdminDashboard = {
+  counts: {
+    users: number;
+    competitions: number;
+    live_rooms: number;
+    review_required: number;
+  };
+  rooms: { code: string; topic: string; status: string; updated_at: string }[];
+  providers: Record<
+    string,
+    {
+      endpoint: string;
+      enabled: boolean;
+      healthy: boolean | null;
+      status: string;
+      latency_ms?: number;
+      message?: string;
+      model_name?: string;
+      max_active?: number;
+    }
+  >;
+  leaderboard: unknown[];
+  system_health: {
+    ok: boolean;
+    checks: Record<string, HealthCheck>;
+    checked_at: string;
+  };
+};
+
+const healthLabels: Record<string, string> = {
+  database: "数据库",
+  schema: "数据库结构",
+  redis: "Redis",
+  engine: "比赛引擎",
+  worker: "后台任务",
+  lighttts: "LightTTS 语音合成",
+  moss_tts_realtime: "MOSS 实时语音合成",
+  funasr: "FunASR 语音识别",
+  storage: "磁盘空间",
+  backup: "数据库备份",
+};
+
+export const providerDisplayLabels: Record<string, string> = {
+  agent: "辩手 Agent",
+  funasr: "FunASR 语音识别",
+  lighttts: "兼容 LightTTS",
+  judge: "AI 裁判",
+};
+
+export const healthDetail = (value: HealthCheck, key?: string) => {
+  if (value.skipped) return "开发环境跳过";
+  if (value.ready_endpoints !== undefined) {
+    return `${value.ready_endpoints}/${value.required_endpoints ?? value.ready_endpoints} 个实时端点已就绪`;
+  }
+  if (value.workers !== undefined) {
+    return `${value.message ? `${value.message} · ` : ""}${value.workers} 个 Worker · 排队 ${value.queued_messages ?? 0} · 死信 ${value.dead_letters ?? 0}`;
+  }
+  if (value.configured_max_active !== undefined) {
+    const response = value.message || (value.latency_ms !== undefined ? `响应 ${value.latency_ms} ms` : "检查完成");
+    return `${response} · 推理并发上限 ${value.configured_max_active}`;
+  }
+  if (value.message || value.latency_ms !== undefined) return `${value.message || "响应"} ${value.latency_ms ?? ""} ms`.trim();
+  if (value.age_seconds !== undefined) return `心跳 ${value.age_seconds} 秒前`;
+  if (value.age_hours !== undefined) return `备份 ${value.age_hours} 小时前`;
+  if (value.free_percent !== undefined) return `剩余 ${value.free_percent}%`;
+  if (key === "schema") return value.current === value.expected ? "结构版本已同步" : "结构版本需要升级";
+  if (value.current) return value.current;
+  return "检查完成";
+};
+
+function ServiceCard({ status, children }: { status: "online" | "warning" | ""; children: ReactNode }) {
+  return (
+    <div className="service-card">
+      <i className={`status-dot ${status}`} />
+      <div>{children}</div>
+    </div>
+  );
+}
+
+export function SystemOverview({ dashboard }: { dashboard: AdminDashboard }) {
+  const visibleProviders = Object.entries(dashboard.providers).filter(
+    ([key, value]) => key !== "lighttts" || value.enabled,
+  );
+
+  return (
+    <>
+      <div className="panel-title">
+        <h2>系统总览</h2>
+        <span className="muted">实时业务统计</span>
+      </div>
+      <div className="stats-grid">
+        <div className="stat-card"><span className="muted">注册用户</span><strong>{dashboard.counts.users}</strong></div>
+        <div className="stat-card"><span className="muted">赛事类型</span><strong>{dashboard.counts.competitions}</strong></div>
+        <div className="stat-card"><span className="muted">活跃比赛</span><strong>{dashboard.counts.live_rooms}</strong></div>
+        <div className="stat-card"><span className="muted">等待复核</span><strong>{dashboard.counts.review_required}</strong></div>
+      </div>
+      <h3 style={{ marginTop: 28 }}>平台就绪检查</h3>
+      <div className="service-grid">
+        {Object.entries(dashboard.system_health.checks).map(([key, value]) => (
+          <ServiceCard key={key} status={value.ok ? "online" : "warning"}>
+            <strong>{healthLabels[key] || key} · {value.ok ? "正常" : "异常"}</strong>
+            <small>{healthDetail(value, key)}</small>
+          </ServiceCard>
+        ))}
+      </div>
+      <h3 style={{ marginTop: 28 }}>外部与语音服务</h3>
+      <div className="service-grid">
+        {visibleProviders.map(([key, value]) => (
+          <ServiceCard
+            key={key}
+            status={value.healthy === true ? "online" : value.enabled ? "warning" : ""}
+          >
+            <strong>
+              {providerDisplayLabels[key] || key.toUpperCase()} · {value.enabled
+                ? value.healthy === true ? "可达" : value.healthy === false ? "异常" : "待检测"
+                : "未配置"}
+            </strong>
+            <small>{value.endpoint || "未配置"}{value.latency_ms !== undefined ? ` · ${value.latency_ms} ms` : ""}</small>
+          </ServiceCard>
+        ))}
+      </div>
+    </>
+  );
+}
