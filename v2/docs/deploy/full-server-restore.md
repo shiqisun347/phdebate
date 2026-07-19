@@ -8,7 +8,8 @@
 ### GitHub 源码
 
 - 仓库：`https://github.com/shiqisun347/phdebate`
-- 快照分支：`backup/production-20260719-round6`
+- 快照分支：`backup/production-20260719-round7`
+- 当前不可变源码提交：`cef6e572fd4f955fbe28f321017886889caafb68`
 - 分支必须是 orphan 快照，不继承旧 `main` 历史。
 - 恢复时应使用服务器恢复清单记录的 commit SHA，不只依赖可移动分支名。
 
@@ -27,12 +28,12 @@ GitHub 快照不得包含 `.env`、密码、API Key、Cookie、数据库、模�
 
 | 内容 | 文件 | SHA-256 |
 | --- | --- | --- |
-| V2 数据库 | `runtime/backups/auto-20260719T105627Z.dump` | `614da5a01c25eb39632b710f954232a0cd52218d8cbb55b6b9d3c9393e3685ec` |
-| 比赛数据卷 | `20260719T105628Z-data-volumes.tar.gz` | `072a3c6d48d691e6238877cb1da0421717d97ae09df76f43de1eb621396d7970` |
+| V2 数据库 | `runtime/backups/auto-20260719T135612Z.dump` | `b8a12bb33b09f647a1484bc18c2c92edc265fe3d23cf93d12560e62b6eaa26cf` |
+| 比赛数据卷 | `20260719T135612Z-data-volumes.tar.gz` | `fa75c3726b8232ec4728132e8506e0265eb34a328a9587649257efaecdcbfc2d` |
 | 私密配置 | `20260719T094349Z-full-private-config.tar.gz` | `f5a0be379496ae7f7ea3d2575ec3d61c5d3764de4f12946f3ea6c163225f29b0` |
 | 可靠语音清单 | `20260719T091423Z-reliable-voice-runtime.tar.gz` | `6f80f2a43a9fee22316a3d2adf49d54d8e75d0f57b6262f6a9d42f62fbb9ddc9` |
 | MOSS 离线目录 | `20260719-openmoss-offline.tar` | `bec995daf334694aa7dd48b9cf603bd5f2f7f3e7d8527660cafcc8136ee456d8` |
-| Debate Agent 数据库 | `/home/ubuntu/sunsq/debate-agent/backups/agent-20260719T105627Z.dump` | `b8c95955ba5d947993eac66ddb1f82628535ffefbfe6fcee80356778a33ae2ab` |
+| Debate Agent 数据库 | `/home/ubuntu/sunsq/debate-agent/backups/agent-20260719T135643Z.dump` | `1dcc33aee9c14949ac53b480d809d1b5b3c5fd709e5f4552ec7e79916b2f3967` |
 
 `data-volumes` 包含 `storage`、MOSS prompt 资产和可靠音频基线；MOSS 离线包约 11GB。
 所有私密文件应为 `0600`，目录应为 `0700`。
@@ -60,24 +61,24 @@ GitHub 快照不得包含 `.env`、密码、API Key、Cookie、数据库、模�
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2/runtime/backups
-sha256sum -c auto-20260719T105627Z.dump.sha256
+sha256sum -c auto-20260719T135612Z.dump.sha256
 
 cd /home/ubuntu/sunsq/phdebate-v2/runtime/deploy-backups
-sha256sum -c 20260719T105628Z-data-volumes.tar.gz.sha256
+sha256sum -c 20260719T135612Z-data-volumes.tar.gz.sha256
 sha256sum -c 20260719T094349Z-full-private-config.tar.gz.sha256
 sha256sum -c 20260719T091423Z-reliable-voice-runtime.tar.gz.sha256
 sha256sum -c 20260719-openmoss-offline.tar.sha256
 
 cd /home/ubuntu/sunsq/debate-agent/backups
-sha256sum -c agent-20260719T105627Z.dump.sha256
-pg_restore -l agent-20260719T105627Z.dump >/dev/null
+sha256sum -c agent-20260719T135643Z.dump.sha256
+pg_restore -l agent-20260719T135643Z.dump >/dev/null
 ```
 
 V2 数据库还应完成临时数据库恢复验证：
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2
-./deploy/verify-backup-restore.sh runtime/backups/auto-20260719T105627Z.dump
+./deploy/verify-backup-restore.sh runtime/backups/auto-20260719T135612Z.dump
 ```
 
 ## 4. 准备空服务器
@@ -114,13 +115,15 @@ install -d -o root -g root -m 0700 /opt/phdebate/secrets
 从恢复清单取得不可变 commit SHA：
 
 ```bash
-EXPECTED_CODE_COMMIT='从服务器恢复清单读取'
-git clone --branch backup/production-20260719-round6 --single-branch \
+EXPECTED_CODE_COMMIT='cef6e572fd4f955fbe28f321017886889caafb68'
+git clone --branch backup/production-20260719-round7 --single-branch \
   https://github.com/shiqisun347/phdebate.git \
   /home/ubuntu/sunsq/phdebate-source
 test "$(git -C /home/ubuntu/sunsq/phdebate-source rev-parse HEAD)" = "$EXPECTED_CODE_COMMIT"
 
-rsync -a /home/ubuntu/sunsq/phdebate-source/v2/ /home/ubuntu/sunsq/phdebate-v2/
+PHDEBATE_V2_ROOT=/home/ubuntu/sunsq/phdebate-v2 \
+  /home/ubuntu/sunsq/phdebate-source/v2/deploy/sync-github-source.sh \
+  /home/ubuntu/sunsq/phdebate-source apply
 rsync -a /home/ubuntu/sunsq/phdebate-source/debate-agent/ /home/ubuntu/sunsq/debate-agent/
 chown -R ubuntu:ubuntu /home/ubuntu/sunsq/phdebate-v2 /home/ubuntu/sunsq/debate-agent
 ```
@@ -173,11 +176,11 @@ ProviderConfig、JudgeProfile 和活动比赛 service snapshot。迁移前应停
 ```bash
 runuser -u postgres -- createdb -p 5433 phdebate_v2
 runuser -u postgres -- pg_restore -p 5433 --exit-on-error \
-  --no-owner --no-privileges -d phdebate_v2 auto-20260719T105627Z.dump
+  --no-owner --no-privileges -d phdebate_v2 auto-20260719T135612Z.dump
 
 PGPASSWORD='从安全配置临时读取' pg_restore \
   -h 127.0.0.1 -p 5433 -U debate_agent --exit-on-error \
-  --no-owner --no-privileges -d debate_agent agent-20260719T105627Z.dump
+  --no-owner --no-privileges -d debate_agent agent-20260719T135643Z.dump
 ```
 
 恢复后比较迁移版本，不能只执行 `current`：
@@ -193,7 +196,7 @@ PYTHONPATH=apps/api .venv/bin/alembic -c apps/api/alembic.ini heads
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2
-tar -xzf 20260719T105628Z-data-volumes.tar.gz
+tar -xzf 20260719T135612Z-data-volumes.tar.gz
 sha256sum -c files.sha256
 ./deploy/prepare-runtime.sh
 
@@ -212,6 +215,11 @@ sha256sum -c /tmp/reliable-voice-runtime/prompt-files.sha256
 MOSS Python 环境必须使用清单对应的 CUDA 12.8/PyTorch wheel 和固定 OpenMOSS revision。
 `pip-freeze.txt` 可能包含本地 editable 路径，不能盲目执行后就宣称恢复成功；应先恢复相同路径，
 再安装并执行 `pip check`、GPU preflight 和真实语音门禁。
+
+源码同步不得直接对生产目录执行无排除项的 `rsync --delete`。必须使用
+`deploy/sync-github-source.sh`；它会保留 `.env`、数据卷、运行目录、API/Web release 链接、
+所有 `.venv*`（包括 MOSS CUDA 环境）、Node 构建产物和服务器端 Prompt 音频。正式同步前先用
+`dry-run` 检查变更列表。
 
 ## 10. 构建并建立发布链接
 
@@ -305,6 +313,8 @@ curl -fsS https://新服务器IP/debate/api/health
 ## 14. Mac 清理与日常备份原则
 
 - Mac 只保留工作源码，不保留服务器 dump、tar、模型和私密配置。
+- 临时浏览器测试、Git alternate index 和下载目录在验收后删除；不得以“方便回滚”为由在
+  Mac 留存生产压缩包副本。代码回滚点只使用 GitHub 快照分支。
 - 源码备份更新到 GitHub orphan 分支前必须执行 ignore 检查、密钥扫描和大文件扫描。
 - V2 DB 每日备份不足以构成完整恢复；Agent DB、数据卷和私密配置也要进入同一恢复批次。
 - MOSS/FunASR 模型不需每天复制，但每次 revision、模型或依赖变化后必须重新生成离线包。
