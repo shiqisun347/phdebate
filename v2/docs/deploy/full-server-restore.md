@@ -9,7 +9,8 @@
 
 - 仓库：`https://github.com/shiqisun347/phdebate`
 - 快照分支：`backup/production-20260719-round7`
-- 当前不可变源码提交：`cef6e572fd4f955fbe28f321017886889caafb68`
+- 当前已部署应用提交：`cef6e572fd4f955fbe28f321017886889caafb68`；完整恢复应以服务器
+  `recovery-set-*.manifest` 中的 `code_commit` 为准，确保同时取得部署工具和恢复文档更新。
 - 分支必须是 orphan 快照，不继承旧 `main` 历史。
 - 恢复时应使用服务器恢复清单记录的 commit SHA，不只依赖可移动分支名。
 
@@ -115,7 +116,7 @@ install -d -o root -g root -m 0700 /opt/phdebate/secrets
 从恢复清单取得不可变 commit SHA：
 
 ```bash
-EXPECTED_CODE_COMMIT='cef6e572fd4f955fbe28f321017886889caafb68'
+EXPECTED_CODE_COMMIT='从服务器 recovery-set manifest 读取'
 git clone --branch backup/production-20260719-round7 --single-branch \
   https://github.com/shiqisun347/phdebate.git \
   /home/ubuntu/sunsq/phdebate-source
