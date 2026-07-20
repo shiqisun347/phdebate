@@ -37,6 +37,7 @@ rsync_args=(
   -rlp --checksum --delete --itemize-changes
   --exclude='/.env'
   --exclude='/runtime/'
+  --exclude='/**/runtime/'
   --exclude='/storage/'
   --exclude='/backups/'
   --exclude='/.venv/'

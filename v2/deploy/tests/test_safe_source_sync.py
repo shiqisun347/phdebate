@@ -12,6 +12,7 @@ def test_source_sync_preserves_all_server_owned_paths() -> None:
     required_excludes = (
         "/.env",
         "/runtime/",
+        "/**/runtime/",
         "/storage/",
         "/backups/",
         "/.venv/",
