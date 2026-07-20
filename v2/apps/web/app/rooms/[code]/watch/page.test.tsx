@@ -30,10 +30,17 @@ describe("watch result redirect", () => {
     window.history.replaceState({}, "", "/rooms/123456/watch");
   });
 
-  it.each(["completed", "review_required", "terminated"])("redirects a %s match to its result", async (status) => {
-    mocks.room = { id: "room", code: "123456", status, seq: 2 } as unknown as Room;
+  it("redirects a published match to its result", async () => {
+    mocks.room = { id: "room", code: "123456", status: "completed", seq: 2 } as unknown as Room;
     render(<WatchPage />);
     await waitFor(() => expect(mocks.push).toHaveBeenCalledWith("/rooms/123456/result"));
+  });
+
+  it.each(["review_required", "terminated"])("keeps an unpublished %s match on the watch projection", (status) => {
+    mocks.room = { id: "room", code: "123456", status, seq: 2 } as unknown as Room;
+    render(<WatchPage />);
+    expect(mocks.push).not.toHaveBeenCalled();
+    expect(screen.getByText("观战舞台")).toBeInTheDocument();
   });
 
   it("keeps an active match on the watch stage", () => {
