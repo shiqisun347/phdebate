@@ -49,13 +49,13 @@ GitHub 快照不得包含 `.env`、密码、API Key、Cookie、数据库、模�
 同一份 `recovery-set-*.manifest` 为准，不得把不同批次的“最新文件”临时拼在一起：
 
 本轮绑定清单为
-`runtime/deploy-backups/recovery-set-20260720T1507Z-round16.manifest`，权限为 `0600`。源码位于
-GitHub 分支 `backup/production-20260720-round12`，当前应用提交为
-`f5d5cc7f6791dda008060799852cb19237af53d6`；恢复时仍应读取清单，不能手工抄写该 SHA。
+`runtime/deploy-backups/recovery-set-20260720T1540Z-round17.manifest`，权限为 `0600`。源码位于
+GitHub 分支 `backup/production-20260720-round12`，当前部署应用提交为
+`31959b093bfc2e1022113bb4209fb2d2c12dee3b`；恢复时仍应读取清单，不能手工抄写该 SHA。
 
 | 内容 | 文件 | SHA-256 |
 | --- | --- | --- |
-| 平台数据库 | `runtime/backups/auto-20260720T150501Z.dump` | `c509578f9d71fd647b996a6f8ffa50d641839b7d4ca1bf47564a267a7504014b` |
+| 平台数据库 | `runtime/backups/auto-20260720T154013Z.dump` | `04dfe0374a89030e563410882797a889b7e6d6ccf70bcb28e5474bbd5c13c50f` |
 | 比赛数据卷 | `20260720T1505Z-round16-data-volumes.tar.gz` | `bbb5808c320ebc95fa2e76644f386060d7b3be0b2b0aeb558de8a05871a2ee36` |
 | 私密配置 | `20260720T1506Z-round16-private-config.tar.gz` | `099a0d1ad28ada43760e2e9a68626fc202233da0fafb9bb1ce0be9ce537f4646` |
 | 可靠语音清单 | `20260719T091423Z-reliable-voice-runtime.tar.gz` | `6f80f2a43a9fee22316a3d2adf49d54d8e75d0f57b6262f6a9d42f62fbb9ddc9` |
@@ -103,7 +103,7 @@ schema 3 清单不记录源服务器绝对路径，可随恢复材料移动。�
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate/runtime/backups
-sha256sum -c auto-20260720T150501Z.dump.sha256
+sha256sum -c auto-20260720T154013Z.dump.sha256
 
 cd /home/ubuntu/sunsq/phdebate/runtime/deploy-backups
 sha256sum -c 20260720T1505Z-round16-data-volumes.tar.gz.sha256
@@ -128,7 +128,7 @@ cd /home/ubuntu/sunsq/phdebate
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate
-./deploy/verify-backup-restore.sh runtime/backups/auto-20260720T150501Z.dump
+./deploy/verify-backup-restore.sh runtime/backups/auto-20260720T154013Z.dump
 ```
 
 Debate Agent 的 dump 包含 pgvector 扩展定义。空服务器还原时先以 PostgreSQL 超级用户安装
