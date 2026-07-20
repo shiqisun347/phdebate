@@ -146,6 +146,7 @@ describe("admin operations", () => {
     fireEvent.change(mobileModulePicker, { target: { value: "rooms" } });
     expect(screen.getByRole("button", { name: /比赛监管/ })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: /系统总览/ })).not.toHaveAttribute("aria-current");
+    expect(window.location.search).toBe("?module=rooms");
     expect(screen.getByRole("region", { name: "比赛监管" })).toHaveAttribute("id", "admin-module-content");
     expect(await screen.findByRole("region", { name: "比赛监管表格" })).toHaveAttribute("tabindex", "0");
     await waitFor(() =>
@@ -154,7 +155,12 @@ describe("admin operations", () => {
       ).toHaveLength(1),
     );
     fireEvent.click(screen.getByRole("button", { name: /系统总览/ }));
-    fireEvent.click(screen.getByRole("button", { name: /比赛监管/ }));
+    expect(window.location.search).toBe("");
+    const overviewTab = screen.getByRole("button", { name: /系统总览/ });
+    overviewTab.focus();
+    fireEvent.keyDown(overviewTab, { key: "ArrowDown" });
+    await waitFor(() => expect(screen.getByRole("button", { name: /比赛监管/ })).toHaveFocus());
+    expect(window.location.search).toBe("?module=rooms");
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/admin/rooms")),
@@ -262,4 +268,30 @@ describe("admin operations", () => {
       expect.any(Object),
     );
   }, 15_000);
+
+  it("restores a directly linked management module after refresh", async () => {
+    window.history.replaceState({}, "", "/admin?module=rooms");
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/admin/dashboard")) return Promise.resolve(response({
+        counts: { users: 0, competitions: 0, live_rooms: 0, review_required: 0 },
+        rooms: [], providers: {}, leaderboard: [],
+        system_health: { ok: true, checks: {}, checked_at: new Date().toISOString() },
+      }));
+      if (url.includes("/api/admin/rooms")) return Promise.resolve(response({
+        items: [], pagination: { page: 1, page_size: 100, total: 0, pages: 1 },
+      }));
+      return Promise.resolve(new Response(JSON.stringify({ detail: "unexpected request" }), { status: 500 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AdminPage />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /比赛监管/ })).toHaveAttribute("aria-current", "page"),
+    );
+    expect(await screen.findByRole("region", { name: "比赛监管表格" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/admin/rooms"))).toHaveLength(1);
+    window.history.replaceState({}, "", "/admin");
+  });
 });

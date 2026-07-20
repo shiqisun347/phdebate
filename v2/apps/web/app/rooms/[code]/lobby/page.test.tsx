@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   apiFetch: vi.fn(),
   user: { id: "user" } as { id: string } | null,
+  connected: true,
+  roomError: "",
 }));
 
 vi.mock("next/navigation", () => ({
@@ -24,13 +26,16 @@ vi.mock("@/lib/use-room", () => ({
   useRoom: () => ({
     room: mocks.room,
     setRoom: mocks.setRoom,
-    connected: true,
-    error: "",
+    connected: mocks.connected,
+    error: mocks.roomError,
     reconnect: mocks.reconnect,
     refresh: mocks.refresh,
   }),
 }));
-vi.mock("@/lib/api", () => ({ apiFetch: mocks.apiFetch }));
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api")>(),
+  apiFetch: mocks.apiFetch,
+}));
 vi.mock("@/lib/use-session", () => ({ useSession: () => ({ user: mocks.user, loading: false }) }));
 
 function lobbyRoom(overrides: Partial<Room> = {}): Room {
@@ -100,6 +105,8 @@ describe("room lobby", () => {
     mocks.refresh.mockReset();
     mocks.apiFetch.mockReset();
     mocks.user = { id: "user" };
+    mocks.connected = true;
+    mocks.roomError = "";
     vi.unstubAllGlobals();
   });
 
@@ -216,6 +223,123 @@ describe("room lobby", () => {
 
     resolveClaim({ room: availableRoom });
     await waitFor(() => expect(mocks.setRoom).toHaveBeenCalled());
+  });
+
+  it("separates a failed write from connection recovery and clears it after a safe retry", async () => {
+    const availableRoom = lobbyRoom({
+      competition: { ...lobbyRoom().competition, ranked: false },
+      season: null,
+      seats: lobbyRoom().seats.map((seat) => ({ ...seat, is_me: false, occupant_type: "open", display_name: "待加入" })),
+      my_seat: null,
+      can_control: false,
+    });
+    mocks.room = availableRoom;
+    mocks.connected = false;
+    let claimAttempts = 0;
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/claim-seat")) {
+        claimAttempts += 1;
+        if (claimAttempts === 1)
+          throw new (await import("@/lib/api")).ApiRequestError(
+            0,
+            { code: "network_unavailable" },
+            "网络连接失败，本次操作可能尚未提交。请检查网络后重试。",
+          );
+        return {
+          room: {
+            ...availableRoom,
+            seq: 4,
+            my_seat: "neg_1",
+            seats: availableRoom.seats.map((seat) => seat.seat_key === "neg_1"
+              ? { ...seat, occupant_type: "human", display_name: "当前选手", is_me: true }
+              : seat),
+          },
+        };
+      }
+      return { seq: 3, lease_fingerprint: "current-device" };
+    });
+    const { rerender } = render(<LobbyPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: /反方一辩.*等待认领/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("本次操作可能尚未提交");
+
+    mocks.connected = true;
+    rerender(<LobbyPage />);
+    expect(screen.queryByText(/网络连接失败，本次操作可能尚未提交/)).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("实时连接已恢复，但上一次操作结果尚未确认");
+
+    fireEvent.click(screen.getByRole("button", { name: /反方一辩.*等待认领/ }));
+    await waitFor(() => expect(mocks.setRoom).toHaveBeenCalled());
+    expect(screen.queryByText(/上一次操作结果尚未确认/)).not.toBeInTheDocument();
+    expect(claimAttempts).toBe(2);
+  });
+
+  it("does not resurrect a network warning when WebSocket already confirmed the write", async () => {
+    const availableRoom = lobbyRoom({
+      competition: { ...lobbyRoom().competition, ranked: false },
+      season: null,
+      seats: lobbyRoom().seats.map((seat) => ({ ...seat, is_me: false, occupant_type: "open", display_name: "待加入" })),
+      my_seat: null,
+      can_control: false,
+    });
+    let rejectClaim!: (reason: unknown) => void;
+    mocks.room = availableRoom;
+    mocks.apiFetch.mockImplementation((path: string) => {
+      if (path.endsWith("/claim-seat"))
+        return new Promise((_resolve, reject) => { rejectClaim = reject; });
+      return Promise.resolve({ seq: 3, lease_fingerprint: "current-device" });
+    });
+    const { rerender } = render(<LobbyPage />);
+    fireEvent.click(screen.getByRole("button", { name: /反方一辩.*等待认领/ }));
+
+    mocks.room = {
+      ...availableRoom,
+      seq: 4,
+      my_seat: "neg_1",
+      seats: availableRoom.seats.map((seat) => seat.seat_key === "neg_1"
+        ? { ...seat, occupant_type: "human", display_name: "当前选手", is_me: true }
+        : seat),
+    };
+    rerender(<LobbyPage />);
+    await act(async () => {
+      const { ApiRequestError } = await import("@/lib/api");
+      rejectClaim(new ApiRequestError(0, { code: "network_unavailable" }, "网络连接失败，本次操作可能尚未提交。请检查网络后重试。"));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText(/本次操作可能尚未提交/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/上一次操作结果尚未确认/)).not.toBeInTheDocument();
+  });
+
+  it("keeps all eight 4v4 seats readable and grouped by side", async () => {
+    const seats = (["aff", "neg"] as const).flatMap((side) =>
+      [1, 2, 3, 4].map((position) => ({
+        seat_key: `${side}_${position}`,
+        side,
+        position,
+        label: `${side === "aff" ? "正方" : "反方"}${["一", "二", "三", "四"][position - 1]}辩`,
+        occupant_type: position === 1 ? "human" as const : "open" as const,
+        display_name: position === 1 ? `${side === "aff" ? "正方" : "反方"}选手` : "待加入",
+        is_ready: position === 1,
+        connected: position === 1,
+        is_me: side === "aff" && position === 1,
+        is_owner: side === "aff" && position === 1,
+      })),
+    );
+    mocks.room = lobbyRoom({
+      competition: { ...lobbyRoom().competition, ranked: false },
+      season: null,
+      seats,
+    });
+
+    const { container } = render(<LobbyPage />);
+
+    expect(screen.getByRole("group", { name: "正方席位" })).toHaveTextContent("1 位真人 · 4 个席位");
+    expect(screen.getByRole("group", { name: "反方席位" })).toHaveTextContent("1 位真人 · 4 个席位");
+    expect(screen.getAllByRole("button", { name: /正方[一二三四]辩/ })).toHaveLength(4);
+    expect(screen.getAllByRole("button", { name: /反方[一二三四]辩/ })).toHaveLength(4);
+    const accessibility = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(accessibility.violations).toEqual([]);
   });
 
   it("makes the old lobby read-only after another device takes over", async () => {

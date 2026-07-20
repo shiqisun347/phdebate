@@ -1344,9 +1344,9 @@ async def finish_speech(
             return {"room": serialize_room(db, room, user), "speech_id": previous.payload.get("speech_id"), "replayed": True}
     if room.status in {"terminated", "cancelled"}:
         # A timed-out speech may still be finalized after its stage advances,
-        # but explicit termination is the immutable audit boundary.  Accepting
-        # a late transcript here would mutate history after the archive job was
-        # already enqueued and make result views disagree with the archive.
+        # including the short result/review window needed by a weak-network
+        # browser to preserve its local recording. Explicit termination is the
+        # immutable audit boundary.
         raise HTTPException(status_code=409, detail="比赛已经终止或取消，不能再提交发言。")
     if not control_lease or not seat.control_lease or control_lease != seat.control_lease:
         raise HTTPException(status_code=409, detail="该席位已在其他设备上接管。")
@@ -1366,7 +1366,13 @@ async def finish_speech(
             actor_user_id=user.id,
             idempotency_key=operation_key,
         )
+        archive_match_id = match.id if room.status in {"completed", "review_required"} else None
         db.commit()
+        if archive_match_id:
+            # The result may have been archived before the weak-network client
+            # recovered its locally retained final transcript. Rebuild that
+            # exact match instead of discarding the student's evidence.
+            enqueue_match_archive(archive_match_id)
         await _publish(room, "speech.late_finalized")
         return {
             "room": serialize_room(db, load_room(db, code), user),
@@ -1498,7 +1504,18 @@ async def upload_speech_audio(
             },
             actor_user_id=user.id,
         )
+        # Human audio arrives in a second request after the transcript is
+        # committed.  A very fast judge can settle and archive the match in
+        # that gap; refresh the final archive after attaching the recording so
+        # export, result history and the media index remain one source of truth.
+        archive_match_id = (
+            db.scalar(select(Match.id).where(Match.room_id == room.id))
+            if room.status in {"completed", "review_required", "terminated"}
+            else None
+        )
         db.commit()
+        if archive_match_id:
+            enqueue_match_archive(archive_match_id)
         await _publish(room, "speech.audio.ready")
         return {"audio_url": speech.audio_url}
     finally:

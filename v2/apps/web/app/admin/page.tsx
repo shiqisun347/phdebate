@@ -15,7 +15,13 @@ import {
   Workflow,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { apiFetch } from "@/lib/api";
 import { competitionDisplayName } from "@/lib/primary-competition";
 import { useSession } from "@/lib/use-session";
@@ -60,6 +66,26 @@ const tabs = [
   { id: "audit", label: "审计日志", icon: Shield },
 ] as const;
 type AdminTab = (typeof tabs)[number]["id"];
+function adminTabFromLocation(): AdminTab {
+  if (typeof window === "undefined") return "overview";
+  const requested = new URLSearchParams(window.location.search).get("module");
+  return tabs.some((item) => item.id === requested)
+    ? (requested as AdminTab)
+    : "overview";
+}
+
+function persistAdminTab(tabId: AdminTab) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (tabId === "overview") url.searchParams.delete("module");
+  else url.searchParams.set("module", tabId);
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+}
+
 const emptyPagination: AdminPaginationState = {
   page: 1,
   page_size: 100,
@@ -121,6 +147,10 @@ export default function AdminPage() {
   const pendingActions = useRef(new Set<string>());
   const loadedTabs = useRef(new Set<AdminTab>());
   const pendingTabLoads = useRef(new Map<AdminTab, Promise<void>>());
+  const loadTabHandler = useRef<
+    ((tabId: AdminTab, force?: boolean) => Promise<void>) | null
+  >(null);
+  const restoredModule = useRef(false);
   const [loadingTabs, setLoadingTabs] = useState<Set<AdminTab>>(
     () => new Set(),
   );
@@ -940,13 +970,41 @@ export default function AdminPage() {
     pendingTabLoads.current.set(tabId, request);
     return request;
   }
+  loadTabHandler.current = loadTab;
+  useEffect(() => {
+    if (!dash || restoredModule.current) return;
+    restoredModule.current = true;
+    const requested = adminTabFromLocation();
+    if (requested === "overview") return;
+    setTab(requested);
+    void loadTabHandler.current?.(requested);
+  }, [dash]);
   if (loading) return <div className="loading-screen">正在验证管理员身份…</div>;
   if (!dash && error)
     return <LoadError message={error} retry={() => void load()} />;
   if (!dash) return <div className="loading-screen">正在载入管理系统…</div>;
   const activateTab = (nextTab: AdminTab) => {
     setTab(nextTab);
+    persistAdminTab(nextTab);
     void loadTab(nextTab);
+  };
+  const moveTabFocus = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    currentTab: AdminTab,
+  ) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = tabs.findIndex((item) => item.id === currentTab);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + tabs.length) % tabs.length;
+    const nextTab = tabs[nextIndex].id;
+    activateTab(nextTab);
+    requestAnimationFrame(() =>
+      document.getElementById(`admin-tab-${nextTab}`)?.focus(),
+    );
   };
   return (
     <div className="page-shell">
@@ -986,7 +1044,9 @@ export default function AdminPage() {
               className={tab === item.id ? "active" : ""}
               aria-current={tab === item.id ? "page" : undefined}
               aria-controls="admin-module-content"
+              tabIndex={tab === item.id ? 0 : -1}
               onClick={() => activateTab(item.id)}
+              onKeyDown={(event) => moveTabFocus(event, item.id)}
               key={item.id}
             >
               <item.icon size={16} /> {item.label}

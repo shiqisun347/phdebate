@@ -14,7 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { ApiRequestError, apiFetch } from "@/lib/api";
 import { LoadError } from "@/components/load-error";
 import { MicrophonePreflight } from "@/components/microphone-preflight";
 import { competitionDisplayName } from "@/lib/primary-competition";
@@ -22,6 +22,30 @@ import { roomCreationBlockedReason, seasonStatusLabel } from "@/lib/seasons";
 import { useRoom } from "@/lib/use-room";
 import { useSession } from "@/lib/use-session";
 import type { Room } from "@/lib/types";
+
+type UnconfirmedLobbyAction = {
+  path: string;
+  body: Record<string, unknown>;
+  message: string;
+};
+
+function lobbyActionApplied(
+  action: Pick<UnconfirmedLobbyAction, "path" | "body">,
+  room: Room | null,
+) {
+  if (!room) return false;
+  const me = room.seats.find((seat) => seat.is_me);
+  if (action.path === "claim-seat") return room.my_seat === action.body.seat_key;
+  if (action.path === "release-seat") return !room.my_seat;
+  if (action.path === "ready") return Boolean(me?.is_ready);
+  if (action.path === "start") return room.status !== "lobby";
+  if (action.path === "cancel") return room.status === "cancelled";
+  const removedSeat = action.path.match(/^seats\/([^/]+)\/remove$/)?.[1];
+  return Boolean(
+    removedSeat
+    && room.seats.find((seat) => seat.seat_key === removedSeat)?.occupant_type === "open",
+  );
+}
 
 export default function LobbyPage() {
   const { code } = useParams<{ code: string }>();
@@ -35,6 +59,8 @@ export default function LobbyPage() {
     reconnect,
   } = useRoom(code);
   const [error, setError] = useState("");
+  const [unconfirmedAction, setUnconfirmedAction] =
+    useState<UnconfirmedLobbyAction | null>(null);
   const [busy, setBusy] = useState("");
   const [copied, setCopied] = useState(false);
   const [confirmingStart, setConfirmingStart] = useState(false);
@@ -44,6 +70,8 @@ export default function LobbyPage() {
     {},
   );
   const previousMySeat = useRef<string | null>(room?.my_seat || null);
+  const currentRoom = useRef<Room | null>(room);
+  currentRoom.current = room;
   const startButton = useRef<HTMLButtonElement | null>(null);
   const startConfirmCancel = useRef<HTMLButtonElement | null>(null);
   const startConfirmDialog = useRef<HTMLDivElement | null>(null);
@@ -94,6 +122,12 @@ export default function LobbyPage() {
       setError("该席位已由另一设备接管，当前页面已切换为只读。");
     }
   }, [controlSeq, deviceControl, room?.my_seat, room?.recent_events]);
+  useEffect(() => {
+    if (unconfirmedAction && lobbyActionApplied(unconfirmedAction, room)) {
+      delete attempts.current[unconfirmedAction.path];
+      setUnconfirmedAction(null);
+    }
+  }, [room, unconfirmedAction]);
   useEffect(() => {
     const previous = previousMySeat.current;
     if (room && previous && !room.my_seat) {
@@ -163,6 +197,7 @@ export default function LobbyPage() {
         },
       );
       delete attempts.current[path];
+      setUnconfirmedAction(null);
       setRoom((current) =>
         !current || data.room.seq >= current.seq ? data.room : current,
       );
@@ -170,7 +205,22 @@ export default function LobbyPage() {
       if (path === "cancel") router.push("/");
       return data.room;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      if (err instanceof ApiRequestError && err.status === 0) {
+        const uncertain = {
+          path,
+          body: body as Record<string, unknown>,
+          message: err.message,
+        };
+        // The response can be lost after the server has committed the write.
+        // A newer socket snapshot may therefore confirm the result before the
+        // rejected fetch settles; never resurrect a stale warning in that race.
+        if (!lobbyActionApplied(uncertain, currentRoom.current))
+          setUnconfirmedAction(uncertain);
+        else
+          delete attempts.current[path];
+      } else {
+        setError(err instanceof Error ? err.message : "操作失败");
+      }
     } finally {
       setBusy("");
     }
@@ -256,12 +306,17 @@ export default function LobbyPage() {
             </span>
           </div>
           <div className="lobby-teams">
-            {(["aff", "neg"] as const).map((side) => (
-              <div className={`lobby-team ${side}`} key={side}>
-                <h3>{side === "aff" ? "正方" : "反方"}</h3>
-                {room.seats
-                  .filter((seat) => seat.side === side)
-                  .map((seat) => (
+            {(["aff", "neg"] as const).map((side) => {
+              const sideSeats = room.seats.filter((seat) => seat.side === side);
+              const sideHumans = sideSeats.filter((seat) => seat.occupant_type === "human").length;
+              const sideName = side === "aff" ? "正方" : "反方";
+              return (
+              <div className={`lobby-team ${side}`} key={side} role="group" aria-label={`${sideName}席位`}>
+                <h3>
+                  <span>{sideName}</span>
+                  <small>{sideHumans} 位真人 · {sideSeats.length} 个席位</small>
+                </h3>
+                {sideSeats.map((seat) => (
                     <button
                       className={`lobby-seat ${seat.occupant_type !== "open" ? "occupied" : ""} ${seat.is_me ? "me" : ""}`}
                       key={seat.seat_key}
@@ -304,7 +359,8 @@ export default function LobbyPage() {
                     </button>
                   ))}
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
         <aside className="panel lobby-sidebar">
@@ -351,6 +407,22 @@ export default function LobbyPage() {
           {error && (
             <div className="error-box" role="alert">
               {error}
+            </div>
+          )}
+          {unconfirmedAction && (
+            <div className={connected ? "warning-box" : "error-box"} role="alert">
+              {connected
+                ? "实时连接已恢复，但上一次操作结果尚未确认。请重新执行该操作；系统会沿用同一请求编号安全核对，不会重复提交。"
+                : unconfirmedAction.message}
+              {connected && (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setUnconfirmedAction(null)}
+                >
+                  知道了
+                </button>
+              )}
             </div>
           )}
           {me && deviceControl === "lost" && (

@@ -7,7 +7,8 @@ import type { Room } from "@/lib/types";
 export function useRoom(code: string) {
   const [room, setRoom] = useState<Room | null>(null);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState("");
+  const [connectionError, setConnectionError] = useState("");
+  const [snapshotError, setSnapshotError] = useState("");
   const [liveEvent, setLiveEvent] = useState<Record<string, unknown> | null>(null);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const retry = useRef(0);
@@ -37,7 +38,8 @@ export function useRoom(code: string) {
     setRoom(null);
     setLiveEvent(null);
     setConnected(false);
-    setError("");
+    setConnectionError("");
+    setSnapshotError("");
   }, [code]);
 
   useEffect(() => {
@@ -66,9 +68,14 @@ export function useRoom(code: string) {
       if (socket && socket.readyState !== WebSocket.CLOSED) socket.close(code, reason);
     };
     const loadAuthoritativeSnapshot = () => {
-      void refresh().catch((err) => {
-        if (active && !terminalClosed) setError(err instanceof Error ? err.message : "房间载入失败");
-      });
+      void refresh()
+        .then(() => {
+          if (active && !terminalClosed) setSnapshotError("");
+        })
+        .catch((err) => {
+          if (active && !terminalClosed)
+            setSnapshotError(err instanceof Error ? err.message : "房间载入失败");
+        });
     };
     const connect = () => {
       if (!active || !isOnline() || terminalClosed) return;
@@ -86,7 +93,7 @@ export function useRoom(code: string) {
           if (socket.readyState !== WebSocket.OPEN) return;
           if (Date.now() - lastMessageAt > 45_000) {
             heartbeatTimedOut = true;
-            setError("实时连接响应超时，正在重新连接…");
+            setConnectionError("实时连接响应超时，正在重新连接…");
             socket.close(4000, "heartbeat timeout");
             return;
           }
@@ -103,21 +110,23 @@ export function useRoom(code: string) {
             // room's UI, even if a proxy or fanout regression misroutes one
             // payload. Keep the last authoritative state and reconnect.
             roomMismatch = true;
-            setError("实时数据房间不匹配，正在重新连接…");
+            setConnectionError("实时数据房间不匹配，正在重新连接…");
             socket.close(4002, "room mismatch");
             return;
           }
           if (message.room) {
             setRoom((current) => (!current || message.room.seq >= current.seq ? message.room : current));
             setConnected(true);
-            setError("");
+            setConnectionError("");
+            setSnapshotError("");
             retry.current = 0;
           }
           if (message.event) setLiveEvent(message.event);
         } catch { /* ignore malformed event */ }
       };
       socket.onerror = () => {
-        if (active && ws === socket) setError(isOnline() ? "实时连接出现波动，正在重连…" : "网络连接已断开，恢复联网后将自动重连。");
+        if (active && ws === socket)
+          setConnectionError(isOnline() ? "实时连接出现波动，正在重连…" : "网络连接已断开，恢复联网后将自动重连。");
       };
       socket.onclose = (event) => {
         if (!active || ws !== socket) return;
@@ -131,14 +140,14 @@ export function useRoom(code: string) {
         };
         if (terminalMessage[event.code]) {
           terminalClosed = true;
-          setError(terminalMessage[event.code]);
+          setConnectionError(terminalMessage[event.code]);
           return;
         }
         if (!isOnline()) {
-          setError("网络连接已断开，恢复联网后将自动重连。");
+          setConnectionError("网络连接已断开，恢复联网后将自动重连。");
           return;
         }
-        setError(
+        setConnectionError(
           roomMismatch
             ? "实时数据房间不匹配，正在重新连接…"
             : heartbeatTimedOut
@@ -156,7 +165,7 @@ export function useRoom(code: string) {
       clearRetry();
       retry.current = 0;
       setConnected(false);
-      setError("网络连接已断开，恢复联网后将自动重连。");
+      setConnectionError("网络连接已断开，恢复联网后将自动重连。");
       closeCurrentSocket(4001, "browser offline");
     };
     const handleOnline = () => {
@@ -183,7 +192,17 @@ export function useRoom(code: string) {
     };
   }, [code, refresh, connectionAttempt]);
 
-  return { room: visibleRoom, setRoom, connected, error, refresh, reconnect, liveEvent };
+  return {
+    room: visibleRoom,
+    setRoom,
+    connected,
+    error: connectionError || snapshotError,
+    connectionError,
+    snapshotError,
+    refresh,
+    reconnect,
+    liveEvent,
+  };
 }
 
 export function useCountdown(initial: number | null, seq: number, active = true) {

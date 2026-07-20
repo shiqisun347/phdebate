@@ -168,6 +168,39 @@ describe("useRoom", () => {
     await waitFor(() => expect(result.current.room?.seq).toBe(2));
   });
 
+  it("keeps snapshot request errors separate from a still-broken realtime connection", async () => {
+    const setOnline = mockOnlineState(true);
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(roomResponse(2));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const { result } = renderHook(() => useRoom("123456"));
+    const first = FakeWebSocket.instances[0];
+
+    act(() => first.onerror?.(new Event("error")));
+    await waitFor(() => expect(result.current.snapshotError).toContain("网络连接失败"));
+    expect(result.current.connectionError).toContain("实时连接");
+
+    await act(async () => {
+      setOnline(true);
+      window.dispatchEvent(new Event("online"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.snapshotError).toBe("");
+    expect(result.current.connectionError).toContain("实时连接");
+    expect(result.current.connected).toBe(false);
+
+    act(() => {
+      first.open();
+      first.message({ type: "snapshot", room: snapshot(3) });
+    });
+    expect(result.current.connectionError).toBe("");
+    expect(result.current.error).toBe("");
+    expect(result.current.connected).toBe(true);
+  });
+
   it("manual reconnect replaces the current socket without leaving a retry timer", () => {
     vi.useFakeTimers();
     mockOnlineState(true);
