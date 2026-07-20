@@ -212,12 +212,10 @@ def test_room_projection_labels_completed_caption_as_previous_speech(client: Tes
 
     anonymous_result = client.get(f"/api/rooms/{code}/result")
     owner_result = owner.get(f"/api/rooms/{code}/result")
-    assert anonymous_result.status_code == 200 and owner_result.status_code == 200
-    anonymous_types = {item["type"] for item in anonymous_result.json()["events"]}
+    assert anonymous_result.status_code == 409
+    assert anonymous_result.json()["detail"] == "比赛尚未结束，请前往观战页面查看实时内容。"
+    assert owner_result.status_code == 200
     owner_types = {item["type"] for item in owner_result.json()["events"]}
-    assert "stage.started" in anonymous_types
-    assert "presence.connected" not in anonymous_types
-    assert "seat.control_acquired" not in anonymous_types
     assert {"presence.connected", "seat.control_acquired"}.issubset(owner_types)
 
 
@@ -2707,6 +2705,80 @@ def test_admin_lists_clamp_stale_pages_and_reject_unknown_room_status(client: Te
 
         invalid_status = admin.get("/api/admin/rooms?status=teacher_activity")
         assert invalid_status.status_code == 422
+
+
+def test_admin_room_inventory_uses_compact_bounded_queries(client: TestClient, register_user) -> None:
+    owner = register_user("admin_room_summary")
+    created = create_training_room(owner, "长期暂停比赛需要运营关注")
+    decoy_owner = register_user("admin_room_summary_decoy")
+    decoy = create_training_room(decoy_owner, "高基数历史事件不应进入当前页聚合")
+    with SessionLocal.begin() as db:
+        room = load_room(db, created["code"], lock=True)
+        room.status = "paused"
+        for seat in room.seats:
+            seat.connected = False
+        paused = append_event(db, room, "control.pause", {"reason": "test"}, actor_user_id=room.owner_id)
+        paused.created_at = now() - timedelta(hours=2)
+        decoy_room = load_room(db, decoy["code"], lock=True)
+        for index in range(250):
+            append_event(db, decoy_room, "speech.completed", {"index": index})
+
+    admin = TestClient(client.app)
+    with admin:
+        assert admin.post("/api/auth/login", json={"account": "admin_test", "password": "Admin-test-1234"}).status_code == 200
+        statements: list[str] = []
+
+        def track_selects(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement.lower())
+
+        event.listen(engine, "before_cursor_execute", track_selects)
+        try:
+            response = admin.get(f"/api/admin/rooms?page_size=200&q={created['code']}")
+        finally:
+            event.remove(engine, "before_cursor_execute", track_selects)
+        assert response.status_code == 200
+        inventory_statements = [
+            statement
+            for statement in statements
+            if "user_sessions" not in statement and "from users" not in statement
+        ]
+        assert len(inventory_statements) <= 4
+        assert sum("match_events" in statement for statement in inventory_statements) <= 1
+        assert not any("speeches" in statement for statement in inventory_statements)
+        event_query = next(statement for statement in inventory_statements if "match_events" in statement)
+        seat_query = next(statement for statement in inventory_statements if "room_seats" in statement)
+        assert "match_events.room_id in" in event_query
+        assert "room_seats.room_id in" in seat_query
+        items = response.json()["items"]
+        if items:
+            item = items[0]
+            assert {
+                "id",
+                "code",
+                "topic",
+                "status",
+                "is_test_data",
+                "competition",
+                "current_stage",
+                "connected_humans",
+                "failure_reason",
+                "paused_at",
+                "attention_reason",
+                "updated_at",
+            } == set(item)
+            assert set(item["competition"]) == {"id", "slug", "name"}
+            assert item["connected_humans"] == 0
+            assert item["attention_reason"] == "stale_paused"
+            assert item["paused_at"] is not None
+
+        with SessionLocal.begin() as db:
+            room = load_room(db, created["code"], lock=True)
+            room.status = "review_required"
+            room.failure_reason = "裁判服务超时"
+        review = admin.get(f"/api/admin/rooms?q={created['code']}")
+        assert review.status_code == 200
+        assert review.json()["items"][0]["attention_reason"] == "review_required"
 
 
 def test_admin_can_manage_topics_and_agent_pool_without_exposing_controls(client: TestClient, register_user) -> None:
@@ -5359,10 +5431,8 @@ def test_public_projection_redacts_internal_failures(client: TestClient, registe
     outsider_failed = next(item for item in outsider_view["recent_events"] if item["type"] == "provider.failed")
     assert outsider_failed["payload"] == {"message": "服务暂时异常"}
     public_result = client.get(f"/api/rooms/{room_data['code']}/result")
-    assert public_result.status_code == 200
-    result_event_types = {item["type"] for item in public_result.json()["events"]}
-    assert "provider.failed" not in result_event_types
-    assert "audio.rtc.started" not in result_event_types
+    assert public_result.status_code == 409
+    assert public_result.json()["detail"] == "比赛尚未结束，请前往观战页面查看实时内容。"
 
 
 def test_anonymous_realtime_event_allows_captions_and_flush_identity_only() -> None:
@@ -6938,10 +7008,8 @@ def test_pending_scorecard_details_are_admin_only(client: TestClient, register_u
         match_id = match.id
 
     for response in (
-        client.get(f"/api/rooms/{code}/result"),
         owner.get(f"/api/rooms/{code}/result"),
         owner.get(f"/api/matches/{match_id}/history"),
-        client.get(f"/api/matches/{match_id}/result"),
     ):
         assert response.status_code == 200, response.text
         scorecard = response.json()["scorecard"]
@@ -6950,6 +7018,13 @@ def test_pending_scorecard_details_are_admin_only(client: TestClient, register_u
         assert scorecard["individual_scores"] == {}
         assert scorecard["reasoning"] == "裁判结果等待管理员复核。"
         assert raw_reason not in response.text
+
+    for response in (
+        client.get(f"/api/rooms/{code}/result"),
+        client.get(f"/api/matches/{match_id}/result"),
+    ):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "比赛尚未结束，请前往观战页面查看实时内容。"
 
     admin = TestClient(client.app)
     with admin:
@@ -7202,8 +7277,8 @@ async def test_unavailable_judge_enters_review_once_without_publishing_ranking(
         )
 
     public_result = client.get(f"/api/rooms/{code}/result")
-    assert public_result.status_code == 200
-    payload = public_result.json()
+    assert public_result.status_code == 409
+    payload = owner.get(f"/api/rooms/{code}/result").json()
     assert payload["room"]["remaining_seconds"] == 0
     assert payload["scorecard"]["reasoning"] == "裁判结果等待管理员复核。"
     assert payload["rating_changes"] == []

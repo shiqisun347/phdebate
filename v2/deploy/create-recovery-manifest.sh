@@ -47,6 +47,14 @@ FILES=(
   "$RELIABLE_VOICE_BACKUP"
   "$MOSS_OFFLINE_BACKUP"
 )
+ROLES=(
+  v2_database
+  agent_database
+  data_volumes
+  private_config
+  reliable_voice
+  moss_offline
+)
 
 for file in "${FILES[@]}"; do
   if [[ ! -f "$file" ]]; then
@@ -64,7 +72,7 @@ cleanup() {
 trap cleanup EXIT
 
 {
-  printf 'schema_version=1\n'
+  printf 'schema_version=2\n'
   printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'code_branch=%s\n' "$CODE_BRANCH"
   printf 'code_commit=%s\n' "$CODE_COMMIT"
@@ -73,7 +81,13 @@ trap cleanup EXIT
   printf 'api_release=%s\n' "$API_RELEASE"
   printf 'web_release=%s\n' "$WEB_RELEASE"
   printf 'reliable_audio_fingerprint=%s\n' "$RELIABLE_AUDIO_FINGERPRINT"
-  sha256sum "${FILES[@]}"
+  for index in "${!FILES[@]}"; do
+    file="${FILES[$index]}"
+    role="${ROLES[$index]}"
+    printf 'artifact.%s.filename=%s\n' "$role" "$(basename "$file")"
+    printf 'artifact.%s.bytes=%s\n' "$role" "$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file")"
+    printf 'artifact.%s.sha256=%s\n' "$role" "$(sha256sum "$file" | awk '{print $1}')"
+  done
 } >"$TEMP"
 
 mv "$TEMP" "$OUTPUT"

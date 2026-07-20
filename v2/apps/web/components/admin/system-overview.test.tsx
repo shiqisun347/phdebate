@@ -30,5 +30,26 @@ describe("SystemOverview", () => {
     expect(screen.getByText("1/1 个实时端点已就绪")).toBeInTheDocument();
     expect(screen.getByText(/辩手 Agent · 可达/)).toBeInTheDocument();
     expect(screen.queryByText(/兼容 LightTTS/)).not.toBeInTheDocument();
+    expect(screen.getByText("有运营事项需要处理")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /结果复核/ })).toHaveAttribute("href", "/admin?module=reviews");
+  });
+
+  it("surfaces paused matches and failed checks without hiding the recovery entry", () => {
+    const dashboard: AdminDashboard = {
+      counts: { users: 12, competitions: 2, live_rooms: 1, review_required: 0 },
+      rooms: [{ code: "551958", topic: "暂停比赛", status: "paused", updated_at: "2026-07-20T00:00:00Z" }],
+      providers: {},
+      leaderboard: [],
+      system_health: {
+        ok: false,
+        checked_at: "2026-07-20T00:00:00Z",
+        checks: { worker: { ok: false, workers: 0, queued_messages: 4, dead_letters: 1 } },
+      },
+    };
+    render(<SystemOverview dashboard={dashboard} />);
+
+    expect(screen.getByText(/1 项服务检查异常 · 1 场近期比赛暂停或待处理/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /比赛监管/ })).toHaveAttribute("href", "/admin?module=rooms");
+    expect(screen.queryByRole("link", { name: /结果复核/ })).not.toBeInTheDocument();
   });
 });

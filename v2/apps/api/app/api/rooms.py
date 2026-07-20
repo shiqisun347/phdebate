@@ -572,6 +572,12 @@ def room_result(
     match = db.scalar(select(Match).where(Match.room_id == room.id))
     if not match:
         raise HTTPException(status_code=404, detail="该房间还没有比赛记录。")
+    public_projection = use_public_projection(db, room, user)
+    if public_projection and match.status != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="比赛尚未结束，请前往观战页面查看实时内容。",
+        )
     scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
     try:
         speech_result = paginate_match_speeches(
@@ -590,7 +596,6 @@ def room_result(
     rating_names = {
         item.id: item.real_name for item in db.scalars(select(User).where(User.id.in_({change.user_id for change in changes}))).all()
     }
-    public_projection = use_public_projection(db, room, user)
     event_filters = [MatchEvent.room_id == room.id]
     if public_projection:
         event_filters.append(MatchEvent.event_type.in_(PUBLIC_MATCH_TIMELINE_EVENT_TYPES))

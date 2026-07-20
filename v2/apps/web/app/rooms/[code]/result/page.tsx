@@ -6,11 +6,16 @@ import {
   ArrowLeft,
   Archive,
   Award,
+  CirclePause,
+  CircleStop,
   Clock3,
+  Gavel,
   History,
   LoaderCircle,
+  Radio,
   RefreshCw,
   RotateCcw,
+  ShieldAlert,
   Trophy,
 } from "lucide-react";
 import {
@@ -29,7 +34,7 @@ import {
   type MatchTimelineEvent,
 } from "@/lib/match-events";
 import { competitionDisplayName } from "@/lib/primary-competition";
-import { ratingReasonLabel, resultStatusLabel } from "@/lib/status-labels";
+import { ratingReasonLabel, resultStatusLabel, roomStatusLabel } from "@/lib/status-labels";
 import type { Room } from "@/lib/types";
 import { useRoom } from "@/lib/use-room";
 
@@ -165,10 +170,14 @@ export default function ResultPage() {
       next = { ...next, speeches, speech_pagination: pagination };
       if (sequence === loadSequence.current) setData(next);
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        router.replace(`/rooms/${code}/watch`);
+        return;
+      }
       if (sequence === loadSequence.current)
         setError(err instanceof Error ? err.message : "比赛结果载入失败");
     }
-  }, [code]);
+  }, [code, router]);
 
   useEffect(() => {
     void load(false);
@@ -335,14 +344,47 @@ export default function ResultPage() {
                     : data.room.status === "lobby"
                       ? "比赛尚未开始"
                       : "比赛正在进行";
+  const ResultIcon = data.match.status === "terminated"
+    ? CircleStop
+    : data.match.status === "review_required"
+      ? ShieldAlert
+      : data.room.status === "judging"
+        ? Gavel
+        : data.room.status === "paused"
+          ? CirclePause
+          : ["running", "preparing", "lobby"].includes(data.room.status)
+            ? Radio
+            : Trophy;
+  const resultTone = data.match.status === "terminated"
+    ? "terminated"
+    : data.match.status === "review_required"
+      ? "attention"
+      : ["running", "preparing", "lobby", "paused", "judging"].includes(data.room.status)
+        ? "live"
+        : "settled";
+  const resultGuidance = data.match.status === "terminated"
+    ? "比赛记录已封存，不会计入正常胜负结算；管理员仍可下载归档排查终止原因。"
+    : data.match.status === "review_required"
+      ? "AI 裁判未能自动形成可发布赛果。管理员完成复核前，不展示胜负和个人评分，也不更新排行榜。"
+      : data.room.status === "paused"
+        ? "比赛记录仍在保存。参赛者请返回现场等待房主或管理员恢复，不要重复创建房间。"
+        : data.room.status === "judging"
+          ? "发言已经结束，裁判正在整理评分。页面会在赛果生成后自动同步。"
+          : ["running", "preparing", "lobby"].includes(data.room.status)
+            ? "这是比赛过程记录，不是最终成绩。返回现场可继续当前比赛。"
+            : "赛果已经确认，逐字稿、评分和积分变化均可在下方回溯。";
+  const liveRecordSummary = data.room.status === "paused"
+    ? `当前停在“${data.room.current_stage?.name || "比赛阶段"}”，已有发言和事件均已保存；恢复后将从这里继续。`
+    : `当前阶段为“${data.room.current_stage?.name || roomStatusLabel[data.room.status] || data.room.status}”，本页只记录过程，不代表最终成绩。`;
 
   return (
     <div className="page-shell">
-      <section className="result-hero panel">
-        <Trophy size={48} color="#ffcc6d" />
-        <span className="eyebrow">比赛结果 · #{code}</span>
+      <section className={`result-hero panel ${resultTone}`}>
+        <span className="result-state-icon" aria-hidden="true"><ResultIcon size={34} /></span>
+        <span className="eyebrow">{resultIsFinal ? "比赛记录" : "实时记录"} · #{code}</span>
         <h1>{winner}</h1>
         <p>{data.room.topic}</p>
+        <p className="result-guidance">{resultGuidance}</p>
         {data.scorecard?.status === "approved" &&
           data.scorecard.affirmative_score !== null &&
           data.scorecard.negative_score !== null && (
@@ -360,7 +402,7 @@ export default function ResultPage() {
             onClick={() => void refreshResult()}
           >
             {refreshing ? <LoaderCircle className="spin" /> : <RefreshCw />}{" "}
-            {refreshing ? "刷新中…" : "刷新赛果"}
+            {refreshing ? "刷新中…" : resultIsFinal ? "刷新赛果" : "刷新记录"}
           </button>
           {!resultIsFinal && (
             <Link href={liveRoomHref} className="button">
@@ -425,17 +467,17 @@ export default function ResultPage() {
       <div className="dashboard-grid">
         <section className="panel">
           <div className="panel-title">
-            <h2>裁判评议</h2>
+            <h2>{resultIsFinal ? "裁判评议" : "当前比赛状态"}</h2>
             <span className="badge">
-              {resultStatusLabel[data.scorecard?.status || data.match.status] ||
-                data.scorecard?.status ||
-                data.match.status}
+              {resultIsFinal
+                ? resultStatusLabel[data.scorecard?.status || data.match.status] || data.scorecard?.status || data.match.status
+                : "比赛尚未结束"}
             </span>
           </div>
           <p className="hero-copy" style={{ fontSize: 15 }}>
-            {data.scorecard?.reasoning ||
-              data.match.reason ||
-              "结果等待管理员复核后发布。"}
+            {resultIsFinal
+              ? data.scorecard?.reasoning || data.match.reason || "结果等待管理员复核后发布。"
+              : liveRecordSummary}
           </p>
         </section>
         <aside className="panel">
@@ -649,6 +691,7 @@ export default function ResultPage() {
               </div>
             </div>
           ))}
+          {!data.events.length && <div className="empty">比赛时间线正在生成，阶段推进后会显示在这里</div>}
         </div>
         {data.event_pagination.has_more && (
           <div

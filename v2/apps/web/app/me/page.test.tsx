@@ -72,7 +72,7 @@ describe("personal account", () => {
     };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(substituted)));
     render(<MePage />);
-    const link = await screen.findByRole("link", { name: /AI 已接替 · 返回观战或申请恢复/ });
+    const link = await screen.findByRole("link", { name: /AI 已接替 · 可观战并申请恢复真人席位/ });
     expect(link).toHaveAttribute("href", "/rooms/654321/watch");
     expect(screen.getByRole("button", { name: "申请恢复真人席位" })).toBeEnabled();
   });
@@ -157,5 +157,27 @@ describe("personal account", () => {
     expect(item).toHaveTextContent("比赛已终止");
     expect(item).toHaveTextContent("已终止");
     expect(screen.getByRole("link", { name: "查看房间 192885 的比赛记录" })).toHaveAttribute("href", "/rooms/192885/result");
+  });
+
+  it("makes a paused match recoverable without implying that it has ended", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({
+      ...meData,
+      summary: { ...meData.summary, active_total: 1 },
+      active_rooms: [{
+        code: "551958",
+        topic: "长期暂停的正式比赛",
+        status: "paused",
+        seat_key: "aff_1",
+        occupant_type: "human",
+        can_resume: true,
+        restore_request: null,
+      }],
+    })));
+    render(<MePage />);
+
+    const link = await screen.findByRole("link", { name: /比赛已暂停 · 房主或管理员可在控制台恢复/ });
+    expect(link).toHaveAttribute("href", "/rooms/551958/debate");
+    expect(link).toHaveTextContent("查看并等待恢复");
+    expect(screen.queryByText("比赛已终止")).not.toBeInTheDocument();
   });
 });

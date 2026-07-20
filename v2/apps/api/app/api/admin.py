@@ -6,13 +6,14 @@ import json
 import re
 import time
 import wave
+from datetime import timedelta
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import settings
 from app.core.database import acquire_transaction_locks, get_db
@@ -29,6 +30,7 @@ from app.models.entities import (
     JudgeProfile,
     JudgeScorecard,
     Match,
+    MatchEvent,
     ProviderConfig,
     Room,
     RoomSeat,
@@ -112,6 +114,44 @@ def serialize_audio_cue(item: AudioCue) -> dict:
         "audio_url": item.audio_url,
         "is_active": item.is_active,
         "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def serialize_admin_room_summary(room: Room, *, connected_humans: int, paused_at) -> dict:
+    current_stage = (
+        dict(room.template_snapshot[room.current_stage_index])
+        if 0 <= room.current_stage_index < len(room.template_snapshot or [])
+        else None
+    )
+    attention_reason = ""
+    if room.status == "review_required":
+        attention_reason = "review_required"
+    elif room.failure_reason:
+        attention_reason = "service_failure"
+    elif (
+        room.status == "paused"
+        and connected_humans == 0
+        and paused_at is not None
+        and as_utc(paused_at) <= now() - timedelta(hours=1)
+    ):
+        attention_reason = "stale_paused"
+    return {
+        "id": room.id,
+        "code": room.code,
+        "topic": room.topic,
+        "status": room.status,
+        "is_test_data": room.is_test_data,
+        "competition": {
+            "id": room.competition.id,
+            "slug": room.competition.slug,
+            "name": room.competition.name,
+        },
+        "current_stage": current_stage,
+        "connected_humans": connected_humans,
+        "failure_reason": room.failure_reason,
+        "paused_at": paused_at.isoformat() if paused_at else None,
+        "attention_reason": attention_reason,
+        "updated_at": room.updated_at.isoformat(),
     }
 
 
@@ -697,15 +737,57 @@ def admin_rooms(
     total = db.scalar(select(func.count(Room.id)).where(*filters)) or 0
     pagination = _pagination(page, page_size, total)
     effective_page = pagination["page"]
-    rows = db.scalars(
-        select(Room)
-        .where(*filters)
-        .order_by(Room.updated_at.desc(), Room.id)
-        .offset((effective_page - 1) * page_size)
-        .limit(page_size)
-    ).all()
+    rooms = list(
+        db.scalars(
+            select(Room)
+            .options(joinedload(Room.competition))
+            .where(*filters)
+            .order_by(Room.updated_at.desc(), Room.id)
+            .offset((effective_page - 1) * page_size)
+            .limit(page_size)
+        )
+        .unique()
+        .all()
+    )
+    room_ids = [room.id for room in rooms]
+    connected_counts = (
+        dict(
+            db.execute(
+                select(RoomSeat.room_id, func.count(RoomSeat.id))
+                .where(
+                    RoomSeat.room_id.in_(room_ids),
+                    RoomSeat.occupant_type == "human",
+                    RoomSeat.connected.is_(True),
+                )
+                .group_by(RoomSeat.room_id)
+            ).all()
+        )
+        if room_ids
+        else {}
+    )
+    pause_times = (
+        dict(
+            db.execute(
+                select(MatchEvent.room_id, func.max(MatchEvent.created_at))
+                .where(
+                    MatchEvent.room_id.in_(room_ids),
+                    MatchEvent.event_type.in_(("control.pause", "engine.quarantined", "provider.failed")),
+                )
+                .group_by(MatchEvent.room_id)
+            ).all()
+        )
+        if room_ids
+        else {}
+    )
     return {
-        "items": [serialize_room(db, load_room(db, room.code), admin) for room in rows],
+        "items": [
+            serialize_admin_room_summary(
+                room,
+                connected_humans=int(connected_counts.get(room.id, 0)),
+                paused_at=pause_times.get(room.id),
+            )
+            for room in rooms
+        ],
         "pagination": pagination,
     }
 

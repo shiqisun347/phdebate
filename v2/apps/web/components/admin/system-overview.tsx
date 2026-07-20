@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { AlertTriangle, ArrowRight, CheckCircle2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type HealthCheck = {
@@ -102,6 +104,9 @@ export function SystemOverview({ dashboard }: { dashboard: AdminDashboard }) {
   const visibleProviders = Object.entries(dashboard.providers).filter(
     ([key, value]) => key !== "lighttts" || value.enabled,
   );
+  const failedHealthChecks = Object.entries(dashboard.system_health.checks).filter(([, value]) => !value.ok);
+  const attentionRooms = dashboard.rooms.filter((room) => ["paused", "review_required"].includes(room.status));
+  const needsAttention = failedHealthChecks.length > 0 || dashboard.counts.review_required > 0 || attentionRooms.length > 0;
 
   return (
     <>
@@ -114,6 +119,18 @@ export function SystemOverview({ dashboard }: { dashboard: AdminDashboard }) {
         <div className="stat-card"><span className="muted">赛事类型</span><strong>{dashboard.counts.competitions}</strong></div>
         <div className="stat-card"><span className="muted">活跃比赛</span><strong>{dashboard.counts.live_rooms}</strong></div>
         <div className="stat-card"><span className="muted">等待复核</span><strong>{dashboard.counts.review_required}</strong></div>
+      </div>
+      <div className={`admin-ops-callout ${needsAttention ? "attention" : "ready"}`} role="status">
+        <span className="admin-ops-callout-icon" aria-hidden="true">{needsAttention ? <AlertTriangle size={20} /> : <CheckCircle2 size={20} />}</span>
+        <div>
+          <strong>{needsAttention ? "有运营事项需要处理" : "当前没有待处理事项"}</strong>
+          <small>
+            {needsAttention
+              ? `${failedHealthChecks.length} 项服务检查异常 · ${attentionRooms.length} 场近期比赛暂停或待处理 · ${dashboard.counts.review_required} 场赛果待复核`
+              : "服务检查正常，近期比赛没有暂停或待复核记录。"}
+          </small>
+        </div>
+        {needsAttention && <nav aria-label="待处理事项快捷入口"><Link href="/admin?module=rooms">比赛监管<ArrowRight size={14} /></Link>{dashboard.counts.review_required > 0 && <Link href="/admin?module=reviews">结果复核<ArrowRight size={14} /></Link>}</nav>}
       </div>
       <h3 style={{ marginTop: 28 }}>平台就绪检查</h3>
       <div className="service-grid">

@@ -83,9 +83,14 @@ export default function HomePage() {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     const closedRoom = url.searchParams.get("room_closed");
-    if (!closedRoom || !/^\d{6}$/.test(closedRoom)) return;
-    setNotice(`房间 #${closedRoom} 已关闭，无法继续进入。你可以创建新比赛或输入其他房间号。`);
-    url.searchParams.delete("room_closed");
+    const accessNotice = url.searchParams.get("notice");
+    if (closedRoom && /^\d{6}$/.test(closedRoom)) {
+      setNotice(`房间 #${closedRoom} 已关闭，无法继续进入。你可以创建新比赛或输入其他房间号。`);
+      url.searchParams.delete("room_closed");
+    } else if (accessNotice === "admin-required") {
+      setNotice("该页面仅限系统管理员访问。你仍可参加赛事、加入房间或查看自己的比赛记录。");
+      url.searchParams.delete("notice");
+    } else return;
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   }, []);
   useEffect(() => {

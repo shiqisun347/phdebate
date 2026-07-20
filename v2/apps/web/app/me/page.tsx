@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, ArrowRight, History, KeyRound, MonitorOff, Radio, ShieldCheck, UserRound } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, History, KeyRound, MonitorOff, Radio, ShieldCheck, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -34,6 +34,13 @@ function resultLabel(item: HistoryItem): string {
   if (item.winner === "neg") return "反方胜";
   if (item.winner === "draw") return "平局";
   return "待复核";
+}
+
+function historyTone(item: HistoryItem): string {
+  if (item.status === "review_required") return "attention";
+  if (item.status === "terminated" || item.status === "cancelled") return "muted-status";
+  if (item.status === "completed") return "settled";
+  return "live";
 }
 
 export default function MePage() {
@@ -139,7 +146,7 @@ export default function MePage() {
     <div className="page-shell">
       <div className="section-head">
         <div>
-          <span className="eyebrow">My Debate</span>
+          <span className="eyebrow">个人比赛档案</span>
           <h1>{data.user.real_name}的辩论档案</h1>
           <p>@{data.user.account} · 所有比赛身份均绑定至此账号</p>
         </div>
@@ -149,7 +156,7 @@ export default function MePage() {
       <div className="stats-grid">
         <div className="stat-card"><span className="muted">累计积分</span><strong>{data.summary.total_points}</strong></div>
         <div className="stat-card"><span className="muted">历史比赛</span><strong>{data.summary.history_total}</strong></div>
-        <div className="stat-card"><span className="muted">进行中</span><strong>{data.summary.active_total}</strong></div>
+        <div className="stat-card"><span className="muted">需要继续</span><strong>{data.summary.active_total}</strong></div>
         <div className="stat-card"><span className="muted">账号角色</span><strong style={{ fontSize: 18 }}>{data.user.role === "system_admin" ? "系统管理员" : "认证辩手"}</strong></div>
       </div>
 
@@ -157,12 +164,20 @@ export default function MePage() {
         <section className="panel">
           <div className="panel-title"><h2><Radio size={19} />继续比赛</h2></div>
           <div className="history-list">
-            {data.active_rooms.map((room) => (
-              <div className="active-room-entry" key={room.code}>
+            {data.active_rooms.map((room) => {
+              const needsAttention = room.status === "paused" || !room.can_resume;
+              const actionLabel = room.can_resume
+                ? room.status === "lobby" ? "返回房间大厅" : room.status === "paused" ? "查看并等待恢复" : "继续比赛"
+                : "返回观战";
+              const detail = room.can_resume
+                ? room.status === "paused" ? "比赛已暂停 · 房主或管理员可在控制台恢复" : roomStatusLabel[room.status] || room.status
+                : room.restore_request?.status === "pending" ? "AI 已接替 · 恢复申请等待审批" : "AI 已接替 · 可观战并申请恢复真人席位";
+              return (
+              <div className={`active-room-entry ${needsAttention ? "attention" : ""}`} key={room.code}>
                 <Link href={`/rooms/${room.code}/${room.can_resume ? room.status === "lobby" ? "lobby" : "debate" : "watch"}`} className="live-row">
                   <span className="room-code">#{room.code}</span>
-                  <span className="row-main"><strong>{room.topic}</strong><small>{room.can_resume ? roomStatusLabel[room.status] || room.status : room.restore_request?.status === "pending" ? "AI 已接替 · 恢复申请等待审批" : "AI 已接替 · 返回观战或申请恢复"}</small></span>
-                  <ArrowRight size={17} />
+                  <span className="row-main"><strong>{room.topic}</strong><small><span className={`live-room-status ${room.status}`}>{roomStatusLabel[room.status] || room.status}</span>{detail}</small></span>
+                  <span className="active-room-action">{actionLabel}<ArrowRight size={15} /></span>
                 </Link>
                 {!room.can_resume && (room.restore_request?.status === "pending" ? (
                   <button type="button" className="button button-small button-secondary" aria-busy={restoreBusy === room.code} disabled={restoreBusy === room.code} onClick={() => void cancelRestore(room.code, room.restore_request!.id)}>{restoreBusy === room.code ? "正在撤销…" : "撤销恢复申请"}</button>
@@ -170,7 +185,7 @@ export default function MePage() {
                   <button type="button" className="button button-small button-green" aria-busy={restoreBusy === room.code} disabled={restoreBusy === room.code} onClick={() => void requestRestore(room.code)}>{restoreBusy === room.code ? "正在提交…" : "申请恢复真人席位"}</button>
                 ))}
               </div>
-            ))}
+            );})}
             {!data.active_rooms.length && (
               <div className="empty empty-guidance">
                 <span>当前没有需要继续的比赛</span>
@@ -211,8 +226,8 @@ export default function MePage() {
                   <strong>{item.topic}</strong>
                   {item.completed_at && <small>{new Date(item.completed_at).toLocaleDateString("zh-CN")}</small>}
                 </div>
-                <span className="match-history-state">{roomStatusLabel[item.status] || item.status}</span>
-                <span className="match-history-result">{resultLabel(item)}</span>
+                <span className={`match-history-state ${historyTone(item)}`}>{item.status === "review_required" && <AlertTriangle size={12} aria-hidden="true" />}{roomStatusLabel[item.status] || item.status}</span>
+                <span className={`match-history-result ${historyTone(item)}`}>{resultLabel(item)}</span>
                 <Link className="match-history-action" href={`/rooms/${item.room_code}/result`} aria-label={`查看房间 ${item.room_code} 的比赛记录`}>
                   查看记录<ArrowRight size={16} aria-hidden="true" />
                 </Link>

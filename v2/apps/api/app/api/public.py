@@ -420,6 +420,8 @@ def match_result(match_id: str, user: User | None = Depends(optional_user), db: 
     room = db.get(Room, match.room_id)
     if not can_view_room(db, room, user):
         raise HTTPException(status_code=401 if not user else 403, detail="无权查看该比赛。")
+    if use_public_projection(db, room, user) and match.status != "completed":
+        raise HTTPException(status_code=409, detail="比赛尚未结束，请前往观战页面查看实时内容。")
     scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
     changes = db.scalars(
         select(RatingChange).where(RatingChange.match_id == match.id).order_by(RatingChange.created_at, RatingChange.id)

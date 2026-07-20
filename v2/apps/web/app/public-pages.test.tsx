@@ -33,6 +33,15 @@ describe("public pages", () => {
     expect(screen.getByRole("button", { name: "重新尝试" })).toBeEnabled();
   });
 
+  it("explains an administrator-only redirect instead of silently returning home", async () => {
+    window.history.replaceState({}, "", "/?notice=admin-required");
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(response({ items: [] }))));
+    render(<HomePage />);
+
+    expect(await screen.findByText("该页面仅限系统管理员访问。你仍可参加赛事、加入房间或查看自己的比赛记录。")).toBeInTheDocument();
+    expect(window.location.search).toBe("");
+  });
+
   it("presents participant-led competitions and labels paused rooms as watchable rather than running", async () => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

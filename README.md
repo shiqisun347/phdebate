@@ -22,7 +22,7 @@ Agent 管理平台位于 `debate-agent/`。
 - 密码、API Key、数据库、学生音频、模型权重和生产 `.env` 不得提交到 GitHub。
 
 ## 开发与测试
-
+http://ssh%20-p%2023%20root@117.50.192.216/
 具体启动、测试和部署命令见 [V2 README](v2/README.md) 与
 [Debate Agent README](debate-agent/README.md)。
 

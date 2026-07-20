@@ -201,7 +201,8 @@ def test_legacy_match_speeches_keep_compatible_result_and_history_shape(client: 
     match_id = start_room(owner, room["code"])
     add_speeches(room["code"], match_id, count=3, prefix="legacy", legacy=True)
 
-    result = client.get(f"/api/rooms/{room['code']}/result?speech_page_size=2")
+    assert client.get(f"/api/rooms/{room['code']}/result?speech_page_size=2").status_code == 409
+    result = owner.get(f"/api/rooms/{room['code']}/result?speech_page_size=2")
     assert result.status_code == 200
     payload = result.json()
     assert [item["content"] for item in payload["speeches"]] == ["legacy 发言 1", "legacy 发言 2"]

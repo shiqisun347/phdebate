@@ -25,10 +25,10 @@ import {
 import { apiFetch } from "@/lib/api";
 import { competitionDisplayName } from "@/lib/primary-competition";
 import { useSession } from "@/lib/use-session";
-import type { Competition, Room, Season, User } from "@/lib/types";
+import type { Competition, Season, User } from "@/lib/types";
 import { LoadError } from "@/components/load-error";
 import type { AdminPaginationState } from "@/components/admin/admin-pagination";
-import { RoomsPanel } from "@/components/admin/rooms-panel";
+import { RoomsPanel, type AdminRoomSummary } from "@/components/admin/rooms-panel";
 import { SystemOverview, type AdminDashboard } from "@/components/admin/system-overview";
 import { UsersPanel } from "@/components/admin/users-panel";
 import type {
@@ -110,7 +110,7 @@ export default function AdminPage() {
     starts_at: "",
     ends_at: "",
   });
-  const [rooms, setRooms] = useState<Room[]>([]);
+  const [rooms, setRooms] = useState<AdminRoomSummary[]>([]);
   const [roomQuery, setRoomQuery] = useState("");
   const [roomStatus, setRoomStatus] = useState("");
   const [roomDataScope, setRoomDataScope] = useState("");
@@ -192,7 +192,7 @@ export default function AdminPage() {
     string[]
   >([]);
   useEffect(() => {
-    if (!loading && user?.role !== "system_admin") router.replace("/");
+    if (!loading && user?.role !== "system_admin") router.replace("/?notice=admin-required");
   }, [user, loading, router]);
   const load = useCallback(async () => {
     try {
@@ -291,7 +291,7 @@ export default function AdminPage() {
     const requestSequence = ++roomsRequestSequence.current;
     setRoomsLoading(true);
     try {
-      const data = await apiFetch<{ items: Room[]; pagination: AdminPaginationState }>(
+      const data = await apiFetch<{ items: AdminRoomSummary[]; pagination: AdminPaginationState }>(
         `/api/admin/rooms?page=${page}&page_size=100&q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&data_scope=${encodeURIComponent(dataScope)}`,
       );
       if (requestSequence !== roomsRequestSequence.current) return;
@@ -326,7 +326,7 @@ export default function AdminPage() {
   async function refreshAuditIfLoaded() {
     if (loadedTabs.current.has("audit")) await loadAudit(1, auditQuery);
   }
-  async function markRoomAsTestData(room: Room) {
+  async function markRoomAsTestData(room: AdminRoomSummary) {
     if (!window.confirm(`确认将房间 #${room.code} 标记为 QA 测试数据？该房间将永久退出正式排行榜和研究数据。`)) return;
     setSaving(true);
     setError("");

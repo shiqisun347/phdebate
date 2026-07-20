@@ -9,7 +9,7 @@ const roomSync = vi.hoisted(() => ({
   reconnect: vi.fn(),
 }));
 
-const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+const navigation = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ code: "381526" }),
@@ -99,6 +99,7 @@ describe("result archive download", () => {
     roomSync.room = { seq: 8 };
     roomSync.reconnect.mockReset();
     navigation.push.mockReset();
+    navigation.replace.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -125,22 +126,16 @@ describe("result archive download", () => {
     expect(screen.queryByRole("link", { name: "返回个人中心" })).not.toBeInTheDocument();
   });
 
-  it("returns an anonymous watcher to the live watch page while a result is not final", async () => {
-    const liveResult = result(null);
-    liveResult.match.status = "running";
-    liveResult.match.winner = null;
-    liveResult.room.status = "paused";
-    liveResult.scorecard = null;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(liveResult), {
-      status: 200,
+  it("returns an anonymous watcher to the public projection while a result is not final", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "比赛尚未结束，请前往观战页面。" }), {
+      status: 409,
       headers: { "Content-Type": "application/json" },
     })));
 
     render(<ResultPage />);
 
-    expect(await screen.findByRole("heading", { name: "比赛已暂停" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "返回比赛现场" })).toHaveAttribute("href", "/rooms/381526/watch");
-    expect(screen.queryByRole("link", { name: "返回个人中心" })).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/rooms/381526/watch"));
+    expect(screen.queryByRole("heading", { name: "比赛已暂停" })).not.toBeInTheDocument();
   });
 
   it("lets a former participant create an idempotent same-topic rematch", async () => {
@@ -264,7 +259,7 @@ describe("result archive download", () => {
   });
 
   it("does not render unpublished scores and reasoning as a final result", async () => {
-    const pending = result(null);
+    const pending = result("aff_1");
     pending.match.status = "review_required";
     pending.match.winner = null;
     pending.scorecard = {
@@ -298,9 +293,30 @@ describe("result archive download", () => {
     })));
     render(<ResultPage />);
     expect(await screen.findByRole("heading", { name: "比赛正在进行" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "当前比赛状态" })).toBeInTheDocument();
+    expect(screen.getByText("比赛尚未结束")).toBeInTheDocument();
     expect(screen.getByText(/正式赛果尚未生成/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "返回比赛现场" })).toHaveAttribute("href", "/rooms/381526/debate");
     expect(screen.queryByRole("heading", { name: "等待管理员复核" })).not.toBeInTheDocument();
+  });
+
+  it("describes a participant's paused record as recoverable rather than under review", async () => {
+    const paused = result("aff_1");
+    paused.room.status = "paused";
+    paused.match.status = "running";
+    paused.match.winner = null;
+    paused.scorecard = null;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(paused), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+    render(<ResultPage />);
+
+    expect(await screen.findByRole("heading", { name: "比赛已暂停" })).toBeInTheDocument();
+    expect(screen.getByText(/房主或管理员恢复/)).toBeInTheDocument();
+    expect(screen.getByText("比赛尚未结束")).toBeInTheDocument();
+    expect(screen.queryByText("裁判评议中")).not.toBeInTheDocument();
+    expect(screen.queryByText("等待管理员复核")).not.toBeInTheDocument();
   });
 
   it("reloads the result when a newer authoritative room sequence arrives", async () => {
