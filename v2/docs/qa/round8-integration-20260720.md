@@ -39,14 +39,19 @@ Reliable audio fingerprint: 3219138b22878e766c94b9a1fa0e422211a6f27dd74afbbb93a8
 2. 手机赛事标签逐字换行；
 3. 赛事详情继续推广长期暂停房间，与首页状态不一致。
 
-生产 QA 房间 `968296` 已关闭。两个明确标记的 QA 账号待服务器恢复后由管理员清理。
+生产 QA 房间 `968296` 已关闭并标记为测试数据。两个 QA 账号已禁用、标记为测试账号并撤销
+全部登录会话，历史记录保留用于审计。
 
 ## 发布状态
 
-本地集成已完成，尚未部署 Round 8。生产服务器在本轮未执行发布切换的情况下发生整机重启，
-重启后暴露 Nginx 非版本化配置缺失和 MOSS 固定旧 GPU UUID 两个恢复缺口；详情见
-`docs/incidents/2026-07-20-production-handshake-outage.md`。HTTPS 已恢复，MOSS 正在按原可靠参数
-重新预热。全部 readiness 恢复后再部署并执行报告中的 agent-browser 回归清单。
+Round 8 已部署到生产 release `round8-recovery-product-20260720`。API 双实例、Web、Engine、
+Worker、FunASR 和 MOSS readiness 全绿，当前无活动比赛处理。部署后 agent-browser 已复核桌面
+滚动恢复、390px 标签布局、匿名结果页 CTA 和公开房间新鲜度一致性。完整证据见
+`docs/qa/round8-postdeploy-20260720/report.md`。
+
+本轮生产服务器在发布前发生整机重启，暴露 Nginx 非版本化配置缺失和 MOSS 固定旧 GPU UUID
+两个恢复缺口；两项均已改为版本化、开机自动恢复配置，详情见
+`docs/incidents/2026-07-20-production-handshake-outage.md`。
 
 ## 保护边界
 

@@ -54,3 +54,9 @@
 - MOSS 的模型、参数、声音和播放实现均未修改。新增受保护目录之外的运维启动器，在每次启动
   时只接受唯一一张名称、显存和 VBIOS 均匹配的 RTX 3090，再为当前易变 UUID 生成 preflight
   指纹；Supervisor 改为开机自动启动。可靠语音 82 文件基线保持不变。
+- MOSS 完成预热后 authenticated readiness 返回成功；API、Web、Engine 和 Worker 随后完成
+  Round 8 发布，生产总 readiness 全绿。
+- 新的 Nginx 与 MOSS Supervisor 配置已纳入 GitHub Round 8 快照，源码同步脚本同时改为保护
+  `.env`、运行数据、全部虚拟环境和服务链接，并避免覆盖服务器文件所有权。
+- 没有为验证自动启动而再次主动重启生产主机；开机恢复的证据目前由 Supervisor 配置、安装
+  状态、静态测试和本次意外重启后的实际恢复共同构成。
