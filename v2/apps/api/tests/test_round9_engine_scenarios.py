@@ -22,7 +22,7 @@ def _room_with_teammate(owner, teammate, topic: str) -> str:
     return code
 
 
-async def test_lobby_owner_expiry_transfers_to_connected_teammate_instead_of_cancelling(
+async def test_lobby_owner_presence_expiry_preserves_control_for_returning_creator(
     register_user,
 ) -> None:
     owner = register_user("round9_lobby_owner")
@@ -30,6 +30,7 @@ async def test_lobby_owner_expiry_transfers_to_connected_teammate_instead_of_can
     other_owner = register_user("round9_lobby_other")
     code = _room_with_teammate(owner, teammate, "Round9 大厅房主断线接管")
     other_code = create_training_room(other_owner, "Round9 大厅隔离对照")["code"]
+    owner_id = owner.get("/api/auth/session").json()["user"]["id"]
     teammate_id = teammate.get("/api/auth/session").json()["user"]["id"]
 
     with SessionLocal() as db:
@@ -47,22 +48,25 @@ async def test_lobby_owner_expiry_transfers_to_connected_teammate_instead_of_can
     with SessionLocal() as db:
         room = load_room(db, code)
         assert room.status == "lobby"
-        assert room.owner_id == teammate_id
-        assert next(seat for seat in room.seats if seat.seat_key == "aff_1").occupant_type == "open"
+        assert room.owner_id == owner_id
+        owner_seat = next(seat for seat in room.seats if seat.seat_key == "aff_1")
+        assert owner_seat.occupant_type == "human"
+        assert owner_seat.connected is False
         event = db.scalar(
             select(MatchEvent).where(
                 MatchEvent.room_id == room.id,
                 MatchEvent.event_type == "room.owner_transferred",
             )
         )
-        assert event and event.payload["seat_key"] == "neg_1"
-        assert event.payload["reason"] == "owner_presence_expired"
+        assert event is None
         other = load_room(db, other_code)
         assert other.status == "lobby" and other.owner_id == other_owner.get("/api/auth/session").json()["user"]["id"]
 
-    # The successor has real recovery authority, not only an owner label.
+    # Another participant cannot acquire destructive room controls merely by
+    # waiting for the creator's browser presence lease to expire.
     cancelled = teammate.post(f"/api/rooms/{code}/cancel", headers=csrf(teammate), json={})
-    assert cancelled.status_code == 200
+    assert cancelled.status_code == 403
+    assert owner.post(f"/api/rooms/{code}/cancel", headers=csrf(owner), json={}).status_code == 200
 
 
 async def test_running_owner_substitution_transfers_control_and_keeps_other_room_isolated(

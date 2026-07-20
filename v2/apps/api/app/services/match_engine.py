@@ -1871,6 +1871,19 @@ class MatchEngine:
                 disconnected_at = disconnected_at.replace(tzinfo=timezone.utc)
             elapsed = (now() - disconnected_at).total_seconds()
             expiry_reason = "account_disabled" if account_disabled else "presence_expired"
+            if (
+                room.status == "lobby"
+                and not account_disabled
+                and seat.user_id == room.owner_id
+                and elapsed >= 120
+            ):
+                # A lobby owner is the only participant who cannot voluntarily
+                # release their seat.  Presence expiry must therefore preserve
+                # the room and control identity so a browser/network interruption
+                # does not silently hand the room to another student.  Owners can
+                # explicitly transfer control; disabled accounts still use the
+                # repair path below.
+                continue
             if room.status == "lobby" and (account_disabled or elapsed >= 120):
                 self._transfer_disconnected_owner(
                     db,
