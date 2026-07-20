@@ -125,7 +125,13 @@ def test_verify_recovery_manifest_is_portable(tmp_path: Path) -> None:
         (destination / artifact.name).write_bytes(artifact.read_bytes())
 
     result = subprocess.run(
-        ["bash", str(deploy / "verify-recovery-manifest.sh"), str(output), str(destination)],
+        [
+            "bash",
+            str(deploy / "verify-recovery-manifest.sh"),
+            str(output),
+            str(destination),
+            str(destination),
+        ],
         check=True,
         capture_output=True,
         text=True,

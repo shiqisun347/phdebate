@@ -36,13 +36,30 @@ for role in "${roles[@]}"; do
   }
 
   matches=()
+  match_count=0
   for root in "$@"; do
     [[ -d "$root" ]] || continue
     candidate="$root/$filename"
-    [[ -f "$candidate" ]] && matches+=("$candidate")
+    if [[ -f "$candidate" ]]; then
+      canonical="$(readlink -f "$candidate")"
+      duplicate=false
+      index=0
+      while ((index < match_count)); do
+        match="${matches[$index]}"
+        if [[ "$match" == "$canonical" ]]; then
+          duplicate=true
+          break
+        fi
+        index=$((index + 1))
+      done
+      if [[ "$duplicate" == false ]]; then
+        matches[$match_count]="$canonical"
+        match_count=$((match_count + 1))
+      fi
+    fi
   done
-  if ((${#matches[@]} != 1)); then
-    echo "Expected exactly one $role artifact named $filename; found ${#matches[@]}." >&2
+  if ((match_count != 1)); then
+    echo "Expected exactly one $role artifact named $filename; found $match_count." >&2
     exit 1
   fi
 
