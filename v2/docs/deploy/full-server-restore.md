@@ -8,8 +8,8 @@
 ### GitHub 源码
 
 - 仓库：`https://github.com/shiqisun347/phdebate`
-- 快照分支：`backup/production-20260720-round8`
-- 当前已部署应用提交：`bf577a119a4d2b0fca96a1d46d80fc48da77a8f3`；完整恢复应以服务器
+- 快照分支：`backup/production-20260720-round9`
+- 当前已部署应用提交：`899e8028ed10623d355de30b066552c629ed6e96`；完整恢复应以服务器
   `recovery-set-*.manifest` 中的 `code_commit` 为准，确保同时取得部署工具和恢复文档更新。
 - 分支必须是 orphan 快照，不继承旧 `main` 历史。
 - 恢复时应使用服务器恢复清单记录的 commit SHA，不只依赖可移动分支名。
@@ -29,12 +29,12 @@ GitHub 快照不得包含 `.env`、密码、API Key、Cookie、数据库、模�
 
 | 内容 | 文件 | SHA-256 |
 | --- | --- | --- |
-| V2 数据库 | `runtime/backups/auto-20260720T070147Z.dump` | `b659a243b110fd23f6536c051435d48290d076f3f09c7cfc5de414cc8f1530d1` |
+| V2 数据库 | `runtime/backups/auto-20260720T084428Z.dump` | `7689c22f7b5fa05c04d3ee31f403c0aff2be03534bc92d40ad5c526ffd35040a` |
 | 比赛数据卷 | `20260720T070152Z-data-volumes.tar.gz` | `c11fd5933d78fc6f9364ca16ad7dcd194bd7d6a8b7ba96d80b77e534bbd8d253` |
 | 私密配置 | `20260719T094349Z-full-private-config.tar.gz` | `f5a0be379496ae7f7ea3d2575ec3d61c5d3764de4f12946f3ea6c163225f29b0` |
 | 可靠语音清单 | `20260719T091423Z-reliable-voice-runtime.tar.gz` | `6f80f2a43a9fee22316a3d2adf49d54d8e75d0f57b6262f6a9d42f62fbb9ddc9` |
 | MOSS 离线目录 | `20260719-openmoss-offline.tar` | `bec995daf334694aa7dd48b9cf603bd5f2f7f3e7d8527660cafcc8136ee456d8` |
-| Debate Agent 数据库 | `/home/ubuntu/sunsq/debate-agent/backups/agent-20260720T071857Z.dump` | `a2250f67b1e793277ed1054630f97e494593f2ff9069e8c73f464226f36e2ef4` |
+| Debate Agent 数据库 | `/home/ubuntu/sunsq/debate-agent/backups/agent-20260720T084433Z.dump` | `1d5182a2698389d47f54dc1fecd8510fcf43bc2ddfc5d221827ec2cd5feea5fa` |
 
 `data-volumes` 包含 `storage`、MOSS prompt 资产和可靠音频基线；MOSS 离线包约 11GB。
 所有私密文件应为 `0600`，目录应为 `0700`。
@@ -62,7 +62,7 @@ GitHub 快照不得包含 `.env`、密码、API Key、Cookie、数据库、模�
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2/runtime/backups
-sha256sum -c auto-20260720T070147Z.dump.sha256
+sha256sum -c auto-20260720T084428Z.dump.sha256
 
 cd /home/ubuntu/sunsq/phdebate-v2/runtime/deploy-backups
 sha256sum -c 20260720T070152Z-data-volumes.tar.gz.sha256
@@ -71,8 +71,8 @@ sha256sum -c 20260719T091423Z-reliable-voice-runtime.tar.gz.sha256
 sha256sum -c 20260719-openmoss-offline.tar.sha256
 
 cd /home/ubuntu/sunsq/debate-agent/backups
-sha256sum -c agent-20260720T071857Z.dump.sha256
-pg_restore -l agent-20260720T071857Z.dump >/dev/null
+sha256sum -c agent-20260720T084433Z.dump.sha256
+pg_restore -l agent-20260720T084433Z.dump >/dev/null
 ```
 
 数据卷还必须完成一次隔离解包和逐文件校验，不能只验证外层压缩包：
@@ -87,7 +87,7 @@ V2 数据库还应完成临时数据库恢复验证：
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2
-./deploy/verify-backup-restore.sh runtime/backups/auto-20260720T070147Z.dump
+./deploy/verify-backup-restore.sh runtime/backups/auto-20260720T084428Z.dump
 ```
 
 ## 4. 准备空服务器
@@ -125,7 +125,7 @@ install -d -o root -g root -m 0700 /opt/phdebate/secrets
 
 ```bash
 EXPECTED_CODE_COMMIT='从服务器 recovery-set manifest 读取'
-git clone --branch backup/production-20260720-round8 --single-branch \
+git clone --branch backup/production-20260720-round9 --single-branch \
   https://github.com/shiqisun347/phdebate.git \
   /home/ubuntu/sunsq/phdebate-source
 test "$(git -C /home/ubuntu/sunsq/phdebate-source rev-parse HEAD)" = "$EXPECTED_CODE_COMMIT"
@@ -185,11 +185,11 @@ ProviderConfig、JudgeProfile 和活动比赛 service snapshot。迁移前应停
 ```bash
 runuser -u postgres -- createdb -p 5433 phdebate_v2
 runuser -u postgres -- pg_restore -p 5433 --exit-on-error \
-  --no-owner --no-privileges -d phdebate_v2 auto-20260720T070147Z.dump
+  --no-owner --no-privileges -d phdebate_v2 auto-20260720T084428Z.dump
 
 PGPASSWORD='从安全配置临时读取' pg_restore \
   -h 127.0.0.1 -p 5433 -U debate_agent --exit-on-error \
-  --no-owner --no-privileges -d debate_agent agent-20260720T071857Z.dump
+  --no-owner --no-privileges -d debate_agent agent-20260720T084433Z.dump
 ```
 
 恢复后比较迁移版本，不能只执行 `current`：
@@ -344,7 +344,7 @@ curl -fsS https://新服务器IP/debate/api/health
 完成三类备份和恢复验证后，使用版本化工具生成绑定清单；私密归档路径必须显式传入，避免误选：
 
 ```bash
-PHDEBATE_CODE_BRANCH=backup/production-20260720-round8 \
+PHDEBATE_CODE_BRANCH=backup/production-20260720-round9 \
 PHDEBATE_CODE_COMMIT='GitHub 快照不可变 SHA' \
 PHDEBATE_DEPLOYED_APPLICATION_COMMIT='实际发布所用 SHA' \
 PHDEBATE_DATABASE_SCHEMA=0025_speech_result_pagination \
