@@ -22,7 +22,7 @@ Web unit/component: 35 files, 238 passed
 Next production build: passed
 ESLint quiet: passed
 Knip: clean
-Deploy tests: 27 passed
+Deploy tests: 29 passed
 Ruff: passed
 Alembic: 0025_speech_result_pagination (single head)
 Playwright discovery: 14 tests parsed
@@ -43,10 +43,10 @@ Reliable audio fingerprint: 3219138b22878e766c94b9a1fa0e422211a6f27dd74afbbb93a8
 
 ## 发布状态
 
-本地集成已完成，尚未部署 Round 8。生产服务器在本轮未执行发布切换的情况下出现 SSH banner
-和 TLS 握手异常；详情见 `docs/incidents/2026-07-20-production-handshake-outage.md`。为避免扩大
-影响，本轮没有重启、删除 release 或继续压测。服务器恢复后应先完成系统级取证和 readiness，
-再部署并执行报告中的 agent-browser 回归清单。
+本地集成已完成，尚未部署 Round 8。生产服务器在本轮未执行发布切换的情况下发生整机重启，
+重启后暴露 Nginx 非版本化配置缺失和 MOSS 固定旧 GPU UUID 两个恢复缺口；详情见
+`docs/incidents/2026-07-20-production-handshake-outage.md`。HTTPS 已恢复，MOSS 正在按原可靠参数
+重新预热。全部 readiness 恢复后再部署并执行报告中的 agent-browser 回归清单。
 
 ## 保护边界
 

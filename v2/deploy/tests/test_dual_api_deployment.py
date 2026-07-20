@@ -47,6 +47,29 @@ def test_nginx_balances_rest_and_state_ws_but_not_audio_or_asr() -> None:
     assert config.count("proxy_pass http://127.0.0.1:12340/ws/;") == 2
 
 
+def test_nginx_supervisor_uses_the_tracked_production_config() -> None:
+    config = read("jixia-nginx.supervisor.conf")
+    assert "deploy/jixia-nginx-v2-root.conf" in config
+    assert "nginx-new-server.conf" not in config
+    assert "autostart=true" in config
+    assert "autorestart=true" in config
+
+
+def test_production_moss_gateway_recovers_after_a_host_reboot() -> None:
+    config = read("moss-production.supervisor.conf")
+    assert "autostart=true" in config
+    assert "autorestart=unexpected" in config
+    assert ".venv-cu128/bin/python" in config
+    assert "MOSS_GATEWAY_ASYNC_DECODER_ENABLED=\"false\"" in config
+    assert "run-moss-production.sh" in config
+    assert "GPU-042703fe" not in config
+    launcher = read("run-moss-production.sh")
+    assert 'EXPECTED_NAME="NVIDIA GeForce RTX 3090"' in launcher
+    assert 'EXPECTED_MEMORY_MIB="24576"' in launcher
+    assert 'EXPECTED_VBIOS="94.02.26.88.08"' in launcher
+    assert "gpu_fingerprint.py" in launcher
+
+
 def test_rollout_updates_secondary_first_and_has_automatic_rollback() -> None:
     script = read("roll-api-workers.sh")
     assert 'local link="$1"\n  local target="$2"\n  local temp="${link}.new.$$"' in script

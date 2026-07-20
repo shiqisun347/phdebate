@@ -39,3 +39,18 @@
 
 中断前已存在服务器侧 Round 7 恢复集和 GitHub orphan 快照。Mac 未保存生产数据库、数据卷、
 模型或私密配置。本事件期间没有执行数据库恢复、release 删除或配置覆盖。
+
+## 恢复结果
+
+- SSH 恢复后确认主机 `uptime` 仅约 10 分钟，说明握手异常期间发生了整机重启；持久化
+  journal 未启用，因此暂时无法从本机证明重启是云维护、人工操作还是其他外部原因。
+- 重启暴露了两个此前被运行中进程掩盖的恢复缺口：
+  1. Supervisor 的 HTTPS 进程仍引用已被早期源码同步误删、且未纳入 Git 的
+     `deploy/nginx-new-server.conf`；
+  2. MOSS 配置为 `autostart=false`，并固定云主机重启前的 GPU UUID。重启后 RTX 3090 的
+     UUID 发生变化，旧 preflight 因此按设计拒绝启动。
+- HTTPS Supervisor 已改为引用受版本控制并通过 `nginx -t` 的
+  `deploy/jixia-nginx-v2-root.conf`，公网 80/443 和 `/api/health/live` 已恢复。
+- MOSS 的模型、参数、声音和播放实现均未修改。新增受保护目录之外的运维启动器，在每次启动
+  时只接受唯一一张名称、显存和 VBIOS 均匹配的 RTX 3090，再为当前易变 UUID 生成 preflight
+  指纹；Supervisor 改为开机自动启动。可靠语音 82 文件基线保持不变。
