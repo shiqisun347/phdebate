@@ -71,6 +71,64 @@ describe("useRoom", () => {
     expect(result.current.room?.seq).toBe(5);
   });
 
+  it("keeps the authenticated viewer projection when a newer room event wins the initial REST race", async () => {
+    let resolveFetch: ((response: Response) => void) | null = null;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { resolveFetch = resolve; })));
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const { result } = renderHook(() => useRoom("123456"));
+    const socket = FakeWebSocket.instances[0];
+    const wrongBroadcast = {
+      ...snapshot(8),
+      my_seat: "aff_1",
+      can_control: true,
+      can_speak: true,
+      speak_reason: "轮到你发言",
+      seats: [
+        { seat_key: "aff_1", is_me: true },
+        { seat_key: "neg_1", is_me: false },
+      ],
+    } as Room;
+    act(() => {
+      socket.open();
+      socket.message({ type: "snapshot", room: wrongBroadcast });
+    });
+    expect(result.current.room?.my_seat).toBe("aff_1");
+
+    const authenticatedProjection = {
+      ...snapshot(7),
+      my_seat: "neg_1",
+      can_control: false,
+      can_speak: false,
+      speak_reason: "当前轮到 正方1辩",
+      seats: [
+        { seat_key: "aff_1", is_me: false },
+        { seat_key: "neg_1", is_me: true },
+      ],
+    } as Room;
+    await act(async () => {
+      resolveFetch?.(new Response(JSON.stringify({ room: authenticatedProjection }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.room?.seq).toBe(8);
+    expect(result.current.room?.my_seat).toBe("neg_1");
+    expect(result.current.room?.can_control).toBe(false);
+    expect(result.current.room?.can_speak).toBe(false);
+    expect(result.current.room?.speak_reason).toContain("正方1辩");
+    expect(result.current.room?.seats.find((seat) => seat.seat_key === "aff_1")?.is_me).toBe(false);
+    expect(result.current.room?.seats.find((seat) => seat.seat_key === "neg_1")?.is_me).toBe(true);
+
+    act(() => {
+      socket.message({ type: "snapshot", room: { ...wrongBroadcast, seq: 8 } });
+    });
+    expect(result.current.room?.my_seat).toBe("neg_1");
+    expect(result.current.room?.can_speak).toBe(false);
+  });
+
   it("stops every automatic refresh and reconnect after terminal room errors", () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));

@@ -199,6 +199,13 @@ def can_view_room(db: Session, room: Room, user: User | None) -> bool:
         # system administrators through the same authenticated surfaces.
         if not user:
             return False
+        # Synthetic browser/load-test users need to be able to join a public
+        # synthetic lobby before they have a seat.  Restrict that exception to
+        # accounts explicitly marked as test data; ordinary authenticated
+        # students must never gain access to QA rooms merely by knowing the
+        # six-digit code.
+        if room.status == "lobby" and room.visibility == "public" and user.is_test_account:
+            return True
         return can_control(db, room, user) or user_seat(room, user) is not None
     if room.visibility == "public":
         # A six-digit room code is a locator, not an authentication secret.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import time
@@ -25,11 +26,15 @@ def make_set(directory: Path, name: str, data_name: str, age_hours: int, schema:
     }
     manifest_lines = [f"schema_version={schema}"]
     for role, filename in roles.items():
+        artifact = directory / filename
+        if role != "data_volumes":
+            artifact.write_bytes(f"{role}:{name}".encode())
+        payload = artifact.read_bytes()
         manifest_lines.extend(
             (
                 f"artifact.{role}.filename={filename}",
-                f"artifact.{role}.bytes=1",
-                f"artifact.{role}.sha256={'a' * 64}",
+                f"artifact.{role}.bytes={len(payload)}",
+                f"artifact.{role}.sha256={hashlib.sha256(payload).hexdigest()}",
             )
         )
     manifest.write_text("\n".join(manifest_lines) + "\n")
@@ -46,6 +51,11 @@ def run(root: Path, mode: str, *, keep: int = 2, minimum_age: int = 24) -> subpr
         env=os.environ
         | {
             "PHDEBATE_ROOT": str(root),
+            "PHDEBATE_AGENT_ROOT": str(root / "agent"),
+            "PHDEBATE_DEPLOY_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
+            "PHDEBATE_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
+            "PHDEBATE_AGENT_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
+            "PHDEBATE_RECOVERY_INDEX_VERIFY_SCRIPT": str(ROOT / "verify-recovery-index.py"),
             "PHDEBATE_RECOVERY_KEEP": str(keep),
             "PHDEBATE_RECOVERY_MIN_AGE_HOURS": str(minimum_age),
         },
@@ -161,3 +171,43 @@ def test_truncated_schema_two_manifest_fails_closed(tmp_path: Path) -> None:
     assert "reason=unsafe-manifests-present" in result.stdout
     assert current.exists() and current_data.exists()
     assert truncated.exists() and truncated_data.exists()
+
+
+def test_complete_but_corrupt_recovery_set_stops_all_pruning(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    oldest, oldest_data = make_set(directory, "oldest", "oldest-data-volumes.tar.gz", 120)
+    rollback, rollback_data = make_set(directory, "rollback", "rollback-data-volumes.tar.gz", 72)
+    current, current_data = make_set(directory, "current", "current-data-volumes.tar.gz", 48)
+    corrupt, corrupt_data = make_set(directory, "corrupt", "corrupt-data-volumes.tar.gz", 144)
+    corrupt_data.write_bytes(b"corrupted after manifest creation")
+
+    result = run(tmp_path, "apply", keep=2)
+
+    assert "reason=artifact-verification-failed" in result.stdout
+    assert "reason=unsafe-manifests-present" in result.stdout
+    for artifact in (oldest, oldest_data, rollback, rollback_data, current, current_data, corrupt, corrupt_data):
+        assert artifact.exists()
+
+
+def test_recovery_index_hashes_shared_artifacts_only_once(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    first, _data = make_set(directory, "shared", "shared-data-volumes.tar.gz", 48)
+    second = directory / "recovery-set-shared-copy.manifest"
+    second.write_text(first.read_text())
+
+    result = subprocess.run(
+        [
+            "python3",
+            str(ROOT / "verify-recovery-index.py"),
+            "--artifact-root", str(directory),
+            str(first),
+            str(second),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "manifests=2" in result.stdout
+    assert "unique_artifacts=6" in result.stdout
+    assert "hashed_files=6" in result.stdout

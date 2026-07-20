@@ -2,7 +2,11 @@
 set -euo pipefail
 
 ROOT="${PHDEBATE_ROOT:-/home/ubuntu/sunsq/phdebate}"
+AGENT_ROOT="${PHDEBATE_AGENT_ROOT:-/home/ubuntu/sunsq/debate-agent}"
 BACKUP_DIR="${PHDEBATE_DEPLOY_BACKUP_DIR:-$ROOT/runtime/deploy-backups}"
+PLATFORM_DATABASE_BACKUP_DIR="${PHDEBATE_BACKUP_DIR:-$ROOT/runtime/backups}"
+AGENT_DATABASE_BACKUP_DIR="${PHDEBATE_AGENT_BACKUP_DIR:-$AGENT_ROOT/backups}"
+VERIFY_INDEX_SCRIPT="${PHDEBATE_RECOVERY_INDEX_VERIFY_SCRIPT:-$ROOT/deploy/verify-recovery-index.py}"
 MODE="${1:-dry-run}"
 KEEP="${PHDEBATE_RECOVERY_KEEP:-3}"
 MIN_AGE_HOURS="${PHDEBATE_RECOVERY_MIN_AGE_HOURS:-24}"
@@ -92,6 +96,26 @@ done < <(
     printf '%s %s\n' "$modified" "$manifest"
   done | sort -nr
 )
+
+# Verify the complete recovery index in one process. Shared heavyweight files
+# such as the offline voice runtime are hashed once even when many manifests
+# reference them. Any missing, ambiguous, truncated, or corrupt artifact stops
+# the entire prune operation before a candidate can be removed.
+if (( unsafe_manifests == 0 && ${#valid_rows[@]} > 0 )); then
+  manifest_paths=()
+  for row in "${valid_rows[@]}"; do
+    manifest_paths+=("${row#* }")
+  done
+  if [[ ! -f "$VERIFY_INDEX_SCRIPT" ]] || ! python3 "$VERIFY_INDEX_SCRIPT" \
+      --artifact-root "$BACKUP_DIR" \
+      --artifact-root "$PLATFORM_DATABASE_BACKUP_DIR" \
+      --artifact-root "$AGENT_DATABASE_BACKUP_DIR" \
+      "${manifest_paths[@]}" >/dev/null 2>&1; then
+    echo "preserve kind=recovery_index reason=artifact-verification-failed manifests=${#valid_rows[@]}"
+    preserved=$((preserved + ${#valid_rows[@]}))
+    unsafe_manifests=$((unsafe_manifests + 1))
+  fi
+fi
 
 # A manifest that cannot be interpreted safely may still be the only index for
 # a recovery artifact. Never delete around it: an operator must repair or

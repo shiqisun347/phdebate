@@ -523,7 +523,7 @@ th { color: #838faa; font-weight: 600; }
   .consent-actions { align-items:stretch; flex-direction:column-reverse; }
   .consent-actions .button { width:100%; }
   .detail-hero { padding-top:28px; }
-  .tabs { margin-inline:-12px; padding-inline:12px; }
+  .tabs { gap:6px; margin-inline:-12px; padding-inline:12px; }
   .stage-access-notice { top:72px; align-items:flex-start; }
 }
 

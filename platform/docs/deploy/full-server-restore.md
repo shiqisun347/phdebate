@@ -372,6 +372,19 @@ PHDEBATE_RELEASE_KEEP=5 PHDEBATE_RELEASE_MIN_AGE_HOURS=24 \
 工具始终保留当前 API primary/secondary、当前 Web、最近五个版本、24 小时内版本以及无法确认
 完整性的人工目录。不得直接对 `runtime/*-releases` 执行通配符删除。
 
+历史源码压缩包不再作为代码回滚依据，GitHub 快照分支才是唯一源码恢复点。先执行只读磁盘审计和
+源码归档清理预览；`apply` 除了显式参数外还要求二次确认环境变量，且只匹配源码归档命名，不会
+触碰数据库、数据卷、私密配置、可靠语音或 MOSS 离线包：
+
+```bash
+./deploy/audit-storage.py
+./deploy/prune-source-archives.sh dry-run
+PHDEBATE_ALLOW_SOURCE_ARCHIVE_PRUNE=yes \
+PHDEBATE_SOURCE_ARCHIVE_KEEP=1 \
+PHDEBATE_SOURCE_ARCHIVE_MIN_AGE_HOURS=72 \
+  ./deploy/prune-source-archives.sh apply
+```
+
 Debate Agent：
 
 ```bash
@@ -400,6 +413,16 @@ ln -sfn "$(pwd)/.web-releases/restore-20260719" .web-current
 `/etc/supervisor/conf.d/`：平台、Agent、MOSS 和 HTTPS Nginx。FunASR/LiveKit 的私密配置从受限
 归档恢复。Nginx 主配置使用 `deploy/jixia-nginx-root.conf`，但必须先替换新 IP 和证书路径并
 执行 `nginx -t -c ...`。
+
+同时安装平台自带的 Nginx 日志轮转规则，避免匿名观战和 WebSocket 重连产生的访问日志无限增长：
+
+```bash
+install -m 0644 deploy/phdebate-nginx.logrotate.conf /etc/logrotate.d/phdebate-nginx
+logrotate -d /etc/logrotate.d/phdebate-nginx
+```
+
+Supervisor 管理的平台与 Nginx 进程日志已经设置单文件大小和历史份数上限。不要用覆盖整目录的
+通配 logrotate 规则，以免干扰独立语音运行时自己的日志策略。
 
 ## 12. 分阶段启动
 
@@ -472,9 +495,11 @@ curl -fsS https://新服务器IP/debate/api/health
 ./deploy/prune-recovery-sets.sh apply
 ```
 
-该工具不删除 MOSS 离线包、私密配置、可靠语音归档、平台/Agent 数据库备份或未识别的旧格式
-清单。数据库仍由各自的 14 天保留任务管理；release 使用 `prune-releases.sh` 独立保留最近回滚
-版本。磁盘清理前后都必须执行 readiness 和当前恢复清单校验。
+该工具在把任何恢复集计入保留底线前，会重新校验其六类文件的唯一性、大小和 SHA-256。只要存在
+缺失、重复或校验失败的文件，整个清理过程就会失败关闭，不删除任何批次。它也不删除 MOSS 离线
+包、私密配置、可靠语音归档、平台/Agent 数据库备份或未识别的旧格式清单。数据库仍由各自的
+14 天保留任务管理；release 使用 `prune-releases.sh` 独立保留最近回滚版本。磁盘清理前后都必须
+执行 readiness、`audit-storage.py` 和当前恢复清单校验。
 
 完成三类备份和恢复验证后，使用版本化工具生成绑定清单；私密归档路径必须显式传入，避免误选：
 

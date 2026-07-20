@@ -13,6 +13,7 @@ import httpx
 from app.core.database import SessionLocal
 from app.models.entities import JudgeScorecard, Match, MatchEvent, Room, RoomSeat, Speech, User, UserSession
 from app.services.match_engine import match_engine
+from app.services.provider_config import build_service_snapshot
 from app.services.room_service import load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
@@ -124,6 +125,11 @@ async def main_async(base_url: str) -> None:
                     competition_id=room.competition_id,
                     season_id=room.season_id,
                     status="running",
+                    # Production deliberately rejects retrying legacy matches
+                    # without an immutable provider snapshot.  The verifier
+                    # creates matches directly, so it must model the same
+                    # invariant as POST /api/rooms/{code}/start.
+                    service_snapshot=build_service_snapshot(db),
                 )
                 db.add(match)
                 db.flush()

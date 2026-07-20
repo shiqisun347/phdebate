@@ -4,6 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, websocketUrl } from "@/lib/api";
 import type { Room } from "@/lib/types";
 
+function mergeViewerProjection(current: Room, authenticated: Room): Room {
+  if (current.code !== authenticated.code) return current;
+  return {
+    ...current,
+    my_seat: authenticated.my_seat,
+    can_control: authenticated.can_control,
+    can_speak: authenticated.can_speak,
+    speak_reason: authenticated.speak_reason,
+    seat_restore_requests: authenticated.seat_restore_requests,
+    seats: (current.seats || []).map((seat) => ({ ...seat, is_me: seat.seat_key === authenticated.my_seat })),
+  };
+}
+
 export function useRoom(code: string) {
   const [room, setRoom] = useState<Room | null>(null);
   const [connected, setConnected] = useState(false);
@@ -19,7 +32,13 @@ export function useRoom(code: string) {
   const refresh = useCallback(async () => {
     const data = await apiFetch<{ room: Room }>(`/api/rooms/${code}`);
     if (mounted.current && currentCode.current === code) {
-      setRoom((current) => (!current || data.room.seq >= current.seq ? data.room : current));
+      setRoom((current) => {
+        if (!current || data.room.seq >= current.seq) return data.room;
+        // The REST response is authenticated per viewer. If a newer shared
+        // room event won the race, retain that shared state while correcting
+        // only the current browser's seat and permissions.
+        return mergeViewerProjection(current, data.room);
+      });
     }
     return data.room;
   }, [code]);
@@ -115,7 +134,7 @@ export function useRoom(code: string) {
             return;
           }
           if (message.room) {
-            setRoom((current) => (!current || message.room.seq >= current.seq ? message.room : current));
+            setRoom((current) => (!current || message.room.seq > current.seq ? message.room : current));
             setConnected(true);
             setConnectionError("");
             setSnapshotError("");

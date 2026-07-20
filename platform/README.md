@@ -27,7 +27,7 @@ PYTHONPATH=apps/api uvicorn app.main:app --reload --port 8200
 npm --prefix apps/web run dev
 ```
 
-前端默认运行在 `http://127.0.0.1:3200`，API 在 `http://127.0.0.1:8200`。首次启动会创建两个赛事；设置 `V2_ADMIN_ACCOUNT`、`V2_ADMIN_PASSWORD` 和 `V2_ADMIN_REAL_NAME` 可创建系统管理员。
+前端默认运行在 `http://127.0.0.1:3200`，API 在 `http://127.0.0.1:8200`。首次启动会创建两个赛事；生产环境的系统管理员凭据必须通过服务器私密配置注入，不写入源码或公开文档。
 
 ## 生产服务
 

@@ -168,6 +168,7 @@ export default function MePage() {
           <div className="history-list">
             {data.active_rooms.map((room) => {
               const needsAttention = room.status === "paused" || !room.can_resume;
+              const statusLabel = roomStatusLabel[room.status] || room.status;
               const actionLabel = room.can_resume
                 ? room.status === "lobby" ? "返回房间大厅" : room.status === "paused" ? "查看并等待恢复" : "继续比赛"
                 : "返回观战";
@@ -176,13 +177,15 @@ export default function MePage() {
                   ? "等待房主锁定席位并开始比赛"
                   : room.status === "paused"
                     ? "比赛已暂停 · 房主或管理员可在控制台恢复"
-                    : roomStatusLabel[room.status] || room.status
+                    : room.status === "running"
+                      ? "点击返回当前发言与计时画面"
+                      : "可从当前进度继续"
                 : room.restore_request?.status === "pending" ? "AI 已接替 · 恢复申请等待审批" : "AI 已接替 · 可观战并申请恢复真人席位";
               return (
               <div className={`active-room-entry ${needsAttention ? "attention" : ""}`} key={room.code}>
                 <Link href={`/rooms/${room.code}/${room.can_resume ? room.status === "lobby" ? "lobby" : "debate" : "watch"}`} className="live-row">
                   <span className="room-code">#{room.code}</span>
-                  <span className="row-main"><strong>{room.topic}</strong><small><span className={`live-room-status ${room.status}`}>{roomStatusLabel[room.status] || room.status}</span>{detail}</small></span>
+                  <span className="row-main"><strong>{room.topic}</strong><small><span className={`live-room-status ${room.status}`}>{statusLabel}</span>{detail}</small></span>
                   <span className="active-room-action">{actionLabel}<ArrowRight size={15} /></span>
                 </Link>
                 {!room.can_resume && (room.restore_request?.status === "pending" ? (

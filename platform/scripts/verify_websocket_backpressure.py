@@ -11,6 +11,7 @@ import ssl
 import statistics
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from secrets import token_hex
 from urllib.parse import urlparse
 
@@ -19,7 +20,7 @@ import websockets
 from app.core.database import SessionLocal
 from app.models.entities import MatchEvent, Room, RoomSeat, User, UserSession
 from app.services.realtime import room_hub
-from app.services.room_service import append_event, load_room
+from app.services.room_service import append_event, load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
 
@@ -121,6 +122,24 @@ async def main_async(args: argparse.Namespace) -> None:
         code = created.json()["room"]["code"]
         with SessionLocal() as db:
             room = load_room(db, code, lock=True)
+            # Public lobbies intentionally require authentication because they
+            # expose student names and readiness.  Anonymous fanout begins only
+            # after a match is underway.  Hold a non-provider announcement
+            # stage so this load gate exercises spectator backpressure without
+            # entering Agent/TTS execution.
+            room.status = "running"
+            room.started_at = now()
+            room.template_snapshot = [
+                {
+                    "key": "websocket_load_hold",
+                    "name": "WebSocket 负载验收",
+                    "kind": "announcement",
+                    "duration": 3600,
+                }
+            ]
+            room.current_stage_index = 0
+            room.stage_started_at = now()
+            room.stage_deadline_at = now() + timedelta(seconds=3600)
             for index in range(args.events):
                 append_event(db, room, "load.probe", {"index": index + 1})
             db.commit()

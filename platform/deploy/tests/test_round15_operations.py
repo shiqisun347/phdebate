@@ -187,3 +187,29 @@ def test_backup_scripts_publish_failure_state_and_agent_loop_retries() -> None:
         assert "--state failed" in script
         assert "--state succeeded" in script
     assert "DEBATE_AGENT_BACKUP_RETRY_SECONDS" in loop
+
+
+def test_non_voice_supervisor_logs_have_bounded_rotation() -> None:
+    platform_config = (DEPLOY / "phdebate.supervisor.conf").read_text()
+    sections = [section for section in platform_config.split("\n\n") if section.startswith("[program:")]
+    assert sections
+    for section in sections:
+        assert "stdout_logfile_maxbytes=" in section
+        assert "stdout_logfile_backups=" in section
+        assert "stderr_logfile_maxbytes=" in section
+        assert "stderr_logfile_backups=" in section
+
+    nginx_supervisor = (DEPLOY / "jixia-nginx.supervisor.conf").read_text()
+    assert "stdout_logfile_maxbytes=" in nginx_supervisor
+    assert "stderr_logfile_maxbytes=" in nginx_supervisor
+
+
+def test_nginx_logs_use_the_single_platform_runtime_and_are_rotated() -> None:
+    nginx = (DEPLOY / "jixia-nginx-root.conf").read_text()
+    rotation = (DEPLOY / "phdebate-nginx.logrotate.conf").read_text()
+    assert "/home/ubuntu/sunsq/debateall" not in nginx
+    assert "/home/ubuntu/sunsq/debateall" not in (DEPLOY / "jixia-nginx.supervisor.conf").read_text()
+    assert "/home/ubuntu/sunsq/phdebate/runtime/logs/nginx-access.log" in nginx
+    assert "rotate 14" in rotation
+    assert "maxsize 100M" in rotation
+    assert "kill -USR1" in rotation

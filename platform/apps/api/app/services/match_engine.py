@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import shutil
 import time
 import uuid
@@ -1782,6 +1783,7 @@ class MatchEngine:
         try:
             async with self._provider_semaphore():
                 result = await judge_provider.judge(room.topic, speeches, profile=match.judge_snapshot or None)
+            result = self._validated_judge_result(result, room)
             db.expire_all()
             room = load_room(db, room.code, lock=True)
             match = db.scalar(select(Match).where(Match.room_id == room.id))
@@ -1836,6 +1838,85 @@ class MatchEngine:
         db.commit()
         enqueue_match_archive(match.id)
         await self._broadcast(db, room, "match.result")
+
+    @staticmethod
+    def _validated_judge_result(result: Any, room: Room) -> dict[str, Any]:
+        """Defend the authoritative result boundary from malformed adapters.
+
+        ``JudgeProvider`` normally normalizes external JSON, but tests,
+        alternate adapters and future worker hand-offs can still return a
+        structurally invalid object.  Letting a ``KeyError`` escape causes the
+        generic engine quarantine to retry the same bad result several times
+        and leaves students with an opaque engine failure.  A bad judgement is
+        a reviewable match outcome, not a room-runtime corruption.
+        """
+
+        if not isinstance(result, dict):
+            raise ProviderError(
+                "AI 裁判返回格式无效，比赛已转入人工复核。",
+                code="judge_invalid_output",
+            )
+        winner = result.get("winner")
+        if winner not in {"aff", "neg", "draw"}:
+            raise ProviderError(
+                "AI 裁判返回了无法识别的胜方，比赛已转入人工复核。",
+                code="judge_invalid_output",
+            )
+
+        scores: dict[str, float] = {}
+        for key in ("affirmative_score", "negative_score"):
+            value = result.get(key)
+            if isinstance(value, bool):
+                value = None
+            try:
+                score = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ProviderError(
+                    "AI 裁判返回了无效分数，比赛已转入人工复核。",
+                    code="judge_invalid_output",
+                ) from exc
+            if not math.isfinite(score) or not 0 <= score <= 100:
+                raise ProviderError(
+                    "AI 裁判分数必须在 0–100 之间，比赛已转入人工复核。",
+                    code="judge_invalid_output",
+                )
+            scores[key] = round(score, 2)
+
+        individual = result.get("individual_scores", {})
+        if not isinstance(individual, dict) or len(individual) > 100:
+            raise ProviderError(
+                "AI 裁判个人评分格式无效，比赛已转入人工复核。",
+                code="judge_invalid_output",
+            )
+        allowed_seats = {seat.seat_key for seat in room.seats}
+        normalized_individual: dict[str, float] = {}
+        for seat_key, raw_score in individual.items():
+            if seat_key not in allowed_seats or isinstance(raw_score, bool):
+                continue
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(score) and 0 <= score <= 100:
+                normalized_individual[seat_key] = round(score, 2)
+
+        reasoning = result.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ProviderError(
+                "AI 裁判未返回有效判定理由，比赛已转入人工复核。",
+                code="judge_invalid_output",
+            )
+        if len(reasoning) > 10_000:
+            raise ProviderError(
+                "AI 裁判判定理由过长，比赛已转入人工复核。",
+                code="judge_invalid_output",
+            )
+        return {
+            "winner": winner,
+            **scores,
+            "individual_scores": normalized_individual,
+            "reasoning": reasoning.strip(),
+        }
 
     async def _complete_without_judge(self, db: Session, room: Room) -> None:
         match = db.scalar(select(Match).where(Match.room_id == room.id))

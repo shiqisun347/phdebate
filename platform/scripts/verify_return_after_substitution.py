@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import ssl
 import time
 from datetime import timedelta
 from secrets import token_hex
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from app.core.database import SessionLocal
@@ -17,6 +19,7 @@ from app.services.match_engine import match_engine
 from app.services.room_service import load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete
+from websockets.sync.client import ClientConnection, connect
 
 PASSWORD = "Return-substitution-1234"
 
@@ -40,12 +43,35 @@ def register(client: httpx.Client, account: str, real_name: str) -> str:
     return response.json()["user"]["id"]
 
 
+def reconnect_room_presence(client: httpx.Client, base_url: str, code: str) -> ClientConnection:
+    """Keep the participant's real room WebSocket open during restoration."""
+
+    parsed = urlsplit(base_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    websocket_url = urlunsplit((scheme, parsed.netloc, f"/ws/rooms/{code}", "", ""))
+    cookie_header = "; ".join(f"{key}={value}" for key, value in client.cookies.items())
+    ssl_context = None
+    if scheme == "wss":
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+    connection = connect(
+        websocket_url,
+        additional_headers={"Cookie": cookie_header},
+        ssl=ssl_context,
+        open_timeout=20,
+        close_timeout=5,
+    )
+    connection.recv(timeout=20)  # authoritative initial snapshot
+    return connection
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     args = parser.parse_args()
-    admin_account = os.environ.get("V2_ADMIN_ACCOUNT", "")
-    admin_password = os.environ.get("V2_ADMIN_PASSWORD", "")
+    admin_account = os.environ.get("PHDEBATE_ADMIN_ACCOUNT") or os.environ.get("V2_ADMIN_ACCOUNT", "")
+    admin_password = os.environ.get("PHDEBATE_ADMIN_PASSWORD") or os.environ.get("V2_ADMIN_PASSWORD", "")
     if not admin_account or not admin_password:
         raise RuntimeError("production administrator credentials are not configured")
 
@@ -55,6 +81,7 @@ def main() -> None:
     admin = httpx.Client(base_url=args.base_url, verify=False, timeout=20, follow_redirects=True)
     user_ids: list[str] = []
     room_id = match_id = seat_id = ""
+    participant_presence: ClientConnection | None = None
     try:
         user_ids.append(register(owner, f"return_owner_{suffix}", "返回链路验收房主"))
         user_ids.append(register(participant, f"return_guest_{suffix}", "返回链路验收辩手"))
@@ -108,12 +135,18 @@ def main() -> None:
         active = next(item for item in substituted.json()["active_rooms"] if item["code"] == code)
         assert active["occupant_type"] == "ai_substitute" and active["can_resume"] is False
 
+        # GET /api/me is intentionally read-only and must not pretend that a
+        # browser has returned.  Restoration is safe only while the original
+        # participant has an authoritative room-presence lease.
+        participant_presence = reconnect_room_presence(participant, args.base_url, code)
         restored = admin.post(f"/api/admin/rooms/{code}/seats/neg_1/restore", headers=csrf(admin), json={})
         restored.raise_for_status()
         restored_active = next(item for item in participant.get("/api/me").json()["active_rooms"] if item["code"] == code)
         assert restored_active["occupant_type"] == "human" and restored_active["can_resume"] is True
         print("return_after_substitution_verified timeout=61s watch_only=1 admin_restore=1 resume_enabled=1")
     finally:
+        if participant_presence is not None:
+            participant_presence.close()
         owner.close()
         participant.close()
         if room_id:

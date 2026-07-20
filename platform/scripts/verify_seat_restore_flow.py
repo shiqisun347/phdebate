@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import ssl
 import time
 from secrets import token_hex
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from app.core.config import settings
@@ -28,6 +30,7 @@ from app.models.entities import (
 from app.services.room_service import append_event, load_room
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
+from websockets.sync.client import ClientConnection, connect
 
 PASSWORD = "Seat-restore-verify-1234"
 
@@ -46,6 +49,27 @@ def register(client: httpx.Client, account: str, real_name: str) -> str:
     return response.json()["user"]["id"]
 
 
+def reconnect_room_presence(client: httpx.Client, base_url: str, code: str) -> ClientConnection:
+    parsed = urlsplit(base_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    websocket_url = urlunsplit((scheme, parsed.netloc, f"/ws/rooms/{code}", "", ""))
+    cookie_header = "; ".join(f"{key}={value}" for key, value in client.cookies.items())
+    ssl_context = None
+    if scheme == "wss":
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+    connection = connect(
+        websocket_url,
+        additional_headers={"Cookie": cookie_header},
+        ssl=ssl_context,
+        open_timeout=20,
+        close_timeout=5,
+    )
+    connection.recv(timeout=20)
+    return connection
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
@@ -55,6 +79,7 @@ def main() -> None:
     participant = httpx.Client(base_url=args.base_url, verify=False, timeout=30, follow_redirects=True)
     user_ids: list[str] = []
     room_codes: list[str] = []
+    participant_presence: ClientConnection | None = None
     try:
         owner_id = register(owner, f"qa_restore_owner_{suffix}", "恢复验收房主")
         participant_id = register(participant, f"qa_restore_student_{suffix}", "恢复验收辩手")
@@ -98,6 +123,11 @@ def main() -> None:
             )
             db.commit()
 
+        # A restore request can be created while watch-only, but approval must
+        # prove that the original participant has actually returned to the
+        # room.  Keep the same WebSocket presence path used by the browser open
+        # for the remainder of this verification.
+        participant_presence = reconnect_room_presence(participant, args.base_url, code)
         headers = csrf(participant) | {"X-Idempotency-Key": "live-seat-restore"}
         requested = participant.post(f"/api/rooms/{code}/seat-restore-requests", headers=headers, json={})
         replayed = participant.post(f"/api/rooms/{code}/seat-restore-requests", headers=headers, json={})
@@ -131,6 +161,8 @@ def main() -> None:
             f"room={code} qa_isolated=true"
         )
     finally:
+        if participant_presence is not None:
+            participant_presence.close()
         owner.close()
         participant.close()
         if user_ids:
