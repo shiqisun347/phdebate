@@ -45,22 +45,22 @@ GitHub 快照不得包含 `.env`、密码、API Key、Cookie、数据库、模�
 /home/ubuntu/sunsq/phdebate-v2/runtime/deploy-backups
 ```
 
-以下是 2026-07-20 Round 13 已完成恢复演练的当前批次。后续若生成更新批次，仍必须以人工确认的
+以下是 2026-07-20 Round 14 已完成恢复演练的当前批次。后续若生成更新批次，仍必须以人工确认的
 同一份 `recovery-set-*.manifest` 为准，不得把不同批次的“最新文件”临时拼在一起：
 
 本轮绑定清单为
-`runtime/deploy-backups/recovery-set-20260720T1134Z-round13.manifest`，权限为 `0600`。源码位于
+`runtime/deploy-backups/recovery-set-20260720T1236Z-round14.manifest`，权限为 `0600`。源码位于
 GitHub 分支 `backup/production-20260720-round12`，当前应用提交为
-`eca07666c3292badc8e45b406430e447278acbfb`；恢复时仍应读取清单，不能手工抄写该 SHA。
+`07508b4db8b9f3f986bb9713bd449afb5b05235d`；恢复时仍应读取清单，不能手工抄写该 SHA。
 
 | 内容 | 文件 | SHA-256 |
 | --- | --- | --- |
-| V2 数据库 | `runtime/backups/auto-20260720T113128Z.dump` | `3bc3fabcbd04f8e1a78abc0be03450f7564c79585dddb41e9adb75381695a9f3` |
-| 比赛数据卷 | `20260720T1132Z-round13-data-volumes.tar.gz` | `0e9ac4e30c21a8657e4a6c7f2348f2b380f16835b773adb5e799b7c327ac5faa` |
+| V2 数据库 | `runtime/backups/auto-20260720T123447Z.dump` | `adaea73f50b0dfd7e5c9f6ff51df830356d58c0e21b7525ebb1ba332eacdfdc9` |
+| 比赛数据卷 | `20260720T1235Z-round14-data-volumes.tar.gz` | `dc96163e3f6a6c8797d6d67abcde0e459b03f72f626d039a6cf832126dc6aa13` |
 | 私密配置 | `20260719T094349Z-full-private-config.tar.gz` | `f5a0be379496ae7f7ea3d2575ec3d61c5d3764de4f12946f3ea6c163225f29b0` |
 | 可靠语音清单 | `20260719T091423Z-reliable-voice-runtime.tar.gz` | `6f80f2a43a9fee22316a3d2adf49d54d8e75d0f57b6262f6a9d42f62fbb9ddc9` |
 | MOSS 离线目录 | `20260719-openmoss-offline.tar` | `bec995daf334694aa7dd48b9cf603bd5f2f7f3e7d8527660cafcc8136ee456d8` |
-| Debate Agent 数据库 | `/home/ubuntu/sunsq/debate-agent/backups/agent-20260720T113129Z.dump` | `ea666a6f76970e56fc38a93179c94e296d1dd64f74f3b011d57ae017fba87893` |
+| Debate Agent 数据库 | `/home/ubuntu/sunsq/debate-agent/backups/agent-20260720T123447Z.dump` | `0bc33f509b575ed81c4c44c681d915ee3474504cf2ebf4b2998905bad08411cd` |
 
 `data-volumes` 包含 `storage`、MOSS prompt 资产和可靠音频基线；MOSS 离线包约 11GB。
 所有私密文件应为 `0600`，目录应为 `0700`。
@@ -103,17 +103,17 @@ schema 2 清单不记录源服务器绝对路径，可随恢复材料移动。�
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2/runtime/backups
-sha256sum -c auto-20260720T113128Z.dump.sha256
+sha256sum -c auto-20260720T123447Z.dump.sha256
 
 cd /home/ubuntu/sunsq/phdebate-v2/runtime/deploy-backups
-sha256sum -c 20260720T1132Z-round13-data-volumes.tar.gz.sha256
+sha256sum -c 20260720T1235Z-round14-data-volumes.tar.gz.sha256
 sha256sum -c 20260719T094349Z-full-private-config.tar.gz.sha256
 sha256sum -c 20260719T091423Z-reliable-voice-runtime.tar.gz.sha256
 sha256sum -c 20260719-openmoss-offline.tar.sha256
 
 cd /home/ubuntu/sunsq/debate-agent/backups
-sha256sum -c agent-20260720T113129Z.dump.sha256
-pg_restore -l agent-20260720T113129Z.dump >/dev/null
+sha256sum -c agent-20260720T123447Z.dump.sha256
+pg_restore -l agent-20260720T123447Z.dump >/dev/null
 ```
 
 数据卷还必须完成一次隔离解包和逐文件校验，不能只验证外层压缩包：
@@ -121,14 +121,14 @@ pg_restore -l agent-20260720T113129Z.dump >/dev/null
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2
 ./deploy/verify-data-volume-backup.sh \
-  runtime/deploy-backups/20260720T1132Z-round13-data-volumes.tar.gz
+  runtime/deploy-backups/20260720T1235Z-round14-data-volumes.tar.gz
 ```
 
 V2 数据库还应完成临时数据库恢复验证：
 
 ```bash
 cd /home/ubuntu/sunsq/phdebate-v2
-./deploy/verify-backup-restore.sh runtime/backups/auto-20260720T113128Z.dump
+./deploy/verify-backup-restore.sh runtime/backups/auto-20260720T123447Z.dump
 ```
 
 Debate Agent 的 dump 包含 pgvector 扩展定义。空服务器还原时先以 PostgreSQL 超级用户安装
@@ -137,7 +137,7 @@ Debate Agent 的 dump 包含 pgvector 扩展定义。空服务器还原时先以
 
 ```bash
 install -o postgres -g postgres -m 600 \
-  /home/ubuntu/sunsq/debate-agent/backups/agent-20260720T113129Z.dump \
+  /home/ubuntu/sunsq/debate-agent/backups/agent-20260720T123447Z.dump \
   /tmp/debate-agent-restore.dump
 runuser -u postgres -- createdb -p 5433 -O debate_agent debate_agent_restore_check
 runuser -u postgres -- pg_restore -p 5433 --exit-on-error \
@@ -146,7 +146,7 @@ runuser -u postgres -- pg_restore -p 5433 --exit-on-error \
 find /tmp -maxdepth 1 -type f -name debate-agent-restore.dump -delete
 ```
 
-本轮实际演练结果为：V2 24 张表、Alembic `0025_speech_result_pagination`；Debate Agent 13 张表、
+本轮实际演练结果为：V2 24 张表、Alembic `0026_judge_task_identity`；Debate Agent 13 张表、
 Alembic `0001_initial`；数据卷 384 个文件。演练使用独立临时数据库，没有覆盖生产数据库。
 
 ## 4. 准备空服务器
@@ -482,7 +482,7 @@ curl -fsS https://新服务器IP/debate/api/health
 PHDEBATE_CODE_BRANCH='本批次 GitHub 快照分支' \
 PHDEBATE_CODE_COMMIT='GitHub 快照不可变 SHA' \
 PHDEBATE_DEPLOYED_APPLICATION_COMMIT='实际发布所用 SHA' \
-PHDEBATE_DATABASE_SCHEMA=0025_speech_result_pagination \
+PHDEBATE_DATABASE_SCHEMA=0026_judge_task_identity \
 PHDEBATE_RELIABLE_AUDIO_FINGERPRINT='可靠音频基线指纹' \
 PHDEBATE_PRIVATE_CONFIG_BACKUP="$PWD/runtime/deploy-backups/私密配置归档" \
 PHDEBATE_RELIABLE_VOICE_BACKUP="$PWD/runtime/deploy-backups/可靠语音归档" \
