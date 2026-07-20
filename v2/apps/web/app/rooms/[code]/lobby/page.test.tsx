@@ -295,8 +295,16 @@ describe("room lobby", () => {
     expect(dialog).toHaveTextContent("AI 自动补齐 1 个空席");
     expect(mocks.apiFetch.mock.calls.some(([path]) => String(path).endsWith("/start"))).toBe(false);
     await waitFor(() => expect(screen.getByRole("button", { name: "返回检查" })).toHaveFocus());
+    expect(document.body.style.overflow).toBe("hidden");
+    const confirmStart = screen.getByRole("button", { name: "确认开始比赛" });
+    confirmStart.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "返回检查" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(confirmStart).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("");
     await waitFor(() => expect(start).toHaveFocus());
 
     fireEvent.click(start);

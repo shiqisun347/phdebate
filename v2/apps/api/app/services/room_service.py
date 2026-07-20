@@ -146,6 +146,47 @@ def can_control(db: Session, room: Room, user: User) -> bool:
     return room.owner_id == user.id
 
 
+def transfer_room_owner(
+    db: Session,
+    room: Room,
+    successor: RoomSeat,
+    *,
+    actor_user_id: str | None = None,
+    reason: str,
+    idempotency_key: str | None = None,
+) -> bool:
+    """Move room control to an authoritative human seat.
+
+    The debate flow is automated, but failure recovery still requires an
+    online room controller.  Keeping ownership attached to a disconnected
+    participant after their seat is replaced by AI leaves every remaining
+    human unable to pause, retry, or terminate the match.  This helper keeps
+    the ownership mutation and its append-only audit event inseparable.
+    """
+
+    if successor.occupant_type != "human" or not successor.user_id:
+        raise ValueError("room ownership can only be transferred to a human seat")
+    if successor.user_id == room.owner_id:
+        return False
+    previous_owner_id = room.owner_id
+    room.owner_id = successor.user_id
+    append_event(
+        db,
+        room,
+        "room.owner_transferred",
+        {
+            "previous_owner_id": previous_owner_id,
+            "new_owner_id": successor.user_id,
+            "seat_key": successor.seat_key,
+            "real_name": successor.display_name,
+            "reason": reason,
+        },
+        actor_user_id=actor_user_id,
+        idempotency_key=idempotency_key,
+    )
+    return True
+
+
 def can_view_room(db: Session, room: Room, user: User | None) -> bool:
     if room.visibility == "public":
         return True
@@ -305,6 +346,7 @@ PUBLIC_MATCH_TIMELINE_EVENT_TYPES = frozenset(
         "room.created",
         "room.locked",
         "room.cancelled",
+        "room.owner_transferred",
         "match.started",
         "match.completed",
         "match.result",

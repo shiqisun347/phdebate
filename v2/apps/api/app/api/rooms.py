@@ -66,6 +66,7 @@ from app.services.room_service import (
     serialize_scorecard,
     speaking_permission,
     stage,
+    transfer_room_owner,
     use_public_projection,
     user_seat,
 )
@@ -161,6 +162,13 @@ def _rematch_identity(user: User, source_room: Room, provided: str | None) -> tu
     key_digest = hashlib.sha256(f"room-rematch:{source_room.id}:{user.id}:{supplied}".encode()).hexdigest()
     fingerprint = hashlib.sha256(f"{source_room.id}:{user.id}".encode()).hexdigest()
     return f"room-rematch:{key_digest}", fingerprint
+
+
+def _competition_template_snapshot(competition: Competition) -> list[dict]:
+    template = competition.automation_template
+    if not template or not template.is_active or not template.stages:
+        raise HTTPException(status_code=409, detail="该赛事的自动比赛流程暂不可用，请联系管理员处理。")
+    return [dict(stage) for stage in template.stages]
 
 
 def _audio_suffix(header: bytes) -> str | None:
@@ -308,6 +316,7 @@ async def create_room(
     valid_seats = {item[0] for item in seat_keys(competition)}
     if payload.seat_key not in valid_seats:
         raise HTTPException(status_code=422, detail="无效的席位。")
+    template_snapshot = _competition_template_snapshot(competition)
     if payload.custom_topic:
         if not competition.allow_custom_topic:
             raise HTTPException(status_code=422, detail="该赛事不允许自定义辩题。")
@@ -345,7 +354,7 @@ async def create_room(
         topic=topic,
         visibility=payload.visibility,
         is_test_data=user.is_test_account,
-        template_snapshot=[dict(item) for item in competition.automation_template.stages],
+        template_snapshot=template_snapshot,
     )
     db.add(room)
     try:
@@ -434,6 +443,7 @@ async def rematch_room(
     valid_seats = {item[0] for item in seat_keys(competition)}
     if source_seat.seat_key not in valid_seats:
         raise HTTPException(status_code=409, detail="赛事席位规则已经变化，请从赛事大厅重新创建比赛。")
+    template_snapshot = _competition_template_snapshot(competition)
 
     room = Room(
         code=room_code(db),
@@ -446,7 +456,7 @@ async def rematch_room(
         topic=source_room.topic,
         visibility=source_room.visibility,
         is_test_data=user.is_test_account,
-        template_snapshot=[dict(item) for item in competition.automation_template.stages],
+        template_snapshot=template_snapshot,
     )
     db.add(room)
     try:
@@ -812,8 +822,6 @@ async def abandon_started_seat(
     seat = user_seat(room, user)
     if not seat or seat.occupant_type != "human":
         raise HTTPException(status_code=409, detail="你当前没有可退出的真人席位。")
-    if room.owner_id == user.id:
-        raise HTTPException(status_code=409, detail="房主需要继续管理比赛；如需结束请使用比赛控制。")
     active = db.scalar(
         select(Speech.id).where(
             Speech.room_id == room.id,
@@ -823,7 +831,28 @@ async def abandon_started_seat(
     )
     if active:
         raise HTTPException(status_code=409, detail="当前发言尚未完成，请先结束并提交后再退出本场。")
-    _lock_participants(db, [user.id])
+    successor = None
+    if room.owner_id == user.id:
+        candidates = sorted(
+            (
+                item
+                for item in room.seats
+                if item.id != seat.id
+                and item.occupant_type == "human"
+                and item.user_id
+                and item.connected
+            ),
+            key=lambda item: (item.position, item.seat_key),
+        )
+        successor = next(
+            (
+                item
+                for item in candidates
+                if (participant := db.get(User, item.user_id)) is not None and participant.is_active
+            ),
+            None,
+        )
+    _lock_participants(db, [user.id, *([successor.user_id] if successor and successor.user_id else [])])
     profiles = choose_agent_profiles(db, len(room.seats))
     profile = profiles[(max(1, seat.position) - 1) % len(profiles)] if profiles else None
     original_name = seat.display_name.removeprefix("AI 接替·")
@@ -835,6 +864,14 @@ async def abandon_started_seat(
     seat.disconnected_at = now()
     seat.control_lease = ""
     seat.control_session_id = None
+    if successor:
+        transfer_room_owner(
+            db,
+            room,
+            successor,
+            actor_user_id=user.id,
+            reason="owner_abandoned_seat",
+        )
     append_event(
         db,
         room,
@@ -948,6 +985,60 @@ async def ready(
     db.commit()
     await _publish(room, "seat.ready_changed")
     return {"room": serialize_room(db, load_room(db, code), user)}
+
+
+@router.post("/{code}/transfer-owner")
+async def transfer_owner(
+    code: str,
+    payload: SeatRequest,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    user: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Hand room recovery controls to another human participant.
+
+    Normal matches advance automatically, but a present participant must be
+    able to repair an exceptional pause when the original creator leaves.
+    Only the current owner (or a system administrator) can make an explicit
+    handoff; engine-driven disconnect recovery uses the same event contract.
+    """
+
+    room = load_room(db, code, lock=True)
+    operation_key = _operation_key("owner-transfer", room, user, idempotency_key)
+    if operation_key:
+        previous = db.scalar(select(MatchEvent).where(MatchEvent.idempotency_key == operation_key))
+        if previous:
+            if previous.payload.get("seat_key") != payload.seat_key:
+                raise HTTPException(status_code=409, detail="同一个幂等键不能用于不同的目标席位。")
+            return {"room": serialize_room(db, room, user), "replayed": True}
+    if not can_control(db, room, user):
+        raise HTTPException(status_code=403, detail="只有当前房主或系统管理员可以移交房间控制权。")
+    if room.status not in ACTIVE_PARTICIPANT_STATUSES:
+        raise HTTPException(status_code=409, detail="比赛已经结束，不能再移交房间控制权。")
+    successor = next((item for item in room.seats if item.seat_key == payload.seat_key), None)
+    if not successor:
+        raise HTTPException(status_code=404, detail="目标席位不存在。")
+    if successor.occupant_type != "human" or not successor.user_id:
+        raise HTTPException(status_code=409, detail="控制权只能移交给当前真人辩手。")
+    if not successor.connected:
+        raise HTTPException(status_code=409, detail="目标辩手当前不在线，不能接管房间控制权。")
+    participant = db.get(User, successor.user_id)
+    if not participant or not participant.is_active:
+        raise HTTPException(status_code=409, detail="目标辩手账号当前不可用。")
+    if successor.user_id == room.owner_id:
+        return {"room": serialize_room(db, room, user), "replayed": True}
+    _lock_participants(db, [room.owner_id, successor.user_id])
+    transfer_room_owner(
+        db,
+        room,
+        successor,
+        actor_user_id=user.id,
+        reason="manual_handoff",
+        idempotency_key=operation_key,
+    )
+    db.commit()
+    await _publish(room, "room.owner_transferred")
+    return {"room": serialize_room(db, load_room(db, code), user), "replayed": False}
 
 
 @router.post("/{code}/cancel")

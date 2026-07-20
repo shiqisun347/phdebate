@@ -81,6 +81,7 @@ describe("room control console", () => {
     const paused = { ...runningRoom, status: "paused", seq: 2, remaining_seconds: 88 } as Room;
     mocks.apiFetch.mockResolvedValueOnce({ room: paused });
     const { container } = render(<ControlPage />);
+    expect(screen.getByRole("heading", { level: 1, name: "房间 #123456 控制台" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("实时连接已断开");
     expect(screen.getByText(/FunASR \/ MOSS 实时语音/)).toBeInTheDocument();
     expect(screen.queryByText(/LightTTS/)).not.toBeInTheDocument();
@@ -124,6 +125,85 @@ describe("room control console", () => {
     await waitFor(() => expect(mocks.apiFetch).toHaveBeenCalledWith(
       "/api/rooms/123456/seat-restore-requests/request-1/approve",
       expect.objectContaining({ method: "POST" }),
+    ));
+    expect(mocks.setRoom).toHaveBeenCalledOnce();
+  });
+
+  it("safely transfers room recovery control to a connected human participant", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const ownerSeat = {
+      seat_key: "aff_1", side: "aff" as const, position: 1, label: "正方一辩",
+      occupant_type: "human" as const, display_name: "原房主", is_ready: true,
+      connected: true, is_me: true, is_owner: true,
+    };
+    const successorSeat = {
+      seat_key: "neg_1", side: "neg" as const, position: 1, label: "反方一辩",
+      occupant_type: "human" as const, display_name: "接任辩手", is_ready: true,
+      connected: true, is_me: false, is_owner: false,
+    };
+    const offlineSeat = {
+      ...successorSeat, seat_key: "neg_2", position: 2, label: "反方二辩",
+      display_name: "离线辩手", connected: false,
+    };
+    const transferred = {
+      ...runningRoom,
+      seq: 2,
+      owner: { id: "successor", real_name: "接任辩手" },
+      can_control: false,
+      seats: [
+        { ...ownerSeat, is_owner: false },
+        { ...successorSeat, is_owner: true },
+        offlineSeat,
+      ],
+    } as Room;
+    mocks.room = { ...runningRoom, seats: [ownerSeat, successorSeat, offlineSeat] } as Room;
+    mocks.apiFetch.mockResolvedValueOnce({ room: transferred });
+
+    render(<ControlPage />);
+    expect(screen.getByText(/需要离开时，应先把异常恢复权限/)).toBeInTheDocument();
+    expect(screen.getByText("接任辩手")).toBeInTheDocument();
+    expect(screen.queryByText("离线辩手")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "移交房主" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("接任辩手（反方一辩）"));
+    await waitFor(() => expect(mocks.apiFetch).toHaveBeenCalledWith(
+      "/api/rooms/123456/transfer-owner",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ seat_key: "neg_1" }),
+        headers: expect.objectContaining({ "X-Idempotency-Key": expect.any(String) }),
+      }),
+    ));
+    expect(mocks.setRoom).toHaveBeenCalledOnce();
+    expect(screen.getByRole("status")).toHaveTextContent(/房主控制权已移交给\s*接任辩手/);
+  });
+
+  it("lets the owner hand their own human seat to AI without touching the debate player", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const ownerSeat = {
+      seat_key: "aff_1", side: "aff" as const, position: 1, label: "正方一辩",
+      occupant_type: "human" as const, display_name: "原房主", is_ready: true,
+      connected: true, is_me: true, is_owner: true,
+    };
+    const abandoned = {
+      ...runningRoom,
+      seq: 2,
+      seats: [{ ...ownerSeat, occupant_type: "ai_substitute", display_name: "AI 接替·原房主" }],
+    } as Room;
+    mocks.room = { ...runningRoom, seats: [ownerSeat] } as Room;
+    mocks.apiFetch.mockResolvedValueOnce({ room: abandoned });
+
+    render(<ControlPage />);
+    fireEvent.click(screen.getByRole("button", { name: "让 AI 接替我的席位" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("若有其他在线真人，房主控制权会自动移交"));
+    await waitFor(() => expect(mocks.apiFetch).toHaveBeenCalledWith(
+      "/api/rooms/123456/abandon-seat",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: expect.objectContaining({ "X-Idempotency-Key": expect.any(String) }),
+      }),
     ));
     expect(mocks.setRoom).toHaveBeenCalledOnce();
   });

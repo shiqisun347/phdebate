@@ -46,6 +46,7 @@ export default function LobbyPage() {
   const previousMySeat = useRef<string | null>(room?.my_seat || null);
   const startButton = useRef<HTMLButtonElement | null>(null);
   const startConfirmCancel = useRef<HTMLButtonElement | null>(null);
+  const startConfirmDialog = useRef<HTMLDivElement | null>(null);
   const mySeatKey = room?.my_seat || "";
   const roomStatus = room?.status || "";
   const controlLease = useMemo(() => {
@@ -114,14 +115,36 @@ export default function LobbyPage() {
   }, [room, code, router]);
   useEffect(() => {
     if (!confirmingStart) return;
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     startConfirmCancel.current?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setConfirmingStart(false);
-      requestAnimationFrame(() => startButton.current?.focus());
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setConfirmingStart(false);
+        requestAnimationFrame(() => startButton.current?.focus());
+        return;
+      }
+      if (event.key !== "Tab" || !startConfirmDialog.current) return;
+      const focusable = [...startConfirmDialog.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      document.body.style.overflow = previousBodyOverflow;
+    };
   }, [confirmingStart]);
   async function action(path: string, body: object = {}) {
     setBusy(path);
@@ -445,7 +468,7 @@ export default function LobbyPage() {
       </div>
       {confirmingStart && (
         <div className="stage-confirm-backdrop">
-          <div className="stage-confirm-dialog panel" role="alertdialog" aria-modal="true" aria-labelledby="lobby-start-confirm-title" aria-describedby="lobby-start-confirm-description">
+          <div ref={startConfirmDialog} className="stage-confirm-dialog panel" role="alertdialog" aria-modal="true" aria-labelledby="lobby-start-confirm-title" aria-describedby="lobby-start-confirm-description">
             <strong id="lobby-start-confirm-title">确认锁定席位并开始比赛？</strong>
             <p id="lobby-start-confirm-description">开始后将锁定当前 {humans.length} 位真人席位，并由 AI 自动补齐 {room.seats.length - humans.length} 个空席。自动赛程会立即开始，不能再更换辩题或席位。</p>
             <div className="lobby-start-summary">

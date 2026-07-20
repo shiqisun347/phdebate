@@ -29,7 +29,8 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
   const normalizedCustomTopic = customTopic.trim().replace(/\s+/g, " ");
   const customTopicInvalid = normalizedCustomTopic.length > 0 && normalizedCustomTopic.length < 4;
   const creationBlockedReason = roomCreationBlockedReason(detail);
-  const topicUnavailable = !detail.allow_custom_topic && !detail.topics?.length;
+  const hasManagedTopics = Boolean(detail.topics?.length);
+  const topicUnavailable = !detail.allow_custom_topic && !hasManagedTopics;
   const seats = useMemo(() => {
     const perSide = detail.seat_count / 2;
     return ["aff", "neg"].flatMap((side) => Array.from({ length: perSide }, (_, index) => ({ key: `${side}_${index + 1}`, label: `${side === "aff" ? "正方" : "反方"}${index + 1}辩` })));
@@ -135,7 +136,13 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
       } else {
         if (creationBlockedReason) throw new Error(creationBlockedReason);
         if (topicUnavailable) throw new Error("当前赛事暂无可用辩题，请联系管理员补充题库。");
-        const body = { competition_slug: detail.slug, topic_id: topicId || null, custom_topic: customTopic || null, seat_key: seat, visibility: "public" };
+        const body = {
+          competition_slug: detail.slug,
+          topic_id: normalizedCustomTopic ? null : topicId || null,
+          custom_topic: normalizedCustomTopic || null,
+          seat_key: seat,
+          visibility: "public",
+        };
         const fingerprint = JSON.stringify(body);
         if (!createAttempt.current || createAttempt.current.fingerprint !== fingerprint) {
           createAttempt.current = { fingerprint, key: crypto.randomUUID() };
@@ -184,7 +191,8 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
             <div className="success-box"><strong>先完成登录或注册</strong><span>认证后会自动回到当前赛事，再选择辩题和席位创建比赛。</span></div>
           ) : (
             <>
-              {detail.allow_custom_topic ? <div className="field"><label htmlFor="custom-debate-topic">自定义辩题（留空使用题库）</label><textarea id="custom-debate-topic" className="textarea" minLength={4} maxLength={300} value={customTopic} onChange={(event) => setCustomTopic(event.target.value)} placeholder="输入训练辩题" /><small className={customTopicInvalid?"field-error":"muted"}>{customTopicInvalid?"自定义辩题至少需要 4 个字符。":`${normalizedCustomTopic.length}/300`}</small></div> : <div className="field"><label htmlFor="competition-topic">本场辩题</label><select id="competition-topic" className="select" value={topicId} disabled={topicUnavailable} onChange={(event) => setTopicId(event.target.value)}>{topicUnavailable ? <option value="">暂无可用辩题</option> : detail.topics?.map((topic) => <option key={topic.id} value={topic.id}>{topic.title}</option>)}</select>{topicUnavailable && <small className="field-error">请联系管理员补充该赛事题库。</small>}</div>}
+              {hasManagedTopics && <div className="field"><label htmlFor="competition-topic">题库辩题</label><select id="competition-topic" className="select" value={topicId} disabled={Boolean(normalizedCustomTopic)} onChange={(event) => setTopicId(event.target.value)}>{detail.topics?.map((topic) => <option key={topic.id} value={topic.id}>{topic.title}</option>)}</select>{normalizedCustomTopic && <small className="muted">已填写自定义辩题，本场将优先使用自定义内容。</small>}</div>}
+              {detail.allow_custom_topic ? <div className="field"><label htmlFor="custom-debate-topic">自定义辩题{hasManagedTopics ? "（可选）" : ""}</label><textarea id="custom-debate-topic" className="textarea" minLength={4} maxLength={300} value={customTopic} onChange={(event) => setCustomTopic(event.target.value)} placeholder={hasManagedTopics ? "留空则使用上方题库辩题" : "输入训练辩题"} /><small className={customTopicInvalid?"field-error":"muted"}>{customTopicInvalid?"自定义辩题至少需要 4 个字符。":`${normalizedCustomTopic.length}/300`}</small></div> : !hasManagedTopics && <div className="field"><label htmlFor="competition-topic">本场辩题</label><select id="competition-topic" className="select" value="" disabled><option value="">暂无可用辩题</option></select><small className="field-error">请联系管理员补充该赛事题库。</small></div>}
               <div className="field"><label>选择你的人类辩手席位</label><div className="seat-picker">{seats.map((item) => <button type="button" key={item.key} className={`seat-option ${seat === item.key ? "active" : ""}`} onClick={() => setSeat(item.key)}>{item.label}</button>)}</div></div>
               <p className="muted" style={{ fontSize: 12, margin: 0 }}>其他玩家可通过房间号认领空席；开始比赛时，剩余席位由 AI 自动填充。</p>
             </>

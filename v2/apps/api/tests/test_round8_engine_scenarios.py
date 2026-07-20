@@ -199,6 +199,12 @@ async def test_disconnected_human_is_replaced_then_explicitly_restored_without_c
             )
         )
 
+        # A restoration approval represents an actual browser return, not
+        # merely an HTTP request from a stale tab.
+        seat.connected = True
+        seat.disconnected_at = None
+        db.commit()
+
     request_headers = csrf(participant) | {"X-Idempotency-Key": "round8-restore-request-once"}
     requested = participant.post(f"/api/rooms/{code}/seat-restore-requests", headers=request_headers, json={})
     replayed = participant.post(f"/api/rooms/{code}/seat-restore-requests", headers=request_headers, json={})

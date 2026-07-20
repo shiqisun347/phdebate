@@ -28,16 +28,28 @@ export default function CompetitionDetailPage() {
   const [error, setError] = useState("");
   const [tab, setTab] = useState<DetailTab>("intro");
   const tabRefs = useRef<Partial<Record<DetailTab, HTMLButtonElement | null>>>({});
+  const loadSequence = useRef(0);
   const [join, setJoin] = useState(false);
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setError("");
-    try { setData(await apiFetch<Detail>(`/api/competitions/${slug}`)); }
-    catch (err) { setError(err instanceof Error ? err.message : "赛事详情载入失败"); }
+    try {
+      const next = await apiFetch<Detail>(`/api/competitions/${slug}`);
+      if (sequence === loadSequence.current) setData(next);
+    }
+    catch (err) {
+      if (sequence === loadSequence.current)
+        setError(err instanceof Error ? err.message : "赛事详情载入失败");
+    }
   }, [slug]);
   useLayoutEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [slug]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setData(null);
+    setTab("intro");
+    void load();
+  }, [load]);
   if (!data && error) return <LoadError message={error} retry={() => void load()} />;
   if (!data) return <div className="loading-screen">正在载入赛事…</div>;
   const item = data.competition;

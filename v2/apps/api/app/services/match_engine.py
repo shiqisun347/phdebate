@@ -46,6 +46,7 @@ from app.services.room_service import (
     remaining_seconds,
     seat_label,
     stage,
+    transfer_room_owner,
 )
 from app.services.seat_restore import expire_pending_restore_requests
 from app.services.speech_quality import usable_transcript
@@ -1851,6 +1852,7 @@ class MatchEngine:
                 disconnected_at = disconnected_at.replace(tzinfo=timezone.utc)
             elapsed = (now() - disconnected_at).total_seconds()
             if room.status == "lobby" and elapsed >= 120:
+                self._transfer_disconnected_owner(db, room, seat)
                 old_name = seat.display_name
                 seat.occupant_type = "open"
                 seat.user_id = None
@@ -1861,7 +1863,8 @@ class MatchEngine:
                 seat.control_session_id = None
                 append_event(db, room, "seat.expired", {"seat_key": seat.seat_key, "real_name": old_name})
                 changed = True
-            elif room.status in {"preparing", "running", "judging"} and elapsed >= 60:
+            elif room.status in {"preparing", "running", "paused", "judging"} and elapsed >= 60:
+                self._transfer_disconnected_owner(db, room, seat)
                 profile = profiles[index % len(profiles)] if profiles else None
                 seat.occupant_type = "ai_substitute"
                 seat.agent_profile_id = profile.id if profile else None
@@ -1890,6 +1893,35 @@ class MatchEngine:
             append_event(db, room, "room.cancelled", {"reason": "owner_left_lobby"})
             changed = True
         return changed
+
+    @staticmethod
+    def _transfer_disconnected_owner(db: Session, room: Room, expiring_seat: RoomSeat) -> bool:
+        """Keep repair controls with a connected human when the owner leaves."""
+
+        if expiring_seat.user_id != room.owner_id:
+            return False
+        candidates = sorted(
+            (
+                seat
+                for seat in room.seats
+                if seat.id != expiring_seat.id
+                and seat.occupant_type == "human"
+                and seat.user_id
+                and seat.connected
+            ),
+            key=lambda seat: (seat.position, seat.seat_key),
+        )
+        for successor in candidates:
+            participant = db.get(User, successor.user_id)
+            if participant and participant.is_active:
+                return transfer_room_owner(
+                    db,
+                    room,
+                    successor,
+                    reason="owner_presence_expired",
+                    idempotency_key=f"{room.id}:owner-transfer:{expiring_seat.user_id}",
+                )
+        return False
 
     def _history(self, db: Session, room_id: str) -> list[dict[str, Any]]:
         grouped: dict[str, list[dict[str, str]]] = {}

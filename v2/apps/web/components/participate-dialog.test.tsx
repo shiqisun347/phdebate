@@ -48,13 +48,55 @@ describe("participation dialog", () => {
   it("normalizes custom-topic feedback and blocks a too-short submission", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ competition: training })));
     render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
-    const topic = await screen.findByLabelText("自定义辩题（留空使用题库）");
+    const topic = await screen.findByLabelText("自定义辩题（可选）");
     fireEvent.change(topic, { target: { value: "太短" } });
     expect(screen.getByText("自定义辩题至少需要 4 个字符。")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /创建比赛/ }).at(-1)).toBeDisabled();
     fireEvent.change(topic, { target: { value: "  人工智能 是否提升创造力  " } });
     expect(screen.getByText("12/300")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /创建比赛/ }).at(-1)).toBeEnabled();
+  });
+
+  it("lets a participant choose any managed topic and sends one unambiguous topic source", async () => {
+    const detailed = {
+      ...training,
+      topics: [
+        { id: "topic-1", title: "默认训练辩题" },
+        { id: "topic-2", title: "第二个训练辩题" },
+      ],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ competition: detailed }))
+      .mockResolvedValueOnce(response({ room: { code: "381526" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ParticipateDialog competition={detailed} onClose={vi.fn()} />);
+
+    const managedTopic = await screen.findByLabelText("题库辩题");
+    fireEvent.change(managedTopic, { target: { value: "topic-2" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "创建比赛" }).at(-1)!);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const managedBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect(managedBody).toMatchObject({ topic_id: "topic-2", custom_topic: null });
+  });
+
+  it("uses custom content instead of also sending a hidden managed topic", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ competition: training }))
+      .mockResolvedValueOnce(response({ room: { code: "381526" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText("自定义辩题（可选）"), {
+      target: { value: "  AI 是否提升学生的思辨能力  " },
+    });
+    expect(screen.getByLabelText("题库辩题")).toBeDisabled();
+    expect(screen.getByText("已填写自定义辩题，本场将优先使用自定义内容。")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "创建比赛" }).at(-1)!);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const customBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect(customBody).toMatchObject({ topic_id: null, custom_topic: "AI 是否提升学生的思辨能力" });
   });
 
   it("shows a load error instead of leaving an unhandled rejection", async () => {
@@ -102,7 +144,7 @@ describe("participation dialog", () => {
       .mockResolvedValueOnce(response({ room: { status, my_seat: status === "running" ? "aff_1" : null } }));
     vi.stubGlobal("fetch", fetchMock);
     render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
-    await screen.findByLabelText("自定义辩题（留空使用题库）");
+    await screen.findByLabelText("自定义辩题（可选）");
     fireEvent.click(screen.getByRole("button", { name: /搜索房间/ }));
     fireEvent.change(screen.getByLabelText("六位房间号"), { target: { value: "381526" } });
     fireEvent.click(screen.getByRole("button", { name: "进入房间" }));
@@ -115,7 +157,7 @@ describe("participation dialog", () => {
       .mockResolvedValueOnce(response({ room: { status: "paused", my_seat: null } }));
     vi.stubGlobal("fetch", fetchMock);
     render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
-    await screen.findByLabelText("自定义辩题（留空使用题库）");
+    await screen.findByLabelText("自定义辩题（可选）");
     fireEvent.click(screen.getByRole("button", { name: /搜索房间/ }));
     fireEvent.change(screen.getByLabelText("六位房间号"), { target: { value: "381526" } });
     fireEvent.click(screen.getByRole("button", { name: "进入房间" }));
@@ -128,7 +170,7 @@ describe("participation dialog", () => {
       .mockResolvedValueOnce(response({ room: { status: "cancelled" } }));
     vi.stubGlobal("fetch", fetchMock);
     render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
-    await screen.findByLabelText("自定义辩题（留空使用题库）");
+    await screen.findByLabelText("自定义辩题（可选）");
     fireEvent.click(screen.getByRole("button", { name: /搜索房间/ }));
     fireEvent.change(screen.getByLabelText("六位房间号"), { target: { value: "381526" } });
     fireEvent.click(screen.getByRole("button", { name: "进入房间" }));
@@ -179,7 +221,7 @@ describe("participation dialog", () => {
   it("moves focus into the room-code field when search mode is selected", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ competition: training })));
     render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
-    await screen.findByLabelText("自定义辩题（留空使用题库）");
+    await screen.findByLabelText("自定义辩题（可选）");
     fireEvent.click(screen.getByRole("button", { name: /搜索房间/ }));
     await waitFor(() => expect(screen.getByLabelText("六位房间号")).toHaveFocus());
   });
@@ -199,7 +241,7 @@ describe("participation dialog", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ competition: training })));
     const view = render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent("正在确认登录状态");
-    expect(screen.queryByLabelText("自定义辩题（留空使用题库）")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("自定义辩题（可选）")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "正方1辩" })).not.toBeInTheDocument();
 
     sessionState.loading = false;
@@ -243,7 +285,7 @@ describe("participation dialog", () => {
   it("has no automatically detectable accessibility violations", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ competition: training })));
     const { container } = render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
-    await screen.findByLabelText("自定义辩题（留空使用题库）");
+    await screen.findByLabelText("自定义辩题（可选）");
     const result = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(result.violations).toEqual([]);
   });

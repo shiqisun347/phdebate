@@ -2509,8 +2509,16 @@ async def test_presence_expiry_releases_lobby_seat_and_substitutes_running_human
         db.commit()
         assert owner_seat.occupant_type == "open" and owner_seat.user_id is None
         assert guest_seat.occupant_type == "human" and guest_seat.connected is True
-        assert room.status == "cancelled" and room.completed_at is not None
-        assert db.scalar(
+        assert room.status == "lobby" and room.completed_at is None
+        assert room.owner_id == guest_seat.user_id
+        transferred = db.scalar(
+            select(MatchEvent).where(
+                MatchEvent.room_id == room.id,
+                MatchEvent.event_type == "room.owner_transferred",
+            )
+        )
+        assert transferred and transferred.payload["seat_key"] == guest_seat.seat_key
+        assert not db.scalar(
             select(MatchEvent.id).where(
                 MatchEvent.room_id == room.id,
                 MatchEvent.event_type == "room.cancelled",
@@ -4098,6 +4106,13 @@ def test_participant_restore_request_owner_approval_and_realtime_sync(client: Te
                 break
         assert realtime is not None
         assert realtime["room"]["seat_restore_requests"][0]["id"] == request["id"]
+
+        with SessionLocal() as db:
+            room = load_room(db, code, lock=True)
+            seat = next(item for item in room.seats if item.user_id == request["requester"]["id"])
+            seat.connected = True
+            seat.disconnected_at = None
+            db.commit()
 
         approved = owner.post(
             f"/api/rooms/{code}/seat-restore-requests/{request['id']}/approve",

@@ -243,6 +243,8 @@ def review_restore_request(
         )
         return False
 
+    if not seat.connected:
+        raise HTTPException(status_code=409, detail="原辩手尚未重新连接，返回比赛后才能恢复真人控制。")
     if _active_speech_exists(db, room):
         raise HTTPException(status_code=409, detail="当前仍有发言正在进行，结束后才能恢复真人控制。")
     participant = db.get(User, request.requester_user_id)

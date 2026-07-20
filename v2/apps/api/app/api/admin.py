@@ -465,6 +465,25 @@ def serialize_automation_template(item: AutomationTemplate, competitions: list[C
     }
 
 
+def ensure_competition_can_accept_new_rooms(db: Session, competition: Competition) -> None:
+    if not competition.allow_custom_topic:
+        active_topics = db.scalar(
+            select(func.count(CompetitionTopic.id)).where(
+                CompetitionTopic.competition_id == competition.id,
+                CompetitionTopic.is_active.is_(True),
+            )
+        ) or 0
+        if active_topics == 0:
+            raise HTTPException(status_code=409, detail="赛事至少需要一个启用中的辩题才能开放参赛。")
+    template = db.get(AutomationTemplate, competition.automation_template_id) if competition.automation_template_id else None
+    if not template or not template.is_active or not template.stages:
+        raise HTTPException(status_code=409, detail="赛事缺少可用的自动流程模板，不能开放参赛。")
+    if competition.ranked:
+        season = db.get(Season, competition.season_id) if competition.season_id else None
+        if not season or not season.is_active:
+            raise HTTPException(status_code=409, detail="积分赛事必须绑定一个启用中的赛季才能开放参赛。")
+
+
 @router.get("/automation-templates")
 def automation_templates(admin: User = Depends(system_admin), db: Session = Depends(get_db)) -> dict:
     rows = db.scalars(select(AutomationTemplate).order_by(AutomationTemplate.slug, AutomationTemplate.version.desc())).all()
@@ -555,7 +574,7 @@ def patch_competition(
 ) -> dict:
     if admin.role != "system_admin":
         raise HTTPException(status_code=403, detail="仅系统管理员可操作。")
-    item = db.get(Competition, competition_id)
+    item = db.scalar(select(Competition).where(Competition.id == competition_id).with_for_update())
     if not item:
         raise HTTPException(status_code=404, detail="赛事不存在。")
     ensure_mutable_competition(item)
@@ -568,6 +587,8 @@ def patch_competition(
             raise HTTPException(status_code=409, detail="不能把赛事绑定到已停用赛季。")
     for key, value in changes.items():
         setattr(item, key, value)
+    if changes.get("is_active") is True:
+        ensure_competition_can_accept_new_rooms(db, item)
     audit(db, admin, "competition.patch", "competition", item.id, changes)
     db.commit()
     return {"competition": serialize_competition(item)}
@@ -577,7 +598,7 @@ def patch_competition(
 def create_topic(competition_id: str, payload: TopicCreate, admin: User = Depends(verify_csrf), db: Session = Depends(get_db)) -> dict:
     if admin.role != "system_admin":
         raise HTTPException(status_code=403, detail="仅系统管理员可操作。")
-    competition = db.get(Competition, competition_id)
+    competition = db.scalar(select(Competition).where(Competition.id == competition_id).with_for_update())
     if not competition:
         raise HTTPException(status_code=404, detail="赛事不存在。")
     ensure_mutable_competition(competition)
@@ -599,7 +620,7 @@ def patch_topic(
 ) -> dict:
     if admin.role != "system_admin":
         raise HTTPException(status_code=403, detail="仅系统管理员可操作。")
-    competition = db.get(Competition, competition_id)
+    competition = db.scalar(select(Competition).where(Competition.id == competition_id).with_for_update())
     if not competition:
         raise HTTPException(status_code=404, detail="赛事不存在。")
     ensure_mutable_competition(competition)
@@ -612,6 +633,19 @@ def patch_topic(
     if not topic:
         raise HTTPException(status_code=404, detail="赛事题目不存在。")
     changes = payload.model_dump(exclude_none=True)
+    if changes.get("is_active") is False and competition.is_active and not competition.allow_custom_topic:
+        remaining_active_topics = db.scalar(
+            select(func.count(CompetitionTopic.id)).where(
+                CompetitionTopic.competition_id == competition.id,
+                CompetitionTopic.is_active.is_(True),
+                CompetitionTopic.id != topic.id,
+            )
+        ) or 0
+        if remaining_active_topics == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="开放中的赛事必须保留至少一个启用辩题；请先停用赛事，再停用最后一个辩题。",
+            )
     for key, value in changes.items():
         setattr(topic, key, value)
     audit(db, admin, "topic.patch", "topic", topic.id, changes)

@@ -217,7 +217,7 @@ th { color: #838faa; font-weight: 600; }
 .load-error-card p { line-height:1.7; }
 .load-error-card .hero-actions { justify-content:center; }
 .lobby-topic { text-align:center; padding:32px; margin-bottom:18px; }
-.lobby-topic h1 { font-size:clamp(25px,3vw,40px); margin:14px auto; max-width:900px; }
+.lobby-topic h2 { font-size:clamp(25px,3vw,40px); margin:14px auto; max-width:900px; }
 .lobby-topic .detail-meta { justify-content:center; color:var(--muted); }
 .lobby-topic .detail-meta span { display:flex; align-items:center; gap:6px; }
 .lobby-layout { display:grid; grid-template-columns:1fr 330px; gap:18px; }
