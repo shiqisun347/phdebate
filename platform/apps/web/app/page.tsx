@@ -111,7 +111,7 @@ export default function HomePage() {
       {notice && <div className="warning-box home-return-notice" role="status">{notice}</div>}
       <section className="hero">
         <div>
-          <span className="eyebrow">Human × AI Debate Arena</span>
+          <span className="eyebrow">人机辩论竞技场</span>
           <h1>
             <span className="hero-title-line">{PRIMARY_COMPETITION_NAME}</span>
             <span className="gradient-text hero-title-line">参赛者自主组局，</span>
@@ -131,7 +131,7 @@ export default function HomePage() {
       </section>
 
       <section id="competitions">
-        <div className="section-head"><div><span className="eyebrow">Competition</span><h2>选择赛事</h2><p>正式赛与训练赛都可由参赛者自主创建；认领人类席位后，其余空席由 AI 补齐。</p></div></div>
+        <div className="section-head"><div><span className="eyebrow">赛事中心</span><h2>选择赛事</h2><p>正式赛与训练赛都可由参赛者自主创建；认领人类席位后，其余空席由 AI 补齐。</p></div></div>
         <div className="competition-grid">
           {competitions.map((item) => (
             <article className="competition-card" key={item.id} style={{ "--card-accent": item.accent === "cyan" ? "#3bd8e8" : "#8c6cff" } as React.CSSProperties}>

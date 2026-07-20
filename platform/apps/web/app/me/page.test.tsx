@@ -95,6 +95,8 @@ describe("personal account", () => {
     expect(await screen.findByText("等待房主锁定席位并开始比赛")).toBeInTheDocument();
     expect(screen.getByText("返回房间大厅")).toBeInTheDocument();
     expect(screen.getAllByText("房间大厅", { exact: true })).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "浏览更多赛事" })).toHaveAttribute("href", "/#competitions");
+    expect(screen.queryByRole("link", { name: "参加第一场比赛" })).not.toBeInTheDocument();
   });
 
   it("keeps the personal center focused on competitions and account security", async () => {

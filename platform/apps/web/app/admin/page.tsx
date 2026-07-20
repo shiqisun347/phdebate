@@ -90,7 +90,7 @@ function persistAdminTab(tabId: AdminTab) {
 
 const emptyPagination: AdminPaginationState = {
   page: 1,
-  page_size: 100,
+  page_size: 50,
   total: 0,
   pages: 1,
 };
@@ -277,7 +277,7 @@ export default function AdminPage() {
     setUsersLoading(true);
     try {
       const data = await apiFetch<{ items: User[]; pagination: AdminPaginationState }>(
-        `/api/admin/users?page=${page}&page_size=100&q=${encodeURIComponent(q)}`,
+        `/api/admin/users?page=${page}&page_size=50&q=${encodeURIComponent(q)}`,
       );
       if (requestSequence !== usersRequestSequence.current) return;
       setUsers(data.items);
@@ -295,7 +295,7 @@ export default function AdminPage() {
     setRoomsLoading(true);
     try {
       const data = await apiFetch<{ items: AdminRoomSummary[]; pagination: AdminPaginationState }>(
-        `/api/admin/rooms?page=${page}&page_size=100&q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&data_scope=${encodeURIComponent(dataScope)}`,
+        `/api/admin/rooms?page=${page}&page_size=50&q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&data_scope=${encodeURIComponent(dataScope)}`,
       );
       if (requestSequence !== roomsRequestSequence.current) return;
       setRooms(data.items);
@@ -313,7 +313,7 @@ export default function AdminPage() {
     setAuditLoading(true);
     try {
       const data = await apiFetch<{ items: Audit[]; pagination: AdminPaginationState }>(
-        `/api/admin/audit?page=${page}&page_size=100&q=${encodeURIComponent(q)}`,
+        `/api/admin/audit?page=${page}&page_size=50&q=${encodeURIComponent(q)}`,
       );
       if (requestSequence !== auditRequestSequence.current) return;
       setAudit(data.items);
@@ -1049,7 +1049,7 @@ export default function AdminPage() {
     <div className="page-shell">
       <div className="section-head">
         <div>
-          <span className="eyebrow">System Administration</span>
+          <span className="eyebrow">系统管理</span>
           <h1>稷下辩论系统管理</h1>
           <p>全局设置、赛事配置、服务状态和审计中心，仅系统管理员可见。</p>
         </div>

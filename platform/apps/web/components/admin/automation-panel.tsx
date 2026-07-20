@@ -21,7 +21,7 @@ export default function AutomationPanel({ templates, saving, onVersion }: Automa
             {templates.map((item) => (
               <tr key={item.id}>
                 <td><strong>{item.name}</strong><small className="muted"> · {item.slug}</small></td>
-                <td>v{item.version}</td>
+                <td>第 {item.version} 版</td>
                 <td>{item.stages.length}</td>
                 <td>{item.competitions.map((competition) => competitionDisplayNameFromStoredName(competition.name)).join("、") || "历史版本"}</td>
                 <td>{new Date(item.created_at).toLocaleString("zh-CN")}</td>

@@ -179,7 +179,7 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
   return (
     <div className="dialog-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div ref={dialogRef} className="dialog participate-dialog" role="dialog" aria-modal="true" aria-labelledby="participate-title" aria-describedby="participate-description">
-        <div className="dialog-head"><div><span className="eyebrow">Create or join</span><h2 id="participate-title">{competitionDisplayName(detail)}</h2></div><button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭参赛窗口" onClick={onClose}><X /></button></div>
+        <div className="dialog-head"><div><span className="eyebrow">创建或加入比赛</span><h2 id="participate-title">{competitionDisplayName(detail)}</h2></div><button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭参赛窗口" onClick={onClose}><X /></button></div>
         <p id="participate-description" className="sr-only">创建新比赛房间，或输入六位房间号返回已有比赛。</p>
         <div className="choice-grid">
           <button type="button" aria-pressed={mode === "create"} disabled={busy || Boolean(creationBlockedReason)} className={`choice-card ${mode === "create" ? "active" : ""}`} onClick={() => setMode("create")}><Plus size={20} /><strong>{isPrimaryCompetition(detail) ? "创建 4v4 比赛" : "创建比赛"}</strong><small>{creationBlockedReason ? "当前赛季不可创建" : "选择席位并邀请队友"}</small></button>

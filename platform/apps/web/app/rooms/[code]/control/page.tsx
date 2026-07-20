@@ -129,6 +129,7 @@ export default function ControlPage() {
   const pendingRestoreRequests = (room.seat_restore_requests || []).filter((request) => request.status === "pending");
   const humanSpeaking = room.active_speech?.speaker_type === "human";
   const failurePaused = room.status === "paused" && Boolean(room.failure_reason);
+  const isTerminal = ["completed", "review_required", "terminated"].includes(room.status);
   const canPause = ["running", "judging"].includes(room.status) && !humanSpeaking;
   const canSkip = ["running", "paused", "judging"].includes(room.status) && !humanSpeaking;
   const canTerminate = ["preparing", "running", "paused", "judging"].includes(room.status);
@@ -198,11 +199,11 @@ export default function ControlPage() {
                 type="button"
                 className="button button-small button-danger"
                 aria-busy={busy === "abandon-owner-seat"}
-                disabled={Boolean(busy) || room.active_speech?.seat_key === ownerHumanSeat.seat_key}
+                disabled={isTerminal || Boolean(busy) || room.active_speech?.seat_key === ownerHumanSeat.seat_key}
                 onClick={() => void abandonOwnerSeat(ownerHumanSeat.display_name)}
               >
                 <LogOut size={15} />
-                {busy === "abandon-owner-seat" ? "正在交给 AI…" : room.active_speech?.seat_key === ownerHumanSeat.seat_key ? "本人发言结束后可退出" : "让 AI 接替我的席位"}
+                {isTerminal ? "比赛已结束" : busy === "abandon-owner-seat" ? "正在交给 AI…" : room.active_speech?.seat_key === ownerHumanSeat.seat_key ? "本人发言结束后可退出" : "让 AI 接替我的席位"}
               </button>
             </div>
           )}
@@ -215,10 +216,10 @@ export default function ControlPage() {
                     type="button"
                     className="button button-small button-secondary"
                     aria-busy={busy === `transfer-owner:${seat.seat_key}`}
-                    disabled={Boolean(busy)}
+                    disabled={isTerminal || Boolean(busy)}
                     onClick={() => void transferOwnership(seat.seat_key, seat.display_name, seat.label)}
                   >
-                    {busy === `transfer-owner:${seat.seat_key}` ? "正在移交…" : "移交房主"}
+                    {isTerminal ? "比赛已结束" : busy === `transfer-owner:${seat.seat_key}` ? "正在移交…" : "移交房主"}
                   </button>
                 </div>
               ))}

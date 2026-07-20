@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowRight, CalendarClock, Eye, Radio, ShieldCheck, Trophy, Users } from "lucide-react";
-import { KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ParticipateDialog } from "@/components/participate-dialog";
 import { LoadError } from "@/components/load-error";
 import { PageLoading } from "@/components/page-loading";
@@ -43,7 +43,7 @@ export default function CompetitionDetailPage() {
         setError(err instanceof Error ? err.message : "赛事详情载入失败");
     }
   }, [slug]);
-  useLayoutEffect(() => {
+  useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [slug]);
   useEffect(() => {
@@ -71,8 +71,8 @@ export default function CompetitionDetailPage() {
   return (
     <div className="page-shell">
       <section className="detail-hero">
-        <span className="eyebrow">Competition · {item.format}</span><h1>{competitionDisplayName(item)}</h1><p>{item.description}</p>
-        <div className="detail-meta"><span className="badge"><Users size={13} />{item.seat_count} 个席位</span><span className="badge"><Trophy size={13} />{item.ranked ? "计入赛季排行" : "训练模式"}</span>{item.ranked && <span className={`badge ${creationBlockedReason ? "closed" : "live"}`}><CalendarClock size={13} />{seasonStatusLabel(item.season)}</span>}<span className="badge live"><Radio size={12} />{item.live_count} 场可观战</span></div>
+        <span className="eyebrow">赛事详情 · {item.format}</span><h1>{competitionDisplayName(item)}</h1><p>{item.description}</p>
+        <div className="detail-meta"><span className="badge"><Users size={13} />{item.seat_count} 个席位</span><span className="badge"><Trophy size={13} />{item.ranked ? "计入赛季排行" : "训练模式"}</span>{item.ranked && <span className={`badge ${creationBlockedReason ? "closed" : "live"}`}><CalendarClock size={13} />{seasonStatusLabel(item.season)}</span>}<span className="badge live"><Radio size={12} />{item.live_count} 场可观战</span><span className="badge"><Eye size={13} />单场最多 20 人观战</span></div>
         {creationBlockedReason && <div className="warning-box" style={{ marginBottom: 16 }}>{creationBlockedReason} 你仍可搜索并进入已有房间。</div>}
         <button className="button" onClick={() => setJoin(true)}>{creationBlockedReason ? "搜索已有房间" : "立即参赛"}<ArrowRight size={17} /></button>
       </section>
@@ -82,7 +82,7 @@ export default function CompetitionDetailPage() {
         {tab === "intro" && <div className="dashboard-grid"><article className="panel"><div className="panel-title"><h2>关于赛事</h2><ShieldCheck color="#8c6cff" /></div><p className="hero-copy" style={{ fontSize: 15 }}>{item.description}</p><h3>比赛方式</h3><p className="muted">登录用户创建房间并认领人类席位，其他玩家通过六位房间号加入。房主开始比赛后，所有空席由 AI 自动填充，系统按预设流程播报和推进，无需主持人。</p></article><aside className="panel"><div className="panel-title"><h3>可选辩题</h3></div><div className="history-list">{item.topics?.length ? item.topics.map((topic,index) => <div className="history-row" key={topic.id}><span className="badge">{String(index+1).padStart(2,'0')}</span><span>{topic.title}</span></div>) : <div className="empty">{item.allow_custom_topic ? "训练赛支持自定义辩题" : "管理员尚未添加可用辩题"}</div>}</div></aside></div>}
         {tab === "ranking" && <div className="panel"><div className="panel-title"><h2>赛季排行榜</h2><Trophy color="#ffcc6d" /></div><div className="table-wrap"><table><thead><tr><th>排名</th><th>选手</th><th>积分</th><th>胜 / 平 / 负</th><th>平均分</th><th>场次</th></tr></thead><tbody>{data.leaderboard.map((row) => <tr key={row.user_id}><td>#{row.rank}</td><td><strong>{row.real_name}</strong></td><td>{row.points}</td><td>{row.wins} / {row.draws} / {row.losses}</td><td>{row.average_score}</td><td>{row.matches}</td></tr>)}</tbody></table>{!data.leaderboard.length && <div className="empty">排行榜等待首场有效比赛</div>}</div></div>}
         {tab === "live" && <div className="panel"><div className="panel-title"><h2>可观战的比赛</h2><Eye /></div><div className="live-list">{data.live_rooms.map((room) => <Link href={`/rooms/${room.code}/watch`} className="live-row" key={room.code}><span className="room-code">#{room.code}</span><span className="row-main"><strong>{room.topic}</strong><small>{roomStatusLabel[room.status]||room.status}</small></span><ArrowRight size={16} /></Link>)}{!data.live_rooms.length && <div className="empty">暂无可观战的公开比赛</div>}</div></div>}
-        {tab === "rules" && <article className="panel"><div className="panel-title"><h2>赛事规则</h2><ShieldCheck /></div><p className="hero-copy" style={{ whiteSpace: "pre-wrap", fontSize: 15 }}>{item.rules}</p><h3>通用约定</h3><ul className="muted" style={{ lineHeight: 2 }}><li>系统按固定阶段自动计时和切换。</li><li>只有当前轮次指定的人类辩手可以开启发言。</li><li>断线后保留席位 60 秒，超时由 AI 接替后续轮次。</li><li>禁止人身攻击、冒用身份和绕过客户端权限。</li></ul></article>}
+        {tab === "rules" && <article className="panel"><div className="panel-title"><h2>赛事规则</h2><ShieldCheck /></div><p className="hero-copy" style={{ whiteSpace: "pre-wrap", fontSize: 15 }}>{item.rules}</p><h3>通用约定</h3><ul className="muted" style={{ lineHeight: 2 }}><li>系统按固定阶段自动计时和切换。</li><li>只有当前轮次指定的人类辩手可以开启发言。</li><li>断线后保留席位 60 秒，超时由 AI 接替后续轮次。</li><li>每个房间最多允许 20 位观众同时在线；辩手、房主和管理员不占用观战名额。</li><li>禁止人身攻击、冒用身份和绕过客户端权限。</li></ul></article>}
         </div>
       </section>
       {join && <ParticipateDialog competition={item} onClose={() => setJoin(false)} />}

@@ -101,6 +101,7 @@ main:has(.dialog-overlay) { z-index: 120; }
 .panel-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .panel-title h2, .panel-title h3 { display:flex; align-items:center; gap:8px; margin:0; }
 .live-list, .ranking-list, .history-list { display: grid; gap: 9px; }
+.live-list > *, .ranking-list > *, .history-list > * { content-visibility:auto; contain-intrinsic-size:auto 64px; }
 .live-row, .ranking-row, .history-row { display: grid; align-items: center; gap: 12px; min-height: 58px; padding: 10px 12px; border-radius: 13px; background: rgba(255,255,255,.035); border: 1px solid transparent; }
 .live-row { grid-template-columns: 74px 1fr auto; }
 .live-row:hover, .history-row:hover { border-color: var(--line); background: rgba(255,255,255,.052); }
@@ -483,8 +484,8 @@ th { color: #838faa; font-weight: 600; }
   .brand small { display: none; }
   .brand strong { font-size: 14px; }
   .user-chip { max-width: 100px; overflow: hidden; }
-  .hero { padding-top: 34px; }
-  .hero h1 { font-size: 42px; }
+  .hero { padding:24px 0 42px; }
+  .hero h1 { font-size:clamp(34px,10vw,38px); line-height:1.1; }
   .hero-copy { font-size: 15px; }
   .hero-actions { flex-direction: column; }
   .competition-grid { gap: 12px; }

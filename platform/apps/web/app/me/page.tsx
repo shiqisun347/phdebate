@@ -246,7 +246,7 @@ export default function MePage() {
           {!data.history.length && (
             <div className="empty empty-guidance">
               <span>完成比赛后，逐字稿、结果与积分变化会保存在这里</span>
-              <Link className="button button-small button-secondary" href="/#competitions">参加第一场比赛</Link>
+              <Link className="button button-small button-secondary" href="/#competitions">{data.active_rooms.length ? "浏览更多赛事" : "参加第一场比赛"}</Link>
             </div>
           )}
         </div>

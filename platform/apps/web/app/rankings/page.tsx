@@ -90,7 +90,7 @@ export default function RankingsPage() {
     <div className="page-shell">
       <div className="section-head">
         <div>
-          <span className="eyebrow">Leaderboard</span>
+          <span className="eyebrow">赛季排行</span>
           <h1>赛季排行榜</h1>
           <p>每场胜负都成为你思辨成长的坐标。</p>
         </div>

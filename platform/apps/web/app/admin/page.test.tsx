@@ -264,7 +264,7 @@ describe("admin operations", () => {
     expect(screen.getByRole("button", { name: "修复缺失或损坏归档" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: /自动流程/ }));
-    expect(await screen.findByText("v2")).toBeInTheDocument();
+    expect(await screen.findByText("第 2 版")).toBeInTheDocument();
     const legacyTemplateRow = screen.getByText("旧系统只读流程").closest("tr");
     expect(legacyTemplateRow).toHaveTextContent("只读归档");
     expect(legacyTemplateRow?.querySelector("button")).toBeNull();
@@ -286,7 +286,7 @@ describe("admin operations", () => {
     expect(screen.getByText("测试服务连接")).toBeInTheDocument();
     expect(screen.getByText(/服务配置 · provider-1/)).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining("/api/admin/audit?page=1&page_size=100"),
+      expect.stringContaining("/api/admin/audit?page=1&page_size=50"),
       expect.any(Object),
     );
   }, 15_000);

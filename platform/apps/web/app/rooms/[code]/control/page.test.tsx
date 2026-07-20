@@ -267,4 +267,30 @@ describe("room control console", () => {
     ));
     expect(mocks.setRoom).toHaveBeenCalledOnce();
   });
+
+  it("disables seat abandonment and ownership transfer after the match is terminal", () => {
+    const ownerSeat = {
+      seat_key: "aff_1", side: "aff" as const, position: 1, label: "正方一辩",
+      occupant_type: "human" as const, display_name: "原房主", is_ready: true,
+      connected: true, is_me: true, is_owner: true,
+    };
+    const successorSeat = {
+      seat_key: "neg_1", side: "neg" as const, position: 1, label: "反方一辩",
+      occupant_type: "human" as const, display_name: "接任辩手", is_ready: true,
+      connected: true, is_me: false, is_owner: false,
+    };
+    mocks.room = {
+      ...runningRoom,
+      status: "terminated",
+      seats: [ownerSeat, successorSeat],
+    } as Room;
+
+    render(<ControlPage />);
+
+    expect(screen.getAllByRole("button", { name: "比赛已结束" })).toHaveLength(2);
+    for (const button of screen.getAllByRole("button", { name: "比赛已结束" })) {
+      expect(button).toBeDisabled();
+    }
+    expect(mocks.apiFetch).not.toHaveBeenCalled();
+  });
 });
