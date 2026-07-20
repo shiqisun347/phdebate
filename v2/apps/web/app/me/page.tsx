@@ -41,6 +41,7 @@ export default function MePage() {
   const [page, setPage] = useState(1);
   const [data, setData] = useState<MeData | null>(null);
   const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const [securityBusy, setSecurityBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState("");
   const restoreKeys = useRef<Record<string, string>>({});
@@ -50,6 +51,7 @@ export default function MePage() {
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
+    setRefreshing(true);
     setError("");
     try {
       const nextData = await apiFetch<MeData>(`/api/me?page=${page}&page_size=20`);
@@ -59,6 +61,8 @@ export default function MePage() {
       const message = err instanceof Error ? err.message : "个人记录载入失败";
       if (message.includes("登录") || message.includes("会话")) router.push("/login?next=/me");
       else setError(message);
+    } finally {
+      if (sequence === loadSequence.current) setRefreshing(false);
     }
   }, [page, router]);
 
@@ -161,9 +165,9 @@ export default function MePage() {
                   <ArrowRight size={17} />
                 </Link>
                 {!room.can_resume && (room.restore_request?.status === "pending" ? (
-                  <button type="button" className="button button-small button-secondary" disabled={restoreBusy === room.code} onClick={() => void cancelRestore(room.code, room.restore_request!.id)}>撤销恢复申请</button>
+                  <button type="button" className="button button-small button-secondary" aria-busy={restoreBusy === room.code} disabled={restoreBusy === room.code} onClick={() => void cancelRestore(room.code, room.restore_request!.id)}>{restoreBusy === room.code ? "正在撤销…" : "撤销恢复申请"}</button>
                 ) : (
-                  <button type="button" className="button button-small button-green" disabled={restoreBusy === room.code} onClick={() => void requestRestore(room.code)}>申请恢复真人席位</button>
+                  <button type="button" className="button button-small button-green" aria-busy={restoreBusy === room.code} disabled={restoreBusy === room.code} onClick={() => void requestRestore(room.code)}>{restoreBusy === room.code ? "正在提交…" : "申请恢复真人席位"}</button>
                 ))}
               </div>
             ))}
@@ -193,9 +197,9 @@ export default function MePage() {
       <section className="panel" style={{ marginTop: 18 }}>
         <div className="panel-title">
           <h2><History size={19} />历史比赛</h2>
-          <span className="badge">第 {data.pagination.page} / {data.pagination.pages} 页</span>
+          <span className="badge" role="status" aria-live="polite">{refreshing ? "正在更新…" : `第 ${data.pagination.page} / ${data.pagination.pages} 页`}</span>
         </div>
-        <div className="match-history">
+        <div className="match-history" aria-busy={refreshing}>
           <div className="match-history-head" aria-hidden="true">
             <span>房间</span><span>辩题</span><span>状态</span><span>结果</span><span>操作</span>
           </div>
@@ -232,7 +236,7 @@ export default function MePage() {
 
       <section className="panel" style={{ marginTop: 18 }}>
         <div className="panel-title"><h2><ShieldCheck size={19} />账号安全</h2><span className="muted">修改密码后会自动退出其他设备</span></div>
-        {securityFeedback && <div className={securityFeedback.kind === "error" ? "error-box" : "notice-box"} role="status">{securityFeedback.message}</div>}
+        {securityFeedback && <div className={securityFeedback.kind === "error" ? "error-box" : "notice-box"} role={securityFeedback.kind === "error" ? "alert" : "status"}>{securityFeedback.message}</div>}
         <div className="dashboard-grid">
           <form onSubmit={changePassword}>
             <div className="field"><label htmlFor="current-password">当前密码</label><input id="current-password" className="input" type="password" autoComplete="current-password" minLength={8} maxLength={128} required value={passwordForm.current_password} onChange={(event) => setPasswordForm((value) => ({ ...value, current_password: event.target.value }))} /></div>

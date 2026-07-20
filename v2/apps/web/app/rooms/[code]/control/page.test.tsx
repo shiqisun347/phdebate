@@ -94,6 +94,35 @@ describe("room control console", () => {
     expect(accessibility.violations).toEqual([]);
   });
 
+  it("explains the read-only transition instead of flashing controls to a non-owner", async () => {
+    mocks.room = { ...runningRoom, can_control: false } as Room;
+
+    render(<ControlPage />);
+
+    expect(screen.getByText("你没有本房间控制权限，正在切换到只读观战…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "应急控制" })).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith("/rooms/123456/watch?notice=no-control"));
+  });
+
+  it("does not skip or pause a stage while a human is still speaking", () => {
+    mocks.room = {
+      ...runningRoom,
+      active_speech: {
+        id: "speech-human",
+        seat_key: "aff_1",
+        speaker_type: "human",
+        status: "speaking",
+        content: "尚未结束的真人发言",
+      },
+    } as Room;
+
+    render(<ControlPage />);
+
+    expect(screen.getByRole("button", { name: "真人发言中" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "真人发言中，不可跳过" })).toBeDisabled();
+    expect(mocks.apiFetch).not.toHaveBeenCalled();
+  });
+
   it("lets the room owner approve an explicit restoration request after speech ends", async () => {
     const substitutedSeat = {
       seat_key: "aff_1",
@@ -114,7 +143,7 @@ describe("room control console", () => {
       seat_restore_requests: [{
         id: "request-1", seat_key: "aff_1", seat_label: "正方一辩",
         requester: { id: "student", real_name: "张三" }, status: "pending",
-        requester_connected: false,
+        requester_connected: true,
         resolution_reason: "", created_at: "2026-07-19T08:00:00Z", resolved_at: null,
         can_cancel: false, can_review: true,
       }],
@@ -127,6 +156,37 @@ describe("room control console", () => {
       expect.objectContaining({ method: "POST" }),
     ));
     expect(mocks.setRoom).toHaveBeenCalledOnce();
+  });
+
+  it("does not approve a seat restoration until the returning debater is connected", () => {
+    const substitutedSeat = {
+      seat_key: "aff_1",
+      side: "aff" as const,
+      position: 1,
+      label: "正方一辩",
+      occupant_type: "ai_substitute" as const,
+      display_name: "AI 接替·张三",
+      is_ready: true,
+      connected: false,
+      is_me: false,
+    };
+    mocks.room = {
+      ...runningRoom,
+      seats: [substitutedSeat],
+      seat_restore_requests: [{
+        id: "request-offline", seat_key: "aff_1", seat_label: "正方一辩",
+        requester: { id: "student", real_name: "张三" }, status: "pending",
+        requester_connected: false,
+        resolution_reason: "", created_at: "2026-07-19T08:00:00Z", resolved_at: null,
+        can_cancel: false, can_review: true,
+      }],
+    };
+
+    render(<ControlPage />);
+
+    expect(screen.getByRole("button", { name: "等待辩手连接" })).toBeDisabled();
+    expect(screen.getByText(/尚未打开比赛页/)).toBeInTheDocument();
+    expect(mocks.apiFetch).not.toHaveBeenCalled();
   });
 
   it("safely transfers room recovery control to a connected human participant", async () => {

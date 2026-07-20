@@ -27,7 +27,7 @@ export default function ControlPage() {
   );
 
   useEffect(() => {
-    if (room && !room.can_control) router.replace(`/rooms/${code}/watch`);
+    if (room && !room.can_control) router.replace(`/rooms/${code}/watch?notice=no-control`);
   }, [room, code, router]);
 
   async function control(action: string) {
@@ -117,6 +117,7 @@ export default function ControlPage() {
 
   if (!room && roomError) return <LoadError message={roomError} retry={reconnect} />;
   if (!room) return <div className="loading-screen">正在载入比赛控制台…</div>;
+  if (!room.can_control) return <div className="loading-screen">你没有本房间控制权限，正在切换到只读观战…</div>;
 
   const substitutes = room.seats.filter((seat) => seat.occupant_type === "ai_substitute");
   const connectedHumanSuccessors = room.seats.filter(
@@ -129,7 +130,7 @@ export default function ControlPage() {
   const humanSpeaking = room.active_speech?.speaker_type === "human";
   const failurePaused = room.status === "paused" && Boolean(room.failure_reason);
   const canPause = ["running", "judging"].includes(room.status) && !humanSpeaking;
-  const canSkip = ["running", "paused", "judging"].includes(room.status);
+  const canSkip = ["running", "paused", "judging"].includes(room.status) && !humanSpeaking;
   const canTerminate = ["preparing", "running", "paused", "judging"].includes(room.status);
 
   return (
@@ -162,6 +163,12 @@ export default function ControlPage() {
                 <div><strong>{matchEventLabel(event.type)}</strong><small>{matchEventDetail(event)} · {new Date(event.created_at).toLocaleTimeString("zh-CN")}</small></div>
               </div>
             ))}
+            {!room.recent_events.length && (
+              <div className="empty empty-guidance">
+                <strong>比赛事件尚未产生</strong>
+                <span>开赛后，阶段推进、发言和异常恢复记录会实时显示在这里。</span>
+              </div>
+            )}
           </div>
         </section>
 
@@ -175,7 +182,7 @@ export default function ControlPage() {
             ) : (
               <button className="button button-secondary" aria-busy={busy === "pause"} disabled={Boolean(busy) || !canPause} onClick={() => control("pause")}><Pause />{busy === "pause" ? "正在暂停…" : humanSpeaking?"真人发言中":"暂停比赛"}</button>
             )}
-            <button className="button button-secondary" aria-busy={busy === "skip"} disabled={Boolean(busy) || !canSkip} onClick={() => control("skip")}><SkipForward />{busy === "skip" ? "正在跳过…" : "跳过当前阶段"}</button>
+            <button className="button button-secondary" aria-busy={busy === "skip"} disabled={Boolean(busy) || !canSkip} onClick={() => control("skip")}><SkipForward />{busy === "skip" ? "正在跳过…" : humanSpeaking ? "真人发言中，不可跳过" : "跳过当前阶段"}</button>
             <button className="button button-danger" aria-busy={busy === "terminate"} disabled={Boolean(busy) || !canTerminate} onClick={() => confirm("确定终止本场比赛？") && control("terminate")}><Square />{busy === "terminate" ? "正在终止…" : "终止比赛"}</button>
             {error && <div className="error-box" role="alert">{error}</div>}
             {notice && <div className="notice-box" role="status">{notice}</div>}
@@ -226,7 +233,14 @@ export default function ControlPage() {
                 <div className="substitute-row" key={request.id}>
                   <span><UserRoundCheck size={15} /><strong>{request.requester.real_name}</strong><small>{request.seat_label} · {request.requester_connected ? "已连接比赛" : "尚未打开比赛页"} · {new Date(request.created_at).toLocaleTimeString("zh-CN")} 申请</small></span>
                   <span className="restore-review-actions">
-                    <button className="button button-small button-green" disabled={Boolean(busy) || Boolean(room.active_speech)} onClick={() => void reviewRestore(request.id, true)}><Check size={15} />{room.active_speech ? "发言结束后审批" : "批准"}</button>
+                    <button
+                      className="button button-small button-green"
+                      disabled={Boolean(busy) || Boolean(room.active_speech) || !request.requester_connected}
+                      onClick={() => void reviewRestore(request.id, true)}
+                    >
+                      <Check size={15} />
+                      {!request.requester_connected ? "等待辩手连接" : room.active_speech ? "发言结束后审批" : "批准"}
+                    </button>
                     <button className="button button-small button-secondary" disabled={Boolean(busy)} onClick={() => void reviewRestore(request.id, false)}><X size={15} />暂不批准</button>
                   </span>
                 </div>

@@ -57,8 +57,21 @@ export function RoomsPanel({
           <option value="">全部数据</option><option value="production">正式数据</option><option value="qa">QA 测试数据</option>
         </select>
         <button className="button button-small" disabled={loading}>{loading ? "筛选中…" : "筛选"}</button>
+        <button
+          type="button"
+          className="button button-small button-secondary"
+          disabled={loading || (!query && !status && !dataScope)}
+          onClick={() => {
+            onQueryChange("");
+            onStatusChange("");
+            onDataScopeChange("");
+            onLoad(1, "", "", "");
+          }}
+        >
+          清除筛选
+        </button>
       </form>
-      <div className="table-wrap" role="region" aria-label="比赛监管表格" tabIndex={0}>
+      <div className="table-wrap" role="region" aria-label="比赛监管表格" aria-busy={loading} tabIndex={0}>
         <table>
           <thead><tr><th>房间</th><th>辩题</th><th>赛事</th><th>数据类型</th><th>状态</th><th>阶段</th><th>操作</th></tr></thead>
           <tbody>
@@ -68,8 +81,8 @@ export function RoomsPanel({
                 <td>{room.is_test_data ? <span className="badge closed">QA 测试</span> : "正式数据"}</td>
                 <td>{roomStatusLabel[room.status] || room.status}</td><td>{room.current_stage?.name || "大厅"}</td>
                 <td>
-                  <Link href={`/rooms/${room.code}/control`}>控制</Link> · <Link href={`/rooms/${room.code}/watch`}>观战</Link>
-                  {!room.is_test_data && <> · <button className="text-button" disabled={saving} onClick={() => onMarkAsTestData(room)}>标记 QA</button></>}
+                  <Link aria-label={`控制房间 ${room.code}`} href={`/rooms/${room.code}/control`}>控制</Link> · <Link aria-label={`观战房间 ${room.code}`} href={`/rooms/${room.code}/watch`}>观战</Link>
+                  {!room.is_test_data && <> · <button type="button" aria-label={`将房间 ${room.code} 标记为 QA`} className="text-button" disabled={saving} onClick={() => onMarkAsTestData(room)}>标记 QA</button></>}
                 </td>
               </tr>
             ))}

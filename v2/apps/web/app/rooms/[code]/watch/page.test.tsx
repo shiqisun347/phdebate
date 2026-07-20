@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import WatchPage from "@/app/rooms/[code]/watch/page";
@@ -27,6 +27,7 @@ describe("watch result redirect", () => {
   beforeEach(() => {
     mocks.push.mockReset();
     mocks.replace.mockReset();
+    window.history.replaceState({}, "", "/rooms/123456/watch");
   });
 
   it.each(["completed", "review_required", "terminated"])("redirects a %s match to its result", async (status) => {
@@ -39,6 +40,17 @@ describe("watch result redirect", () => {
     mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
     render(<WatchPage />);
     expect(mocks.push).not.toHaveBeenCalled();
+  });
+
+  it("tells a redirected non-owner why the control console became read-only", async () => {
+    window.history.replaceState({}, "", "/rooms/123456/watch?notice=no-control");
+    mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
+    render(<WatchPage />);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("只有房主或系统管理员可以进入本房间控制台");
+    fireEvent.click(screen.getByRole("button", { name: "知道了" }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(window.location.search).toBe("");
   });
 
   it("applies free-debate seat semantics on the public watch page", () => {

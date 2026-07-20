@@ -1201,7 +1201,7 @@ def test_websocket_rejects_cross_site_browser_origins(client: TestClient, regist
             socket.receive_json()
     assert rejected.value.code == 4403
 
-    with client.websocket_connect(f"/ws/rooms/{code}", headers={"Origin": "http://localhost:3200"}) as socket:
+    with owner.websocket_connect(f"/ws/rooms/{code}", headers={"Origin": "http://localhost:3200"}) as socket:
         assert socket.receive_json()["room"]["code"] == code
 
     with pytest.raises(WebSocketDisconnect) as asr_rejected:
@@ -1223,6 +1223,7 @@ def test_audio_websocket_streams_fixed_pcm_frames_with_generation_seq_and_pts(cl
     speech_id = str(uuid.uuid4())
     with SessionLocal() as db:
         room = load_room(db, code)
+        room.status = "running"
         match = db.scalar(select(Match).where(Match.room_id == room.id))
         if match is None:
             match = Match(
@@ -1340,6 +1341,12 @@ def test_audio_websocket_streams_fixed_pcm_frames_with_generation_seq_and_pts(cl
             first_packet["bytes"][: realtime_api.AUDIO_STREAM_BINARY_HEADER.size]
         )
         assert (seq, pts, samples) == (0, 0, 960)
+    with SessionLocal() as db:
+        stored_room = load_room(db, code, lock=True)
+        stored_speech = db.get(Speech, speech_id)
+        stored_room.status = "terminated"
+        stored_speech.status = "completed"
+        db.commit()
 
 
 def test_audio_websocket_flow_control_bounds_initial_burst(client: TestClient, register_user) -> None:
@@ -1505,6 +1512,7 @@ def test_anonymous_audio_stream_is_revoked_when_a_public_room_becomes_private(cl
     speech_id = str(uuid.uuid4())
     with SessionLocal() as db:
         room = load_room(db, code)
+        room.status = "running"
         match = db.scalar(select(Match).where(Match.room_id == room.id))
         if match is None:
             match = Match(room_id=room.id, competition_id=room.competition_id, season_id=room.season_id, status="running")
@@ -1552,6 +1560,12 @@ def test_anonymous_audio_stream_is_revoked_when_a_public_room_becomes_private(cl
                 db.commit()
             socket.receive_json()
     assert revoked.value.code == 4403
+    with SessionLocal() as db:
+        stored_room = load_room(db, code, lock=True)
+        stored_speech = db.get(Speech, speech_id)
+        stored_room.status = "terminated"
+        stored_speech.status = "interrupted"
+        db.commit()
 
 
 @pytest.mark.asyncio
@@ -1690,6 +1704,10 @@ async def test_anonymous_room_websocket_catches_event_committed_during_initial_s
     owner = register_user("websocket_initial_gap")
     room_data = create_training_room(owner, "初始订阅交接前的辩题")
     code = room_data["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.status = "running"
+        db.commit()
     second_snapshot_sent = asyncio.Event()
 
     class CommitAfterInitialSnapshot:
@@ -2241,6 +2259,11 @@ async def test_anonymous_public_snapshot_cache_coalesces_and_invalidates(registe
     owner_b = register_user("snapshot_b")
     room_a = create_training_room(owner_a, "公开快照缓存 A")
     room_b = create_training_room(owner_b, "公开快照缓存 B")
+    with SessionLocal() as db:
+        for code in (room_a["code"], room_b["code"]):
+            stored = load_room(db, code, lock=True)
+            stored.status = "running"
+        db.commit()
 
     snapshots = await asyncio.gather(*(public_snapshot_cache.get(room_a["code"]) for _ in range(40)))
     assert all(item and item["code"] == room_a["code"] for item in snapshots)
@@ -2306,6 +2329,10 @@ def test_presence_event_invalidates_anonymous_snapshot_cache(register_user, clie
     owner = register_user("presence_broadcast")
     room = create_training_room(owner, "在线状态广播缓存失效测试")
     code = room["code"]
+    with SessionLocal() as db:
+        stored = load_room(db, code, lock=True)
+        stored.status = "running"
+        db.commit()
 
     with client.websocket_connect(f"/ws/rooms/{code}") as watcher:
         initial = watcher.receive_json()["room"]
@@ -2321,6 +2348,10 @@ def test_anonymous_room_websocket_strips_hub_diagnostics(register_user, client: 
     public_snapshot_cache.clear()
     owner = register_user("anonymous_ws_redaction")
     room = create_training_room(owner, "匿名 WebSocket 只发送观战必需字段")
+    with SessionLocal() as db:
+        stored = load_room(db, room["code"], lock=True)
+        stored.status = "running"
+        db.commit()
 
     async def diagnostic_stream(_code: str, **_kwargs):
         yield {
@@ -2818,6 +2849,7 @@ async def test_admin_audio_cue_is_reused_by_new_rooms_and_can_fall_back_to_light
         await match_engine.process_room(code)
         with SessionLocal() as db:
             room = load_room(db, code)
+            room.status = "running"
             match = db.scalar(select(Match).where(Match.room_id == room.id))
             asset = db.scalar(select(AudioAsset).where(AudioAsset.match_id == match.id, AudioAsset.kind == "cue:opening_preset_test"))
             event = db.scalar(
@@ -2958,6 +2990,7 @@ def test_admin_judge_profiles_are_single_active_versioned_and_frozen_per_match(c
         assert owner.post(f"/api/rooms/{code}/start", headers=csrf(owner), json={}).status_code == 200
         with SessionLocal() as db:
             room = load_room(db, code)
+            room.status = "running"
             match = db.scalar(select(Match).where(Match.room_id == room.id))
             assert match.judge_profile_id == second["id"]
             assert match.judge_snapshot == {
@@ -4449,6 +4482,11 @@ def test_admin_reclassifying_completed_room_rebuilds_leaderboard(client: TestCli
                 LeaderboardEntry.user_id == owner_id,
             )
         )
+        match_id = match.id
+
+    archive_before = owner.get(f"/api/matches/{match_id}/archive")
+    assert archive_before.status_code == 200
+    assert archive_before.json()["data"]["room"]["is_test_data"] is False
 
     admin = TestClient(client.app)
     with admin:
@@ -4466,6 +4504,11 @@ def test_admin_reclassifying_completed_room_rebuilds_leaderboard(client: TestCli
             json={"is_test_data": False},
         )
         assert rejected_restore.status_code == 409
+
+    archive_after = owner.get(f"/api/matches/{match_id}/archive")
+    assert archive_after.status_code == 200
+    assert archive_after.headers["x-archive-source-sha256"] != archive_before.headers["x-archive-source-sha256"]
+    assert archive_after.json()["data"]["room"]["is_test_data"] is True
 
     with SessionLocal() as db:
         room = load_room(db, code)

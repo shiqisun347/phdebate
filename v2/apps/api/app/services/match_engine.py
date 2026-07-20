@@ -1845,14 +1845,39 @@ class MatchEngine:
             ).all()
         }
         for index, seat in enumerate(room.seats):
-            if seat.occupant_type != "human" or seat.connected or not seat.disconnected_at:
+            if seat.occupant_type != "human" or not seat.user_id:
                 continue
+            participant = db.get(User, seat.user_id)
+            account_disabled = participant is None or not participant.is_active
+            if seat.connected and not account_disabled:
+                continue
+            if account_disabled and seat.connected:
+                seat.connected = False
+                seat.disconnected_at = now()
+                append_event(
+                    db,
+                    room,
+                    "presence.disconnected",
+                    {"seat_key": seat.seat_key, "reason": "account_disabled"},
+                    actor_user_id=seat.user_id,
+                )
+                changed = True
+            if not seat.disconnected_at:
+                if not account_disabled:
+                    continue
+                seat.disconnected_at = now()
             disconnected_at = seat.disconnected_at
             if disconnected_at.tzinfo is None:
                 disconnected_at = disconnected_at.replace(tzinfo=timezone.utc)
             elapsed = (now() - disconnected_at).total_seconds()
-            if room.status == "lobby" and elapsed >= 120:
-                self._transfer_disconnected_owner(db, room, seat)
+            expiry_reason = "account_disabled" if account_disabled else "presence_expired"
+            if room.status == "lobby" and (account_disabled or elapsed >= 120):
+                self._transfer_disconnected_owner(
+                    db,
+                    room,
+                    seat,
+                    reason="owner_account_disabled" if account_disabled else "owner_presence_expired",
+                )
                 old_name = seat.display_name
                 seat.occupant_type = "open"
                 seat.user_id = None
@@ -1861,17 +1886,32 @@ class MatchEngine:
                 seat.disconnected_at = None
                 seat.control_lease = ""
                 seat.control_session_id = None
-                append_event(db, room, "seat.expired", {"seat_key": seat.seat_key, "real_name": old_name})
+                append_event(
+                    db,
+                    room,
+                    "seat.expired",
+                    {"seat_key": seat.seat_key, "real_name": old_name, "reason": expiry_reason},
+                )
                 changed = True
-            elif room.status in {"preparing", "running", "paused", "judging"} and elapsed >= 60:
-                self._transfer_disconnected_owner(db, room, seat)
+            elif room.status in {"preparing", "running", "paused", "judging"} and (account_disabled or elapsed >= 60):
+                self._transfer_disconnected_owner(
+                    db,
+                    room,
+                    seat,
+                    reason="owner_account_disabled" if account_disabled else "owner_presence_expired",
+                )
                 profile = profiles[index % len(profiles)] if profiles else None
                 seat.occupant_type = "ai_substitute"
                 seat.agent_profile_id = profile.id if profile else None
                 seat.display_name = f"AI 接替·{seat.display_name}"
                 seat.control_lease = ""
                 seat.control_session_id = None
-                append_event(db, room, "seat.ai_substituted", {"seat_key": seat.seat_key, "user_id": seat.user_id})
+                append_event(
+                    db,
+                    room,
+                    "seat.ai_substituted",
+                    {"seat_key": seat.seat_key, "user_id": seat.user_id, "reason": expiry_reason},
+                )
                 abandoned_speech = active_human_speeches.get(seat.seat_key)
                 if abandoned_speech:
                     abandoned_speech.status = "interrupted"
@@ -1882,7 +1922,7 @@ class MatchEngine:
                         {
                             "speech_id": abandoned_speech.id,
                             "seat_key": seat.seat_key,
-                            "reason": "presence_expired",
+                            "reason": expiry_reason,
                         },
                     )
                 changed = True
@@ -1895,7 +1935,13 @@ class MatchEngine:
         return changed
 
     @staticmethod
-    def _transfer_disconnected_owner(db: Session, room: Room, expiring_seat: RoomSeat) -> bool:
+    def _transfer_disconnected_owner(
+        db: Session,
+        room: Room,
+        expiring_seat: RoomSeat,
+        *,
+        reason: str,
+    ) -> bool:
         """Keep repair controls with a connected human when the owner leaves."""
 
         if expiring_seat.user_id != room.owner_id:
@@ -1907,9 +1953,12 @@ class MatchEngine:
                 if seat.id != expiring_seat.id
                 and seat.occupant_type == "human"
                 and seat.user_id
-                and seat.connected
             ),
-            key=lambda seat: (seat.position, seat.seat_key),
+            # An online participant can repair the room immediately.  If all
+            # remaining humans are temporarily offline, still bind ownership
+            # to an active account so the first returning participant is not
+            # stranded behind a disabled owner forever.
+            key=lambda seat: (not seat.connected, seat.position, seat.seat_key),
         )
         for successor in candidates:
             participant = db.get(User, successor.user_id)
@@ -1918,7 +1967,7 @@ class MatchEngine:
                     db,
                     room,
                     successor,
-                    reason="owner_presence_expired",
+                    reason=reason,
                     idempotency_key=f"{room.id}:owner-transfer:{expiring_seat.user_id}",
                 )
         return False

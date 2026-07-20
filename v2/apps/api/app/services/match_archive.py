@@ -170,6 +170,7 @@ def _archive_source(db: Session, match_id: str) -> dict[str, Any]:
             "topic": room.topic,
             "status": room.status,
             "visibility": room.visibility,
+            "is_test_data": room.is_test_data,
             "template_snapshot": room.template_snapshot,
             "started_at": _iso(room.started_at),
             "completed_at": _iso(room.completed_at),

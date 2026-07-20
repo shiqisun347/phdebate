@@ -1342,6 +1342,12 @@ async def finish_speech(
             if previous.payload.get("speech_id") != payload.speech_id or previous.payload.get("content", "") != normalized_content:
                 raise HTTPException(status_code=409, detail="同一个幂等键不能用于不同的发言内容。")
             return {"room": serialize_room(db, room, user), "speech_id": previous.payload.get("speech_id"), "replayed": True}
+    if room.status in {"terminated", "cancelled"}:
+        # A timed-out speech may still be finalized after its stage advances,
+        # but explicit termination is the immutable audit boundary.  Accepting
+        # a late transcript here would mutate history after the archive job was
+        # already enqueued and make result views disagree with the archive.
+        raise HTTPException(status_code=409, detail="比赛已经终止或取消，不能再提交发言。")
     if not control_lease or not seat.control_lease or control_lease != seat.control_lease:
         raise HTTPException(status_code=409, detail="该席位已在其他设备上接管。")
     match = db.scalar(select(Match).where(Match.room_id == room.id))

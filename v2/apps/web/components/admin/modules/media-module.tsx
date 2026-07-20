@@ -1,4 +1,4 @@
-import { RefreshCw, Trash2 } from "lucide-react";
+import { Download, RefreshCw, Trash2 } from "lucide-react";
 
 import { bytes, type ArchiveStatus, type MediaStatus } from "@/components/admin/admin-module-types";
 
@@ -51,6 +51,7 @@ export default function MediaModule({ media, archives, saving, onRefreshMedia, o
           </div>
           <div className="hero-actions" style={{ marginTop: 18 }}>
             <button className="button button-secondary" disabled={saving} onClick={onRefreshArchives}><RefreshCw size={16} />盘点比赛归档</button>
+            <a className="button button-secondary" href="/api/admin/archive-index.csv"><Download size={16} />下载正式比赛索引</a>
             <button className="button" disabled={saving || archives.invalid_archive_count === 0 || archives.truncated} onClick={onRepairArchives}><RefreshCw size={16} />修复缺失或损坏归档</button>
             <button className="button button-danger" disabled={saving || archives.orphan_candidate_count === 0 || archives.truncated} onClick={onCleanupArchives}><Trash2 size={16} />清理孤儿归档</button>
           </div>

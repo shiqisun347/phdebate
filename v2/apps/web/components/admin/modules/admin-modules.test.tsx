@@ -40,6 +40,38 @@ describe("admin lazy modules", () => {
     expect(screen.getByRole("button", { name: "清理 24 小时以上孤儿" })).toBeDisabled();
   });
 
+  it("offers an admin-only production archive index without mixing it into destructive actions", () => {
+    render(
+      <MediaModule
+        media={null}
+        archives={{
+          scanned_files: 3,
+          scanned_bytes: 2048,
+          expected_matches: 1,
+          complete_archives: 1,
+          invalid_archive_count: 0,
+          invalid_archives: [],
+          orphan_candidate_count: 0,
+          orphan_candidate_bytes: 0,
+          orphan_candidates: [],
+          unsafe_entries: 0,
+          unmanaged_entries: 0,
+          truncated: false,
+          deleted_files: 0,
+          deleted_bytes: 0,
+        }}
+        saving={false}
+        onRefreshMedia={vi.fn()}
+        onCleanupMedia={vi.fn()}
+        onRefreshArchives={vi.fn()}
+        onRepairArchives={vi.fn()}
+        onCleanupArchives={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "下载正式比赛索引" })).toHaveAttribute("href", "/api/admin/archive-index.csv");
+  });
+
   it("forwards the current audit query and page without losing keyboard semantics", () => {
     const onLoad = vi.fn();
     render(

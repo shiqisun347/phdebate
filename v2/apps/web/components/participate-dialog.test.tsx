@@ -49,12 +49,33 @@ describe("participation dialog", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ competition: training })));
     render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
     const topic = await screen.findByLabelText("自定义辩题（可选）");
+    fireEvent.click(screen.getByRole("radio", { name: "正方1辩" }));
     fireEvent.change(topic, { target: { value: "太短" } });
     expect(screen.getByText("自定义辩题至少需要 4 个字符。")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /创建比赛/ }).at(-1)).toBeDisabled();
     fireEvent.change(topic, { target: { value: "  人工智能 是否提升创造力  " } });
     expect(screen.getByText("12/300")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /创建比赛/ }).at(-1)).toBeEnabled();
+  });
+
+  it("requires an explicit seat choice and exposes the selection as a radio group", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ competition: training })));
+    render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
+    await screen.findByLabelText("自定义辩题（可选）");
+
+    const group = screen.getByRole("group", { name: "选择你的人类辩手席位" });
+    const affirmative = screen.getByRole("radio", { name: "正方1辩" });
+    const negative = screen.getByRole("radio", { name: "反方1辩" });
+    expect(group).toContainElement(affirmative);
+    expect(affirmative).not.toBeChecked();
+    expect(negative).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "请先选择席位" })).toBeDisabled();
+
+    fireEvent.click(negative);
+    expect(negative).toBeChecked();
+    expect(affirmative).not.toBeChecked();
+    expect(screen.getByRole("status")).toHaveTextContent("你将作为：反方1辩");
+    expect(screen.getByRole("button", { name: "创建比赛" })).toBeEnabled();
   });
 
   it("lets a participant choose any managed topic and sends one unambiguous topic source", async () => {
@@ -73,6 +94,7 @@ describe("participation dialog", () => {
 
     const managedTopic = await screen.findByLabelText("题库辩题");
     fireEvent.change(managedTopic, { target: { value: "topic-2" } });
+    fireEvent.click(screen.getByRole("radio", { name: "正方1辩" }));
     fireEvent.click(screen.getAllByRole("button", { name: "创建比赛" }).at(-1)!);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
@@ -92,6 +114,7 @@ describe("participation dialog", () => {
     });
     expect(screen.getByLabelText("题库辩题")).toBeDisabled();
     expect(screen.getByText("已填写自定义辩题，本场将优先使用自定义内容。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "正方1辩" }));
     fireEvent.click(screen.getAllByRole("button", { name: "创建比赛" }).at(-1)!);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));

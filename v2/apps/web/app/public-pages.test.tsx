@@ -8,6 +8,7 @@ import RankingsPage from "@/app/rankings/page";
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ slug: "daily-4v4" }),
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
 function response(body: unknown, status = 200): Response {

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import csv
 import io
+import json
 import re
 import time
 import wave
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import delete, func, or_, select
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -54,7 +56,7 @@ from app.schemas.requests import (
     TopicCreate,
     TopicPatch,
 )
-from app.services.archive_storage import inspect_archives
+from app.services.archive_storage import FINAL_MATCH_STATUSES, inspect_archives, inspect_match_archive
 from app.services.health import provider_health
 from app.services.match_archive import build_match_archive, enqueue_match_archive
 from app.services.match_engine import match_engine
@@ -125,6 +127,12 @@ def serialize_judge_profile(item: JudgeProfile) -> dict:
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
     }
+
+
+def safe_csv_text(value: str | None) -> str:
+    """Prevent user-controlled cells from becoming spreadsheet formulas."""
+    text = value or ""
+    return f"'{text}" if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
 
 
 def verify_review_revision(scorecard: JudgeScorecard, expected_updated_at) -> None:
@@ -238,6 +246,7 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(veri
     old_is_active = user.is_active
     old_role = user.role
     old_is_test_account = user.is_test_account
+    archive_match_ids: set[str] = set()
     if payload.is_active is not None:
         user.is_active = payload.is_active
     if payload.role is not None:
@@ -265,6 +274,9 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(veri
                 if test_room.is_test_data:
                     continue
                 test_room.is_test_data = True
+                match_id = db.scalar(select(Match.id).where(Match.room_id == test_room.id))
+                if match_id:
+                    archive_match_ids.add(match_id)
                 affected = {seat.user_id for seat in test_room.seats if seat.user_id}
                 rebuild_scopes.setdefault((test_room.competition_id, test_room.season_id), set()).update(affected)
             for (competition_id, season_id), affected_user_ids in rebuild_scopes.items():
@@ -284,12 +296,15 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(veri
     audit_payload = payload.model_dump(exclude_none=True)
     if payload.is_test_account:
         audit_payload["rooms_classified_as_test"] = audit_payload_room_count
+        audit_payload["archives_refresh_queued"] = len(archive_match_ids)
     if payload.is_test_account is not None and payload.is_test_account != old_is_test_account:
         audit_payload["ranking_visibility"] = "excluded" if payload.is_test_account else "included_for_future_matches"
     if revoked_sessions:
         audit_payload["revoked_sessions"] = revoked_sessions
     audit(db, admin, "user.patch", "user", user.id, audit_payload)
     db.commit()
+    for match_id in archive_match_ids:
+        enqueue_match_archive(match_id)
     return {"user": serialize_user(user)}
 
 
@@ -308,6 +323,7 @@ async def patch_room_data_scope(
     if not payload.is_test_data and room.status not in {"lobby", "cancelled"}:
         raise HTTPException(status_code=409, detail="比赛开始后不能恢复为正式数据，避免改写历史统计。")
     affected_user_ids = {seat.user_id for seat in room.seats if seat.user_id}
+    archive_match_id = db.scalar(select(Match.id).where(Match.room_id == room.id))
     room.is_test_data = payload.is_test_data
     if payload.is_test_data:
         rebuild_leaderboard_entries(
@@ -325,6 +341,8 @@ async def patch_room_data_scope(
         {"room_code": room.code, "is_test_data": room.is_test_data, "affected_users": len(affected_user_ids)},
     )
     db.commit()
+    if archive_match_id:
+        enqueue_match_archive(archive_match_id)
     await room_hub.publish(room.code, {"type": "room.data_scope.updated", "room_code": room.code, "seq": room.seq})
     return {"room": serialize_room(db, load_room(db, code), admin), "replayed": False}
 
@@ -1093,6 +1111,126 @@ def cleanup_media(
 @router.get("/archives")
 def archive_status(admin: User = Depends(system_admin), db: Session = Depends(get_db)) -> dict:
     return {"archives": inspect_archives(db)}
+
+
+@router.get("/archive-index.csv")
+def download_archive_index(
+    competition_id: str | None = Query(default=None),
+    season_id: str | None = Query(default=None),
+    include_test_data: bool = Query(default=False),
+    limit: int = Query(default=5000, ge=1, le=5000),
+    admin: User = Depends(system_admin),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Export a compact research index; full transcripts remain in per-match archives."""
+    filters = [Match.status.in_(FINAL_MATCH_STATUSES)]
+    if competition_id:
+        filters.append(Match.competition_id == competition_id)
+    if season_id:
+        filters.append(Match.season_id == season_id)
+    if not include_test_data:
+        filters.append(Room.is_test_data.is_(False))
+
+    total = db.scalar(select(func.count(Match.id)).join(Room, Room.id == Match.room_id).where(*filters)) or 0
+    if total > limit:
+        raise HTTPException(
+            status_code=409,
+            detail=f"符合条件的比赛有 {total} 场，超过单次导出上限 {limit}；请按赛事或赛季分批导出。",
+        )
+
+    records = db.execute(
+        select(Match, Room, Competition, Season, JudgeScorecard)
+        .join(Room, Room.id == Match.room_id)
+        .join(Competition, Competition.id == Match.competition_id)
+        .outerjoin(Season, Season.id == Match.season_id)
+        .outerjoin(JudgeScorecard, JudgeScorecard.match_id == Match.id)
+        .where(*filters)
+        .order_by(Room.completed_at.desc(), Match.created_at.desc())
+    ).all()
+    match_ids = [match.id for match, _room, _competition, _season, _scorecard in records]
+    room_ids = [room.id for _match, room, _competition, _season, _scorecard in records]
+
+    speech_stats: dict[str, tuple[int, int, int]] = {}
+    if match_ids:
+        for match_id, speech_count, transcript_chars, audio_speech_count in db.execute(
+            select(
+                Speech.match_id,
+                func.count(Speech.id),
+                func.coalesce(func.sum(func.length(Speech.content)), 0),
+                func.coalesce(func.sum(case((Speech.audio_url != "", 1), else_=0)), 0),
+            )
+            .where(Speech.match_id.in_(match_ids))
+            .group_by(Speech.match_id)
+        ):
+            speech_stats[match_id] = (int(speech_count), int(transcript_chars), int(audio_speech_count))
+
+    participants: dict[str, list[dict[str, str | int]]] = {room_id: [] for room_id in room_ids}
+    if room_ids:
+        seat_rows = db.execute(
+            select(RoomSeat, User)
+            .outerjoin(User, User.id == RoomSeat.user_id)
+            .where(RoomSeat.room_id.in_(room_ids), RoomSeat.occupant_type.in_(("human", "ai")))
+            .order_by(RoomSeat.room_id, RoomSeat.side, RoomSeat.position)
+        ).all()
+        for seat, user in seat_rows:
+            participants[seat.room_id].append(
+                {
+                    "seat_key": seat.seat_key,
+                    "side": seat.side,
+                    "position": seat.position,
+                    "type": seat.occupant_type,
+                    "name": user.real_name if user else seat.display_name,
+                }
+            )
+
+    output = io.StringIO(newline="")
+    fieldnames = [
+        "match_id", "room_code", "competition", "competition_id", "season", "season_id", "topic",
+        "status", "winner", "data_scope", "visibility", "started_at", "completed_at", "participants",
+        "speech_count", "transcript_chars", "audio_speech_count", "scorecard_status", "archive_ready",
+        "archive_sha256", "archive_source_sha256", "archive_url",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for match, room, competition, season, scorecard in records:
+        speech_count, transcript_chars, audio_speech_count = speech_stats.get(match.id, (0, 0, 0))
+        archive = inspect_match_archive(match.id)
+        writer.writerow(
+            {
+                "match_id": match.id,
+                "room_code": room.code,
+                "competition": safe_csv_text(competition.name),
+                "competition_id": competition.id,
+                "season": safe_csv_text(season.name if season else ""),
+                "season_id": season.id if season else "",
+                "topic": safe_csv_text(room.topic),
+                "status": match.status,
+                "winner": match.winner or "",
+                "data_scope": "test" if room.is_test_data else "production",
+                "visibility": room.visibility,
+                "started_at": room.started_at.isoformat() if room.started_at else "",
+                "completed_at": room.completed_at.isoformat() if room.completed_at else "",
+                "participants": json.dumps(participants.get(room.id, []), ensure_ascii=False, separators=(",", ":")),
+                "speech_count": speech_count,
+                "transcript_chars": transcript_chars,
+                "audio_speech_count": audio_speech_count,
+                "scorecard_status": scorecard.status if scorecard else "",
+                "archive_ready": "yes" if archive["ready"] else "no",
+                "archive_sha256": archive["sha256"],
+                "archive_source_sha256": archive["source_sha256"],
+                "archive_url": f"/api/matches/{match.id}/archive",
+            }
+        )
+    filename = f"debate-archive-index-{int(time.time())}.csv"
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Exported-Matches": str(total),
+        },
+    )
 
 
 @router.post("/archives/cleanup")

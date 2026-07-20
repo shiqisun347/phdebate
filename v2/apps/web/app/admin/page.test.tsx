@@ -169,7 +169,7 @@ describe("admin operations", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /用户管理/ }));
     expect(await screen.findByRole("region", { name: "用户管理表格" })).toHaveAttribute("tabindex", "0");
-    fireEvent.click(screen.getByRole("button", { name: "停用" }));
+    fireEvent.click(screen.getByRole("button", { name: "停用账号 参赛学生" }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("立即退出所有设备"));
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringContaining("/api/admin/users/user-1"),

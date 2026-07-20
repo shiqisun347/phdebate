@@ -67,6 +67,24 @@ def _validate_archive(root: Path, match_id: str) -> str | None:
     return None
 
 
+def inspect_match_archive(match_id: str) -> dict[str, Any]:
+    """Return a bounded, read-only descriptor for one persisted archive."""
+    root = settings.archive_path
+    reason = _validate_archive(root, match_id)
+    if reason:
+        return {"ready": False, "reason": reason, "sha256": "", "source_sha256": ""}
+    try:
+        metadata = json.loads((root / f"{match_id}.meta.json").read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return {"ready": False, "reason": "归档元数据无法解析", "sha256": "", "source_sha256": ""}
+    return {
+        "ready": True,
+        "reason": "",
+        "sha256": str(metadata.get("sha256") or ""),
+        "source_sha256": str(metadata.get("source_sha256") or ""),
+    }
+
+
 def inspect_archives(db: Session, *, min_age_hours: int = 24, delete: bool = False) -> dict[str, Any]:
     root = settings.archive_path
     root.mkdir(parents=True, exist_ok=True)

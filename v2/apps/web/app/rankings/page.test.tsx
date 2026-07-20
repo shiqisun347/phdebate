@@ -64,4 +64,30 @@ describe("rankings", () => {
     expect(screen.queryByText("迟到的第二赛季榜首")).not.toBeInTheDocument();
     expect(screen.getByText("第三赛季榜首")).toBeInTheDocument();
   });
+
+  it("does not display the primary warm-up response for a different ranked competition", async () => {
+    const alternate = {
+      ...competition,
+      id: "competition-alternate",
+      slug: "regional-4v4",
+      name: "区域 4v4 正式赛",
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/competitions")) return Promise.resolve(response({ items: [alternate] }));
+      if (url.endsWith("/api/seasons")) return Promise.resolve(response({ items: seasons }));
+      if (url.includes("competition_slug=daily-4v4")) return Promise.resolve(response({ items: [ranking("错误预热榜首", "wrong")] }));
+      if (url.includes("competition_slug=regional-4v4") && url.includes("season_slug=season-a")) {
+        return Promise.resolve(response({ items: [ranking("区域赛事榜首", "correct")] }));
+      }
+      return Promise.resolve(response({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RankingsPage />);
+
+    expect(await screen.findByText("区域赛事榜首")).toBeInTheDocument();
+    expect(screen.queryByText("错误预热榜首")).not.toBeInTheDocument();
+    expect(screen.getByText("区域赛事榜首").closest("td")).toHaveAttribute("data-label", "辩手");
+  });
 });

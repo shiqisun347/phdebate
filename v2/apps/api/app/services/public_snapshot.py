@@ -8,7 +8,7 @@ from typing import Any
 
 from app.core.database import SessionLocal
 from app.models.entities import Room
-from app.services.room_service import load_room, serialize_room
+from app.services.room_service import ANONYMOUS_SPECTATOR_STATUSES, load_room, serialize_room
 from sqlalchemy import select
 
 
@@ -69,7 +69,7 @@ class PublicSnapshotCache:
         # thread. A spectator burst otherwise serializes hundreds of hand-off
         # checks and prevents new WebSocket handshakes from being accepted.
         row = await asyncio.to_thread(self._load_room_authority, code)
-        if row is None or row.visibility != "public":
+        if row is None or row.visibility != "public" or row.status not in ANONYMOUS_SPECTATOR_STATUSES:
             return None
         if int(row.seq) <= known_seq:
             return await self.get(code, expected_seq=known_seq)
@@ -78,7 +78,7 @@ class PublicSnapshotCache:
     @staticmethod
     def _load_room_authority(code: str) -> Any:
         with SessionLocal() as db:
-            return db.execute(select(Room.seq, Room.visibility).where(Room.code == code)).one_or_none()
+            return db.execute(select(Room.seq, Room.visibility, Room.status).where(Room.code == code)).one_or_none()
 
     async def _get_entry(self, code: str, *, expected_seq: int | None = None) -> SnapshotEntry:
         current = time.monotonic()
@@ -94,7 +94,11 @@ class PublicSnapshotCache:
                 return entry
             with SessionLocal() as db:
                 room = load_room(db, code)
-                snapshot = serialize_room(db, room, None, public=True) if room.visibility == "public" else None
+                snapshot = (
+                    serialize_room(db, room, None, public=True)
+                    if room.visibility == "public" and room.status in ANONYMOUS_SPECTATOR_STATUSES
+                    else None
+                )
                 initial_message = (
                     json.dumps({"type": "snapshot", "room": snapshot}, ensure_ascii=False, separators=(",", ":"))
                     if snapshot is not None

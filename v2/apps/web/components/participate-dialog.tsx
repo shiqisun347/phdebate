@@ -15,7 +15,7 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
   const { user, loading: sessionLoading } = useSession();
   const [mode, setMode] = useState<"create" | "join">(roomCreationBlockedReason(competition) ? "join" : "create");
   const [detail, setDetail] = useState<Competition>(competition);
-  const [seat, setSeat] = useState("aff_1");
+  const [seat, setSeat] = useState("");
   const [topicId, setTopicId] = useState("");
   const [customTopic, setCustomTopic] = useState("");
   const [code, setCode] = useState("");
@@ -193,12 +193,36 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
             <>
               {hasManagedTopics && <div className="field"><label htmlFor="competition-topic">题库辩题</label><select id="competition-topic" className="select" value={topicId} disabled={Boolean(normalizedCustomTopic)} onChange={(event) => setTopicId(event.target.value)}>{detail.topics?.map((topic) => <option key={topic.id} value={topic.id}>{topic.title}</option>)}</select>{normalizedCustomTopic && <small className="muted">已填写自定义辩题，本场将优先使用自定义内容。</small>}</div>}
               {detail.allow_custom_topic ? <div className="field"><label htmlFor="custom-debate-topic">自定义辩题{hasManagedTopics ? "（可选）" : ""}</label><textarea id="custom-debate-topic" className="textarea" minLength={4} maxLength={300} value={customTopic} onChange={(event) => setCustomTopic(event.target.value)} placeholder={hasManagedTopics ? "留空则使用上方题库辩题" : "输入训练辩题"} /><small className={customTopicInvalid?"field-error":"muted"}>{customTopicInvalid?"自定义辩题至少需要 4 个字符。":`${normalizedCustomTopic.length}/300`}</small></div> : !hasManagedTopics && <div className="field"><label htmlFor="competition-topic">本场辩题</label><select id="competition-topic" className="select" value="" disabled><option value="">暂无可用辩题</option></select><small className="field-error">请联系管理员补充该赛事题库。</small></div>}
-              <div className="field"><label>选择你的人类辩手席位</label><div className="seat-picker">{seats.map((item) => <button type="button" key={item.key} className={`seat-option ${seat === item.key ? "active" : ""}`} onClick={() => setSeat(item.key)}>{item.label}</button>)}</div></div>
+              <fieldset className="field seat-fieldset">
+                <legend>选择你的人类辩手席位</legend>
+                <div className="seat-picker">
+                  {seats.map((item) => (
+                    <label
+                      key={item.key}
+                      className={`seat-option ${seat === item.key ? "active" : ""}`}
+                    >
+                      <input
+                        className="sr-only"
+                        type="radio"
+                        name="human-seat"
+                        value={item.key}
+                        checked={seat === item.key}
+                        onChange={() => setSeat(item.key)}
+                        aria-describedby="seat-selection-summary"
+                      />
+                      <span>{item.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <small id="seat-selection-summary" className={seat ? "success-text" : "muted"} role="status" aria-live="polite">
+                  {seat ? `你将作为：${seats.find((item) => item.key === seat)?.label}` : "请选择一个席位后再创建比赛。"}
+                </small>
+              </fieldset>
               <p className="muted" style={{ fontSize: 12, margin: 0 }}>其他玩家可通过房间号认领空席；开始比赛时，剩余席位由 AI 自动填充。</p>
             </>
           )}
           {error && <div className="error-box" role="alert">{error}{activeRoomCode && <Link className="button button-small button-secondary" href={`/rooms/${activeRoomCode}/lobby`} onClick={onClose}>返回当前比赛</Link>}</div>}
-          <button className="button" disabled={sessionLoading || busy || customTopicInvalid || (mode === "create" && (Boolean(creationBlockedReason) || topicUnavailable)) || (mode === "join" && code.length !== 6)}>{mode === "create" ? <><DoorOpen size={18} />{sessionLoading ? "正在确认登录状态…" : !user ? "登录或注册后创建" : busy ? "正在创建…" : topicUnavailable ? "暂无可用辩题" : creationBlockedReason ? "赛季未开放" : "创建比赛"}</> : <>{sessionLoading ? "正在确认登录状态…" : !user ? "登录或注册后进入" : busy ? "正在搜索…" : "进入房间"}</>}</button>
+          <button className="button" disabled={sessionLoading || busy || customTopicInvalid || (mode === "create" && Boolean(user) && !seat) || (mode === "create" && (Boolean(creationBlockedReason) || topicUnavailable)) || (mode === "join" && code.length !== 6)}>{mode === "create" ? <><DoorOpen size={18} />{sessionLoading ? "正在确认登录状态…" : !user ? "登录或注册后创建" : busy ? "正在创建…" : topicUnavailable ? "暂无可用辩题" : creationBlockedReason ? "赛季未开放" : !seat ? "请先选择席位" : "创建比赛"}</> : <>{sessionLoading ? "正在确认登录状态…" : !user ? "登录或注册后进入" : busy ? "正在搜索…" : "进入房间"}</>}</button>
         </form>
       </div>
     </div>

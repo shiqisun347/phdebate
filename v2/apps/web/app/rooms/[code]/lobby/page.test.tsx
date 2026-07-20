@@ -185,6 +185,39 @@ describe("room lobby", () => {
     expect(mocks.push).toHaveBeenCalledWith("/login?next=%2Frooms%2F123456%2Flobby");
   });
 
+  it("shows readiness and connectivity at a glance and prevents duplicate seat claims", async () => {
+    let resolveClaim!: (value: { room: Room }) => void;
+    const claim = new Promise<{ room: Room }>((resolve) => { resolveClaim = resolve; });
+    const availableRoom = lobbyRoom({
+      competition: { ...lobbyRoom().competition, ranked: false },
+      season: null,
+      seats: [
+        { ...lobbyRoom().seats[0], is_me: false, is_owner: true, is_ready: true, connected: false },
+        lobbyRoom().seats[1],
+      ],
+      my_seat: null,
+      can_control: false,
+    });
+    mocks.room = availableRoom;
+    mocks.apiFetch.mockImplementation((path: string) => {
+      if (path.endsWith("/claim-seat")) return claim;
+      return Promise.resolve({ seq: 3, lease_fingerprint: "current-device" });
+    });
+    render(<LobbyPage />);
+
+    expect(screen.getByText("1 / 1 位真人已准备")).toBeInTheDocument();
+    expect(screen.getByText("0 位真人在线")).toBeInTheDocument();
+    expect(screen.getByText(/正方一辩 · 已准备 · 离线/)).toBeInTheDocument();
+    const openSeat = screen.getByRole("button", { name: /反方一辩.*等待认领/ });
+    fireEvent.click(openSeat);
+    expect(screen.getByRole("button", { name: /反方一辩.*正在认领席位/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /反方一辩.*正在认领席位/ }));
+    expect(mocks.apiFetch.mock.calls.filter(([path]) => String(path).endsWith("/claim-seat"))).toHaveLength(1);
+
+    resolveClaim({ room: availableRoom });
+    await waitFor(() => expect(mocks.setRoom).toHaveBeenCalled());
+  });
+
   it("makes the old lobby read-only after another device takes over", async () => {
     mocks.room = lobbyRoom({
       competition: { ...lobbyRoom().competition, ranked: false },

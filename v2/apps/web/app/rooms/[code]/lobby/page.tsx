@@ -193,6 +193,9 @@ export default function LobbyPage() {
   const me = room.seats.find((seat) => seat.is_me);
   const deviceCanWrite = !me || deviceControl === "owned";
   const humans = room.seats.filter((seat) => seat.occupant_type === "human");
+  const readyHumans = humans.filter((seat) => seat.is_ready).length;
+  const connectedHumans = humans.filter((seat) => seat.connected).length;
+  const openSeats = room.seats.filter((seat) => seat.occupant_type === "open").length;
   const removableHumans = humans.filter((seat) => !seat.is_owner && !seat.is_me);
   const seasonBlockedReason = roomCreationBlockedReason({
     ...room.competition,
@@ -223,17 +226,18 @@ export default function LobbyPage() {
       <div className="panel lobby-topic">
         <span className="badge">本场辩题</span>
         <h2>{room.topic}</h2>
-        <div className="detail-meta">
+        <div className="detail-meta" role="status" aria-live="polite">
           <span>
             <Users size={15} />
-            {humans.length} 位真人已加入
+            {readyHumans} / {humans.length} 位真人已准备
+          </span>
+          <span>
+            <Check size={15} />
+            {connectedHumans} 位真人在线
           </span>
           <span>
             <Bot size={15} />
-            {
-              room.seats.filter((seat) => seat.occupant_type === "open").length
-            }{" "}
-            个空席将由 AI 补齐
+            {openSeats} 个空席将由 AI 补齐
           </span>
         </div>
       </div>
@@ -242,19 +246,6 @@ export default function LobbyPage() {
           <strong>{seasonStatusLabel(room.season)}</strong> ·{" "}
           {seasonBlockedReason} 该房间仍可观战、释放席位或关闭。
         </div>
-      )}
-      {me?.occupant_type === "human" && (
-        <section className="panel" style={{ marginBottom: 18 }} aria-labelledby="microphone-preflight-title">
-          <div className="panel-title">
-            <div>
-              <span className="eyebrow">Device check</span>
-              <h2 id="microphone-preflight-title">赛前麦克风检查</h2>
-            </div>
-            <span className="badge">不影响准备状态</span>
-          </div>
-          <p className="muted">建议首次发言前主动测试。预检只读取实时音量，不录制、不上传，也不是确认准备的硬门禁。</p>
-          <MicrophonePreflight />
-        </section>
       )}
       <div className="lobby-layout">
         <section className="panel">
@@ -275,11 +266,13 @@ export default function LobbyPage() {
                       className={`lobby-seat ${seat.occupant_type !== "open" ? "occupied" : ""} ${seat.is_me ? "me" : ""}`}
                       key={seat.seat_key}
                       disabled={
+                        Boolean(busy) ||
                         seat.occupant_type !== "open" ||
                         Boolean(me) ||
                         Boolean(seasonBlockedReason) ||
                         sessionLoading
                       }
+                      aria-busy={busy === "claim-seat"}
                       onClick={() => user
                         ? action("claim-seat", { seat_key: seat.seat_key })
                         : router.push(`/login?next=${encodeURIComponent(`/rooms/${code}/lobby`)}`)
@@ -297,14 +290,14 @@ export default function LobbyPage() {
                         <small>
                           {seat.label} ·{" "}
                           {seat.occupant_type === "open"
-                            ? seasonBlockedReason
+                            ? busy === "claim-seat"
+                              ? "正在认领席位…"
+                              : seasonBlockedReason
                               ? "赛季已关闭"
                               : !user
                                 ? "登录或注册后认领"
                                 : "等待认领"
-                            : seat.is_ready
-                              ? "已准备"
-                              : "未准备"}
+                            : `${seat.is_ready ? "已准备" : "未准备"} · ${seat.connected ? "在线" : "离线"}`}
                         </small>
                       </span>
                       {seat.is_ready && <Check size={16} color="#40df9c" />}
@@ -392,6 +385,7 @@ export default function LobbyPage() {
             <>
               <button
                 className={`button ${me.is_ready ? "button-secondary" : "button-green"}`}
+                aria-busy={busy === "ready"}
                 disabled={
                   Boolean(busy) ||
                   !deviceCanWrite ||
@@ -399,7 +393,9 @@ export default function LobbyPage() {
                 }
                 onClick={() => action("ready", { ready: !me.is_ready })}
               >
-                {me.is_ready
+                {busy === "ready"
+                  ? "正在保存准备状态…"
+                  : me.is_ready
                   ? "取消准备"
                   : seasonBlockedReason
                     ? "赛季已关闭"
@@ -466,6 +462,19 @@ export default function LobbyPage() {
           </Link>
         </aside>
       </div>
+      {me?.occupant_type === "human" && (
+        <section className="panel lobby-preflight" aria-labelledby="microphone-preflight-title">
+          <div className="panel-title">
+            <div>
+              <span className="eyebrow">Device check</span>
+              <h2 id="microphone-preflight-title">赛前麦克风检查</h2>
+            </div>
+            <span className="badge">不影响准备状态</span>
+          </div>
+          <p className="muted">席位与准备状态确认后，建议在首次发言前主动测试。预检只读取实时音量，不录制、不上传，也不是确认准备的硬门禁。</p>
+          <MicrophonePreflight />
+        </section>
+      )}
       {confirmingStart && (
         <div className="stage-confirm-backdrop">
           <div ref={startConfirmDialog} className="stage-confirm-dialog panel" role="alertdialog" aria-modal="true" aria-labelledby="lobby-start-confirm-title" aria-describedby="lobby-start-confirm-description">

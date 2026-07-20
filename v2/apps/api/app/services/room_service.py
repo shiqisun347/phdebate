@@ -28,6 +28,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 AI_NAMES = ["陈思远", "乾元", "明川", "知微", "景行", "若谷", "清和", "见山"]
+ANONYMOUS_SPECTATOR_STATUSES = frozenset(
+    {"preparing", "running", "paused", "judging", "completed", "review_required", "terminated"}
+)
 
 
 def now() -> datetime:
@@ -189,7 +192,11 @@ def transfer_room_owner(
 
 def can_view_room(db: Session, room: Room, user: User | None) -> bool:
     if room.visibility == "public":
-        return True
+        # A six-digit room code is a locator, not an authentication secret.
+        # Waiting rooms expose real student names and readiness state, so they
+        # require a login even when the eventual match will be public.  Once a
+        # match starts, the same room becomes an anonymous spectator surface.
+        return user is not None or room.status in ANONYMOUS_SPECTATOR_STATUSES
     if not user:
         return False
     return can_control(db, room, user) or user_seat(room, user) is not None
@@ -677,7 +684,14 @@ def leaderboard(
         return []
     stmt = select(LeaderboardEntry).options(selectinload(LeaderboardEntry.user))
     if not include_test_accounts:
-        stmt = stmt.join(User, User.id == LeaderboardEntry.user_id).where(User.is_test_account.is_(False))
+        # Public rankings are an identity surface as well as a score table.
+        # Keep moderation effective without destroying the append-only score
+        # history: disabled accounts disappear immediately and return with the
+        # same historical aggregate if an administrator reactivates them.
+        stmt = stmt.join(User, User.id == LeaderboardEntry.user_id).where(
+            User.is_test_account.is_(False),
+            User.is_active.is_(True),
+        )
     if competition_id:
         stmt = stmt.where(LeaderboardEntry.competition_id == competition_id)
     rows = list(db.scalars(stmt.where(LeaderboardEntry.season_id == season_id)).all())

@@ -39,8 +39,17 @@ export default function RankingsPage() {
       const initialSeason = ranked?.season?.slug || seasonData.items.find((item) => item.is_open)?.slug || seasonData.items[0]?.slug || "";
       setSelected((current) => current || initialCompetition);
       setSelectedSeason((current) => current || initialSeason);
-      setItems(rankingData.items);
-      lastLoadedRankingKey.current = `${initialCompetition}:${initialSeason}`;
+      // The parallel warm request is only authoritative for the primary
+      // competition. If an installation has a different ranked event, let the
+      // selection-specific request below load it instead of briefly showing a
+      // leaderboard from another competition.
+      if (initialCompetition === PRIMARY_COMPETITION_SLUG) {
+        setItems(rankingData.items);
+        lastLoadedRankingKey.current = `${initialCompetition}:${initialSeason}`;
+      } else {
+        setItems([]);
+        lastLoadedRankingKey.current = "";
+      }
       setCatalogLoaded(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "赛事列表载入失败");
@@ -54,9 +63,10 @@ export default function RankingsPage() {
     const sequence = ++rankingRequestSequence.current;
     setLoadingRankings(true);
     setError("");
+    setItems([]);
     try {
       const data = await apiFetch<{ items: Ranking[] }>(
-        `/api/rankings?competition_slug=${selected}&season_slug=${selectedSeason}`,
+        `/api/rankings?competition_slug=${encodeURIComponent(selected)}&season_slug=${encodeURIComponent(selectedSeason)}`,
       );
       if (sequence !== rankingRequestSequence.current) return;
       setItems(data.items);
@@ -143,6 +153,7 @@ export default function RankingsPage() {
         <div className="table-wrap" aria-busy={loadingRankings}>
           {items.length > 0 && (
             <table className="ranking-table">
+              <caption className="sr-only">当前赛事与赛季的个人排行榜</caption>
               <thead>
                 <tr>
                   <th>排名</th>
@@ -156,7 +167,7 @@ export default function RankingsPage() {
               <tbody>
                 {items.map((item) => (
                   <tr key={item.user_id}>
-                    <td>
+                    <td data-label="排名">
                       {item.rank <= 3 ? (
                         <Medal
                           size={20}
@@ -172,26 +183,27 @@ export default function RankingsPage() {
                         `#${item.rank}`
                       )}
                     </td>
-                    <td>
+                    <td data-label="辩手">
                       <strong>{item.real_name}</strong>
                     </td>
-                    <td>
+                    <td data-label="赛季积分">
                       <strong>{item.points}</strong>
                     </td>
-                    <td>
+                    <td data-label="战绩">
                       {item.wins} 胜 · {item.draws} 平 · {item.losses} 负
                     </td>
-                    <td>{item.average_score}</td>
-                    <td>{item.matches}</td>
+                    <td data-label="平均评分">{item.average_score}</td>
+                    <td data-label="有效场次">{item.matches}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
           {!loadingRankings && !items.length && (
-            <div className="empty">
+            <div className="empty empty-guidance">
               <Trophy size={30} style={{ margin: "0 auto 10px" }} />
-              暂无排名数据
+              <strong>这个赛季还没有有效比赛</strong>
+              <span>完成计分赛事后，积分、战绩与平均评分会显示在这里。</span>
             </div>
           )}
           {loadingRankings && (

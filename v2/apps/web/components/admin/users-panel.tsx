@@ -57,8 +57,19 @@ export function UsersPanel({
           onChange={(event) => onQueryChange(event.target.value)}
         />
         <button className="button button-small" disabled={loading}>{loading ? "搜索中…" : "搜索"}</button>
+        <button
+          type="button"
+          className="button button-small button-secondary"
+          disabled={loading || !query}
+          onClick={() => {
+            onQueryChange("");
+            onSearch(1, "");
+          }}
+        >
+          清除搜索
+        </button>
       </form>
-      <div className="table-wrap" role="region" aria-label="用户管理表格" tabIndex={0}>
+      <div className="table-wrap" role="region" aria-label="用户管理表格" aria-busy={loading} tabIndex={0}>
         <table>
           <thead><tr><th>真实姓名</th><th>登录账号</th><th>角色</th><th>数据类型</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>
@@ -72,14 +83,14 @@ export function UsersPanel({
                 <td>
                   {item.id === currentUserId ? <span className="muted">受保护</span> : (
                     <>
-                      <button className="text-button" disabled={saving} onClick={() => onPasswordReset(item)}>重置密码</button>
-                      <button className="text-button" disabled={saving} onClick={() => onPatch(item, { is_test_account: !item.is_test_account })}>
+                      <button type="button" aria-label={`重置 ${item.real_name} 的密码`} className="text-button" disabled={saving} onClick={() => onPasswordReset(item)}>重置密码</button>
+                      <button type="button" aria-label={`${item.is_test_account ? "恢复" : "标记"} ${item.real_name} 为${item.is_test_account ? "正式" : "QA"}账号`} className="text-button" disabled={saving} onClick={() => onPatch(item, { is_test_account: !item.is_test_account })}>
                         {item.is_test_account ? "恢复为正式账号" : "标记为 QA 账号"}
                       </button>
-                      <button className="text-button" disabled={saving} onClick={() => onPatch(item, { is_active: !item.is_active })}>
+                      <button type="button" aria-label={`${item.is_active ? "停用" : "恢复"}账号 ${item.real_name}`} className="text-button" disabled={saving} onClick={() => onPatch(item, { is_active: !item.is_active })}>
                         {item.is_active ? "停用" : "恢复"}
                       </button>
-                      <button className="text-button" disabled={saving} onClick={() => onPatch(item, { role: item.role === "system_admin" ? "user" : "system_admin" })}>
+                      <button type="button" aria-label={`${item.role === "system_admin" ? "取消" : "授予"} ${item.real_name} 的管理员权限`} className="text-button" disabled={saving} onClick={() => onPatch(item, { role: item.role === "system_admin" ? "user" : "system_admin" })}>
                         {item.role === "system_admin" ? "取消管理员" : "设为管理员"}
                       </button>
                     </>
