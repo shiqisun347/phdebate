@@ -341,6 +341,24 @@ curl -fsS https://新服务器IP/debate/api/health
 - 每个恢复批次应生成一个只读 manifest，绑定源码 commit、所有文件 SHA-256、数据库 Alembic
   版本、GPU 指纹和创建时间。
 
+完成三类备份和恢复验证后，使用版本化工具生成绑定清单；私密归档路径必须显式传入，避免误选：
+
+```bash
+PHDEBATE_CODE_BRANCH=backup/production-20260720-round8 \
+PHDEBATE_CODE_COMMIT='GitHub 快照不可变 SHA' \
+PHDEBATE_DEPLOYED_APPLICATION_COMMIT='实际发布所用 SHA' \
+PHDEBATE_DATABASE_SCHEMA=0025_speech_result_pagination \
+PHDEBATE_RELIABLE_AUDIO_FINGERPRINT='可靠音频基线指纹' \
+PHDEBATE_PRIVATE_CONFIG_BACKUP="$PWD/runtime/deploy-backups/私密配置归档" \
+PHDEBATE_RELIABLE_VOICE_BACKUP="$PWD/runtime/deploy-backups/可靠语音归档" \
+PHDEBATE_MOSS_OFFLINE_BACKUP="$PWD/runtime/deploy-backups/MOSS离线归档" \
+  ./deploy/create-recovery-manifest.sh
+```
+
+工具会自动选择最新 V2 DB、Agent DB 和数据卷，确认六个文件都存在，重新计算 SHA-256，并以
+`0600` 写入 `runtime/deploy-backups/recovery-set-*.manifest`。生成后还要人工核对源码提交与当前
+release 链接，不能只看脚本退出码。
+
 ## 15. 回滚
 
 - 代码回滚只切换 `.api-primary`、`.api-secondary`、`.web-current`。
