@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 import httpx
 import websockets
 
+MAX_SPECTATORS_PER_ROOM = 20
+
 
 @dataclass
 class Metrics:
@@ -136,8 +138,14 @@ async def watcher(
 async def run(args: argparse.Namespace) -> int:
     validate_args(args)
     room_codes = [item.strip() for item in args.rooms.split(",") if item.strip()]
+    room_codes = list(dict.fromkeys(room_codes))
     if not room_codes:
         raise SystemExit("--rooms must contain at least one room code")
+    if args.clients > len(room_codes) * MAX_SPECTATORS_PER_ROOM:
+        raise SystemExit(
+            f"--clients exceeds the product limit of {MAX_SPECTATORS_PER_ROOM} spectators per room; "
+            f"provide at least {(args.clients + MAX_SPECTATORS_PER_ROOM - 1) // MAX_SPECTATORS_PER_ROOM} rooms"
+        )
     async with httpx.AsyncClient(base_url=args.base_url, verify=not args.insecure, timeout=15) as client:
         health, catalog = await asyncio.gather(client.get("/api/health"), client.get("/api/competitions"))
         health.raise_for_status()
@@ -188,7 +196,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:12340")
     parser.add_argument("--rooms", required=True, help="comma-separated public room codes")
-    parser.add_argument("--clients", type=int, default=500)
+    parser.add_argument("--clients", type=int, default=20)
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--handshake-concurrency", type=int, default=20)
     parser.add_argument("--startup-timeout", type=float, default=180.0)

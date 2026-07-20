@@ -1679,6 +1679,76 @@ async def test_disconnect_during_initial_snapshot_releases_presence_without_serv
 
 
 @pytest.mark.asyncio
+async def test_room_websocket_rejects_twenty_first_spectator(register_user, monkeypatch) -> None:
+    owner = register_user("spectator_limit_owner")
+    room_data = create_training_room(owner, "观战人数上限测试")
+    code = room_data["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.status = "running"
+        db.commit()
+
+    join = AsyncMock(return_value=False)
+    leave = AsyncMock()
+    monkeypatch.setattr(realtime_api.room_hub, "spectator_join", join)
+    monkeypatch.setattr(realtime_api.room_hub, "spectator_leave", leave)
+
+    class OverflowSpectatorWebSocket:
+        headers = {"origin": "http://localhost:3200"}
+        cookies: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.close_codes: list[int] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.close_codes.append(code)
+
+        async def send_json(self, _payload: dict) -> None:
+            raise AssertionError("an over-cap spectator must not receive room data")
+
+        async def send_text(self, _payload: str) -> None:
+            raise AssertionError("an over-cap spectator must not receive room data")
+
+    websocket = OverflowSpectatorWebSocket()
+    await realtime_api.room_websocket(websocket, code)
+
+    join.assert_awaited_once()
+    leave.assert_not_awaited()
+    assert websocket.close_codes == [4429]
+
+
+@pytest.mark.asyncio
+async def test_room_owner_websocket_never_consumes_a_spectator_slot(register_user, monkeypatch) -> None:
+    owner = register_user("spectator_limit_exempt_owner")
+    room_data = create_training_room(owner, "辩手和房主不占观战名额")
+    code = room_data["code"]
+    spectator_join = AsyncMock(side_effect=AssertionError("room owner must not consume a spectator slot"))
+    monkeypatch.setattr(realtime_api.room_hub, "spectator_join", spectator_join)
+
+    class OwnerDisconnectingWebSocket:
+        headers = {"origin": "http://localhost:3200"}
+        cookies = {realtime_api.SESSION_COOKIE: owner.cookies.get(realtime_api.SESSION_COOKIE)}
+
+        async def accept(self) -> None:
+            return None
+
+        async def send_json(self, _payload: dict) -> None:
+            raise RuntimeError("owner closed the browser after the initial snapshot")
+
+        async def send_text(self, _payload: str) -> None:
+            raise AssertionError("authenticated snapshots use JSON")
+
+        async def close(self, *, code: int = 1000) -> None:
+            return None
+
+    await realtime_api.room_websocket(OwnerDisconnectingWebSocket(), code)
+    spectator_join.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_room_websocket_lock_timeout_closes_for_retry_without_leaking_presence(
     register_user,
     monkeypatch,

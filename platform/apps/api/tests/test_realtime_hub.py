@@ -93,6 +93,36 @@ class SharedPresenceRedis:
                 if score <= now_ms:
                     leases.pop(token)
             return int(bool(leases))
+        if script == realtime_service._SPECTATOR_JOIN_SCRIPT:
+            now_ms, expires_ms, limit, connection_id, _ttl_ms = args
+            leases = self._set(keys[0])
+            for token, score in list(leases.items()):
+                if score <= float(now_ms):
+                    leases.pop(token)
+            if str(connection_id) in leases:
+                leases[str(connection_id)] = float(expires_ms)
+                return 1
+            if len(leases) >= int(limit):
+                return 0
+            leases[str(connection_id)] = float(expires_ms)
+            return 1
+        if script == realtime_service._SPECTATOR_REFRESH_SCRIPT:
+            now_ms, expires_ms, connection_id, _ttl_ms = args
+            leases = self._set(keys[0])
+            for token, score in list(leases.items()):
+                if score <= float(now_ms):
+                    leases.pop(token)
+            if str(connection_id) not in leases:
+                return 0
+            leases[str(connection_id)] = float(expires_ms)
+            return 1
+        if script == realtime_service._SPECTATOR_LEAVE_SCRIPT:
+            now_ms, connection_id = args
+            leases = self._set(keys[0])
+            for token, score in list(leases.items()):
+                if score <= float(now_ms):
+                    leases.pop(token)
+            return int(leases.pop(str(connection_id), None) is not None)
         raise AssertionError("unexpected Lua script")
 
 
@@ -180,6 +210,48 @@ async def test_presence_lease_falls_back_to_process_local_reference_count_when_r
     assert await hub.presence_join("123456", "aff_1", "user-1", connection_id="socket-b") is False
     assert await hub.presence_leave("123456", "aff_1", "user-1", connection_id="socket-a") is False
     assert await hub.presence_leave("123456", "aff_1", "user-1", connection_id="socket-b") is True
+
+
+async def test_spectator_limit_is_atomic_across_workers_and_releases_slots(monkeypatch) -> None:
+    shared = SharedPresenceRedis()
+    monkeypatch.setattr(realtime_service.redis, "from_url", lambda *_args, **_kwargs: shared)
+    first_worker = RoomHub()
+    second_worker = RoomHub()
+
+    admissions = await asyncio.gather(
+        *[
+            (first_worker if index % 2 == 0 else second_worker).spectator_join(
+                "123456", connection_id=f"watcher-{index}"
+            )
+            for index in range(realtime_service.SPECTATOR_LIMIT)
+        ]
+    )
+    assert all(admissions)
+    assert await second_worker.spectator_join("123456", connection_id="watcher-overflow") is False
+
+    await first_worker.spectator_leave("123456", connection_id="watcher-0")
+    assert await second_worker.spectator_join("123456", connection_id="watcher-overflow") is True
+    assert await second_worker.spectator_refresh("123456", connection_id="watcher-overflow") is True
+
+    await first_worker.close()
+    await second_worker.close()
+
+
+async def test_spectator_lease_expiry_recovers_capacity(monkeypatch) -> None:
+    shared = SharedPresenceRedis()
+    clock = {"seconds": 1_000.0}
+    monkeypatch.setattr(realtime_service.redis, "from_url", lambda *_args, **_kwargs: shared)
+    monkeypatch.setattr(realtime_service.time, "time", lambda: clock["seconds"])
+    hub = RoomHub()
+
+    for index in range(realtime_service.SPECTATOR_LIMIT):
+        assert await hub.spectator_join("654321", connection_id=f"watcher-{index}") is True
+    assert await hub.spectator_join("654321", connection_id="next") is False
+    clock["seconds"] += realtime_service.SPECTATOR_LEASE_SECONDS + 1
+    assert await hub.spectator_join("654321", connection_id="next") is True
+    assert await hub.spectator_refresh("654321", connection_id="watcher-0") is False
+
+    await hub.close()
 
 
 async def test_audio_abort_registry_wakes_all_local_stream_senders() -> None:

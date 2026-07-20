@@ -75,16 +75,17 @@ PHDEBATE_SOAK_CYCLES=10 \
 ```bash
 .venv/bin/python scripts/load_watchers.py \
   --base-url https://117.50.192.216 \
-  --rooms 123456,234567,345678 \
-  --clients 500 \
+  --rooms 123456 \
+  --clients 20 \
   --handshake-concurrency 20 \
   --duration 10 \
   --allow-public-load
 ```
 
-远程压测必须显式传入 `--allow-public-load`；脚本先只读校验全部房间，再分批完成握手并同时保持
-所有连接，因此结果中的 `peak_connected` 才能证明真实并发连接数。只有使用临时自签证书的隔离环境
-才允许追加 `--insecure`，生产证书测试不能关闭 TLS 校验。
+远程压测必须显式传入 `--allow-public-load`；每个房间最多分配 20 个观战连接，测试更多连接时必须
+提供足够多的独立房间。脚本先只读校验全部房间，再分批完成握手并同时保持所有连接，因此结果中的
+`peak_connected` 才能证明真实并发连接数。只有使用临时自签证书的隔离环境才允许追加 `--insecure`，
+生产证书测试不能关闭 TLS 校验。
 
 模拟客户端在服务端发送初始快照时直接断开，用于回归 WebSocket 断连竞态：
 

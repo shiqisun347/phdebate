@@ -32,6 +32,9 @@ PRESENCE_LEASE_SECONDS = int(_bounded_env_number("PRESENCE_LEASE_SECONDS", 60, 3
 PRESENCE_REDIS_TIMEOUT_SECONDS = _bounded_env_number("PRESENCE_REDIS_TIMEOUT_SECONDS", 1, 0.1, 5)
 PRESENCE_KEY_PREFIX = "jixia:presence:leases:"
 PRESENCE_INDEX_KEY = "jixia:presence:index"
+SPECTATOR_LIMIT = 20
+SPECTATOR_LEASE_SECONDS = PRESENCE_LEASE_SECONDS
+SPECTATOR_KEY_PREFIX = "jixia:spectators:leases:"
 
 _PRESENCE_JOIN_SCRIPT = """
 local now_ms = tonumber(ARGV[1])
@@ -99,6 +102,42 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
 return redis.call('ZCARD', KEYS[1]) > 0 and 1 or 0
 """
 
+_SPECTATOR_JOIN_SCRIPT = """
+local now_ms = tonumber(ARGV[1])
+local expires_ms = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if redis.call('ZSCORE', KEYS[1], ARGV[4]) then
+    redis.call('ZADD', KEYS[1], expires_ms, ARGV[4])
+    redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[5]))
+    return 1
+end
+if redis.call('ZCARD', KEYS[1]) >= limit then
+    return 0
+end
+redis.call('ZADD', KEYS[1], expires_ms, ARGV[4])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[5]))
+return 1
+"""
+
+_SPECTATOR_LEAVE_SCRIPT = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local removed = redis.call('ZREM', KEYS[1], ARGV[2])
+if redis.call('ZCARD', KEYS[1]) == 0 then
+    redis.call('DEL', KEYS[1])
+end
+return removed
+"""
+
+_SPECTATOR_REFRESH_SCRIPT = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+if not redis.call('ZSCORE', KEYS[1], ARGV[3]) then
+    return 0
+end
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]))
+return 1
+"""
 
 @dataclass
 class _LoopState:
@@ -188,6 +227,7 @@ class RoomHub:
         self._local: dict[str, set[_Subscriber]] = defaultdict(set)
         self._presence: dict[tuple[str, str, str], int] = defaultdict(int)
         self._presence_leases: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+        self._spectator_leases: dict[str, set[str]] = defaultdict(set)
         self._states_lock = threading.RLock()
 
     def _state(self) -> _LoopState:
@@ -366,6 +406,80 @@ class RoomHub:
             )
         except Exception:
             logger.warning("failed to reschedule presence expiry: room=%s seat=%s", room_code, seat_key)
+
+    @staticmethod
+    def _spectator_key(room_code: str) -> str:
+        return f"{SPECTATOR_KEY_PREFIX}{room_code}"
+
+    async def spectator_join(self, room_code: str, *, connection_id: str) -> bool:
+        """Atomically reserve one of a room's public spectator slots.
+
+        Production fails closed when Redis is unavailable so multiple API
+        workers can never independently exceed the room-wide limit. Explicit
+        Redis-free test/local hubs retain a process-local bounded fallback.
+        """
+        with self._states_lock:
+            local = self._spectator_leases[room_code]
+            if connection_id in local:
+                return True
+            if not self._redis_enabled:
+                if len(local) >= SPECTATOR_LIMIT:
+                    return False
+                local.add(connection_id)
+                return True
+
+        now_ms = int(time.time() * 1000)
+        lease_ms = SPECTATOR_LEASE_SECONDS * 1000
+        result = await self._presence_eval(
+            _SPECTATOR_JOIN_SCRIPT,
+            [self._spectator_key(room_code)],
+            [now_ms, now_ms + lease_ms, SPECTATOR_LIMIT, connection_id, lease_ms * 2],
+        )
+        if result is None and settings.app_env == "test":
+            with self._states_lock:
+                local = self._spectator_leases[room_code]
+                if len(local) >= SPECTATOR_LIMIT:
+                    return False
+                local.add(connection_id)
+            return True
+        if not result:
+            return False
+        with self._states_lock:
+            self._spectator_leases[room_code].add(connection_id)
+        return True
+
+    async def spectator_refresh(self, room_code: str, *, connection_id: str) -> bool:
+        with self._states_lock:
+            locally_active = connection_id in self._spectator_leases.get(room_code, set())
+        if not locally_active:
+            return False
+        if not self._redis_enabled:
+            return True
+        now_ms = int(time.time() * 1000)
+        lease_ms = SPECTATOR_LEASE_SECONDS * 1000
+        result = await self._presence_eval(
+            _SPECTATOR_REFRESH_SCRIPT,
+            [self._spectator_key(room_code)],
+            [now_ms, now_ms + lease_ms, connection_id, lease_ms * 2],
+        )
+        if result is None and settings.app_env == "test":
+            return True
+        return bool(result)
+
+    async def spectator_leave(self, room_code: str, *, connection_id: str) -> None:
+        with self._states_lock:
+            leases = self._spectator_leases.get(room_code)
+            if leases:
+                leases.discard(connection_id)
+                if not leases:
+                    self._spectator_leases.pop(room_code, None)
+        if not self._redis_enabled:
+            return
+        await self._presence_eval(
+            _SPECTATOR_LEAVE_SCRIPT,
+            [self._spectator_key(room_code)],
+            [int(time.time() * 1000), connection_id],
+        )
 
     async def _client(self) -> redis.Redis | None:
         if not self._redis_enabled:

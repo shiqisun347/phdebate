@@ -26,6 +26,7 @@ from app.services.realtime import audio_stream_aborts, room_hub
 from app.services.room_service import (
     anonymous_realtime_event,
     append_event,
+    can_control,
     can_view_room,
     load_room,
     serialize_room,
@@ -210,6 +211,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
         return
     user = _websocket_user(websocket)
     joined_presence: tuple[str, str] | None = None
+    joined_as_spectator = False
     presence_connection_id = uuid.uuid4().hex
     presence_connected_seq: int | None = None
     public_initial_message: str | None = None
@@ -294,6 +296,20 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 logger.exception("failed to release websocket presence for room %s", code)
                 return
 
+    async def release_spectator() -> None:
+        nonlocal joined_as_spectator
+        if not joined_as_spectator:
+            return
+        joined_as_spectator = False
+        await room_hub.spectator_leave(code, connection_id=presence_connection_id)
+
+    async def reserve_spectator() -> bool:
+        nonlocal joined_as_spectator
+        joined_as_spectator = await room_hub.spectator_join(code, connection_id=presence_connection_id)
+        if not joined_as_spectator:
+            await close_socket(4429)
+        return joined_as_spectator
+
     if not user:
         # The public snapshot cache is keyed only by room code and can contain
         # QA rooms whose visibility intentionally mirrors production.  Check
@@ -305,15 +321,19 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 if not can_view_room(db, room, None):
                     await close_socket(4401)
                     return
+                if not await reserve_spectator():
+                    return
         except HTTPException:
             await close_socket(4404)
             return
         try:
             public_initial_message = await public_snapshot_cache.initial_message(code)
         except Exception:
+            await release_spectator()
             await close_socket(4404)
             return
         if public_initial_message is None:
+            await release_spectator()
             await close_socket(4401)
             return
     else:
@@ -324,6 +344,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                     await close_socket(4403)
                     return
                 seat = user_seat(room, user)
+                is_spectator = seat is None and not can_control(db, room, user)
                 active_seat_key = seat.seat_key if seat and room.status in ACTIVE_PRESENCE_STATUSES else None
         except HTTPException:
             await close_socket(4404)
@@ -331,6 +352,9 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
         except Exception:
             logger.exception("failed to load websocket room %s", code)
             await close_socket(1011)
+            return
+
+        if is_spectator and not await reserve_spectator():
             return
 
         if active_seat_key:
@@ -398,6 +422,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 loaded = load_room(db, code)
                 if not can_view_room(db, loaded, user):
                     await release_presence()
+                    await release_spectator()
                     await close_socket(4403)
                     return
                 snapshot = serialize_room(
@@ -408,11 +433,13 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 )
         except HTTPException:
             await release_presence()
+            await release_spectator()
             await close_socket(4404)
             return
         except Exception:
             logger.exception("failed to serialize websocket room %s", code)
             await release_presence()
+            await release_spectator()
             await close_socket(1011)
             return
     try:
@@ -426,6 +453,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
             initial_snapshot_seq = int(snapshot["seq"])
     except WebSocketDisconnect:
         await release_presence()
+        await release_spectator()
         return
 
     async def synchronize_presence() -> list[tuple[str, int]]:
@@ -435,7 +463,13 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
         with SessionLocal() as read_db:
             current_room = load_room(read_db, code)
             current_seat = user_seat(current_room, user)
+            should_spectate = current_seat is None and not can_control(read_db, current_room, user)
             desired = (current_seat.seat_key, user.id) if current_seat and current_room.status in ACTIVE_PRESENCE_STATUSES else None
+        if should_spectate and not joined_as_spectator:
+            if not await reserve_spectator():
+                raise WebSocketDisconnect(code=4429)
+        elif not should_spectate and joined_as_spectator:
+            await release_spectator()
         if desired == joined_presence:
             return []
         events: list[tuple[str, int]] = []
@@ -512,6 +546,11 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                     joined_presence[1],
                     connection_id=presence_connection_id,
                 )
+            if joined_as_spectator and not await room_hub.spectator_refresh(
+                code, connection_id=presence_connection_id
+            ):
+                await close_socket(4429)
+                return
             if not _websocket_session_active(websocket, user):
                 await close_socket(4401)
                 return
@@ -573,6 +612,11 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                     if not can_view_room(db, room, user):
                         await close_socket(4403 if user else 4401)
                         return
+                if joined_as_spectator and not await room_hub.spectator_refresh(
+                    code, connection_id=presence_connection_id
+                ):
+                    await close_socket(4429)
+                    return
                 await send_json({"type": "pong"})
 
     tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]
@@ -614,6 +658,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await release_presence()
+            await release_spectator()
 
         cleanup_task = asyncio.create_task(cleanup())
         while not cleanup_task.done():
