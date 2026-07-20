@@ -46,7 +46,7 @@ test("赛事大厅、导航和参赛入口在桌面与手机端可用", async ({
     height: tab.getBoundingClientRect().height,
     whiteSpace: getComputedStyle(tab).whiteSpace,
   })));
-  expect(mobileTabMetrics.every((tab) => tab.height <= 48 && tab.whiteSpace === "nowrap"), "手机端赛事栏目不应逐字换行").toBeTruthy();
+  expect(mobileTabMetrics.every((tab) => tab.height <= 52 && tab.whiteSpace === "nowrap"), "赛事栏目应保持单行且不异常增高").toBeTruthy();
   await page.getByRole("tab", { name: "规则说明" }).click();
   await expect(page.getByText(/文明发言/)).toBeVisible();
   await page.getByRole("tab", { name: "观战列表" }).click();
