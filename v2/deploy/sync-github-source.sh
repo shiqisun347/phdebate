@@ -34,7 +34,7 @@ if ! git -C "$SOURCE" diff --quiet || ! git -C "$SOURCE" diff --cached --quiet; 
 fi
 
 rsync_args=(
-  -a --delete --itemize-changes
+  -rlp --checksum --delete --itemize-changes
   --exclude='/.env'
   --exclude='/runtime/'
   --exclude='/storage/'

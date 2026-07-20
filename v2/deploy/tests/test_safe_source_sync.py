@@ -36,6 +36,8 @@ def test_source_sync_requires_a_clean_git_checkout_and_supports_dry_run() -> Non
     assert "git -C \"$SOURCE\" diff --quiet" in script
     assert "git -C \"$SOURCE\" diff --cached --quiet" in script
     assert "--dry-run" in script
+    assert "-rlp --checksum --delete" in script
+    assert "-a --delete" not in script
     assert '"$SOURCE_V2/" "$DESTINATION/"' in script
 
 
