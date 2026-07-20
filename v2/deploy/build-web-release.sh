@@ -90,4 +90,6 @@ fi
 
 test -f "$RELEASE_DIR/server.js"
 test -f "$RELEASE_DIR/public/worklets/livekit-interrupt-gate.js"
+printf '%s\n' "$RELEASE" >"$RELEASE_DIR/.release-complete"
+chmod 640 "$RELEASE_DIR/.release-complete"
 echo "web_release_ready release=$RELEASE mode=$MODE base_path=${BASE_PATH:-/} path=$RELEASE_DIR"

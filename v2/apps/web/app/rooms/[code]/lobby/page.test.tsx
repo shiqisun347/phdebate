@@ -151,6 +151,25 @@ describe("room lobby", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "确认准备" })).toBeEnabled());
   });
 
+  it("confirms that the room invitation link was copied", async () => {
+    mocks.room = lobbyRoom({
+      competition: { ...lobbyRoom().competition, ranked: false },
+      season: null,
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<LobbyPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "复制房间邀请链接" }));
+
+    expect(await screen.findByText("已复制", { selector: ".copy-confirmation" })).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    expect(screen.getByRole("button", { name: "邀请链接已复制" })).toBeInTheDocument();
+  });
+
   it("returns an anonymous invitee to the same lobby after authentication", () => {
     mocks.user = null;
     mocks.room = lobbyRoom({

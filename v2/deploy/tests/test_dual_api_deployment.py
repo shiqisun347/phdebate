@@ -69,6 +69,13 @@ def test_api_release_excludes_runtime_caches_and_validates_import() -> None:
     assert 'chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RELEASE_DIR"' in script
 
 
+def test_web_release_is_marked_complete_only_after_runtime_assets_exist() -> None:
+    script = read("build-web-release.sh")
+    runtime_check = script.index('test -f "$RELEASE_DIR/public/worklets/livekit-interrupt-gate.js"')
+    marker = script.index('>"$RELEASE_DIR/.release-complete"')
+    assert runtime_check < marker
+
+
 def test_backup_scripts_keep_runtime_data_and_voice_recovery_separate() -> None:
     data = read("backup-data-volumes.sh")
     voice = read("capture-reliable-voice-runtime.sh")

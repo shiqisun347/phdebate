@@ -1168,6 +1168,14 @@ async def start_speech(
     if existing_active and seat and existing_active.seat_key == seat.seat_key and existing_active.speaker_type == "human":
         if not control_lease or not seat.control_lease or seat.control_lease != control_lease:
             raise HTTPException(status_code=409, detail="该席位已在其他设备上接管。")
+        # This branch is resuming this exact speech, so validate every other
+        # authoritative turn rule without rejecting it as its own active row.
+        allowed, reason = speaking_permission(room, user, ignore_active_speech=True)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=reason)
+        current = stage(room)
+        if not current or existing_active.stage_key != current.get("key"):
+            raise HTTPException(status_code=409, detail="进行中的发言不属于当前阶段，请刷新页面或由房主处理异常步骤。")
         return {
             "speech_id": existing_active.id,
             "room": serialize_room(db, room, user),

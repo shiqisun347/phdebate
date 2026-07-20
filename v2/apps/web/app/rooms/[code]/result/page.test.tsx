@@ -122,6 +122,25 @@ describe("result archive download", () => {
     expect(await screen.findByRole("heading", { name: "正方胜利" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "下载完整归档" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "同题再来一场" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "返回个人中心" })).not.toBeInTheDocument();
+  });
+
+  it("returns an anonymous watcher to the live watch page while a result is not final", async () => {
+    const liveResult = result(null);
+    liveResult.match.status = "running";
+    liveResult.match.winner = null;
+    liveResult.room.status = "paused";
+    liveResult.scorecard = null;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(liveResult), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    render(<ResultPage />);
+
+    expect(await screen.findByRole("heading", { name: "比赛已暂停" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回比赛现场" })).toHaveAttribute("href", "/rooms/381526/watch");
+    expect(screen.queryByRole("link", { name: "返回个人中心" })).not.toBeInTheDocument();
   });
 
   it("lets a former participant create an idempotent same-topic rematch", async () => {

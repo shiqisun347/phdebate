@@ -166,7 +166,12 @@ def user_seat(room: Room, user: User | None) -> RoomSeat | None:
     return next((seat for seat in room.seats if seat.user_id == user.id), None)
 
 
-def speaking_permission(room: Room, user: User | None) -> tuple[bool, str]:
+def speaking_permission(
+    room: Room,
+    user: User | None,
+    *,
+    ignore_active_speech: bool = False,
+) -> tuple[bool, str]:
     if not user:
         return False, "登录后才能参赛"
     seat = user_seat(room, user)
@@ -186,7 +191,7 @@ def speaking_permission(room: Room, user: User | None) -> tuple[bool, str]:
     if not current:
         return False, "当前没有发言环节"
     active = active_speech(db=None, room=room)
-    if active:
+    if active and not ignore_active_speech:
         return False, "该席位正在另一设备发言" if active.seat_key == seat.seat_key else "其他辩手正在发言"
     if current.get("kind") == "speech" and current.get("seat") != seat.seat_key:
         return False, f"当前轮到 {seat_label(current.get('seat', ''))}"

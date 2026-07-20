@@ -11,10 +11,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="zh-CN">
       <body>
+        <a className="skip-link" href="#main-content">跳到主要内容</a>
         <div className="ambient ambient-a" />
         <div className="ambient ambient-b" />
         <GlobalNav />
-        <main>{children}</main>
+        <main id="main-content">{children}</main>
         <footer className="site-footer">
           <span>稷下辩论 JIXIA DEBATE</span>
           <span>真人思辨 · AI 协作 · 自动赛程</span>
@@ -23,4 +24,3 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     </html>
   );
 }
-

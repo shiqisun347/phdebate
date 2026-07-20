@@ -14,6 +14,9 @@ export function GlobalNav() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuToggleRef = useRef<HTMLButtonElement | null>(null);
   const isStage = pathname.includes("/debate") || pathname.includes("/watch");
+  const isLobbyPage = pathname === "/";
+  const isRankingsPage = pathname === "/rankings";
+  const isAdminPage = pathname === "/admin" || pathname.startsWith("/admin/");
   useEffect(() => setMenuOpen(false), [pathname]);
   useEffect(() => {
     if (!menuOpen) return;
@@ -40,9 +43,9 @@ export function GlobalNav() {
         <span><strong>稷下辩论</strong><small>JIXIA DEBATE</small></span>
       </Link>
       <nav id="primary-navigation" className={menuOpen ? "open" : ""} aria-label="主要导航">
-        <Link href="/" onClick={() => setMenuOpen(false)}>赛事大厅</Link>
-        <Link href="/rankings" onClick={() => setMenuOpen(false)}>排行榜</Link>
-        {user?.role === "system_admin" && <Link href="/admin" onClick={() => setMenuOpen(false)}><Shield size={16} />系统管理</Link>}
+        <Link href="/" aria-current={isLobbyPage ? "page" : undefined} onClick={() => setMenuOpen(false)}>赛事大厅</Link>
+        <Link href="/rankings" aria-current={isRankingsPage ? "page" : undefined} onClick={() => setMenuOpen(false)}>排行榜</Link>
+        {user?.role === "system_admin" && <Link href="/admin" aria-current={isAdminPage ? "page" : undefined} onClick={() => setMenuOpen(false)}><Shield size={16} />系统管理</Link>}
       </nav>
       <button ref={menuToggleRef} type="button" className="icon-button mobile-nav-toggle" aria-label={menuOpen ? "关闭导航菜单" : "打开导航菜单"} aria-controls="primary-navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>{menuOpen ? <X size={18} /> : <Menu size={18} />}</button>
       <div className="nav-account">

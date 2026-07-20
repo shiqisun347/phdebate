@@ -75,6 +75,14 @@ sha256sum -c agent-20260719T135643Z.dump.sha256
 pg_restore -l agent-20260719T135643Z.dump >/dev/null
 ```
 
+数据卷还必须完成一次隔离解包和逐文件校验，不能只验证外层压缩包：
+
+```bash
+cd /home/ubuntu/sunsq/phdebate-v2
+./deploy/verify-data-volume-backup.sh \
+  runtime/deploy-backups/20260719T135612Z-data-volumes.tar.gz
+```
+
 V2 数据库还应完成临时数据库恢复验证：
 
 ```bash
@@ -247,6 +255,17 @@ ln -sfn "$(pwd)/runtime/web-releases/restore-20260719" .web-current
 
 实际 release 目录名以构建脚本输出为准，创建链接前用
 `find runtime/api-releases runtime/web-releases -maxdepth 1` 确认。不要猜目录。
+
+新版本连续通过健康检查并完成服务器备份后，可以预览旧 release 清理范围：
+
+```bash
+./deploy/prune-releases.sh dry-run
+PHDEBATE_RELEASE_KEEP=5 PHDEBATE_RELEASE_MIN_AGE_HOURS=24 \
+  ./deploy/prune-releases.sh apply
+```
+
+工具始终保留当前 API primary/secondary、当前 Web、最近五个版本、24 小时内版本以及无法确认
+完整性的人工目录。不得直接对 `runtime/*-releases` 执行通配符删除。
 
 Debate Agent：
 

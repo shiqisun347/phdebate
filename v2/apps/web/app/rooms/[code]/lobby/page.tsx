@@ -180,9 +180,9 @@ export default function LobbyPage() {
       <div className="section-head">
         <div>
           <span className="eyebrow">Room Lobby</span>
-          <h2>
+          <h1>
             比赛房间 <span className="room-code">#{room.code}</span>
-          </h2>
+          </h1>
           <p>{competitionDisplayName(room.competition)} · 等待辩手准备</p>
         </div>
         <div className={`connection ${connected ? "ok" : ""}`}>
@@ -199,7 +199,7 @@ export default function LobbyPage() {
       )}
       <div className="panel lobby-topic">
         <span className="badge">本场辩题</span>
-        <h1>{room.topic}</h1>
+        <h2>{room.topic}</h2>
         <div className="detail-meta">
           <span>
             <Users size={15} />
@@ -297,6 +297,9 @@ export default function LobbyPage() {
           </div>
           <div className="room-share">
             <strong>{room.code}</strong>
+            <span className="copy-confirmation" role="status" aria-live="polite">
+              {copied ? "已复制" : ""}
+            </span>
             <button
               type="button"
               className="icon-button"

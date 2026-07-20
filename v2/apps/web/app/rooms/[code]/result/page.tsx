@@ -313,6 +313,8 @@ export default function ResultPage() {
   const resultIsFinal = ["completed", "review_required", "terminated"].includes(
     data.match.status,
   );
+  const hasParticipantAccess = Boolean(data.room.my_seat || data.room.can_control);
+  const liveRoomHref = `/rooms/${code}/${hasParticipantAccess ? "debate" : "watch"}`;
   const winner =
     data.match.status === "terminated"
       ? "比赛已终止"
@@ -360,10 +362,18 @@ export default function ResultPage() {
             {refreshing ? <LoaderCircle className="spin" /> : <RefreshCw />}{" "}
             {refreshing ? "刷新中…" : "刷新赛果"}
           </button>
-          <Link href="/me" className="button">
-            <Award />
-            返回个人中心
-          </Link>
+          {!resultIsFinal && (
+            <Link href={liveRoomHref} className="button">
+              <ArrowLeft />
+              返回比赛现场
+            </Link>
+          )}
+          {hasParticipantAccess && (
+            <Link href="/me" className={resultIsFinal ? "button" : "button button-secondary"}>
+              <Award />
+              返回个人中心
+            </Link>
+          )}
           {resultIsFinal && data.room.my_seat && (
             <button
               type="button"
@@ -409,12 +419,7 @@ export default function ResultPage() {
       )}
       {!resultIsFinal && (
         <div className="notice-box" role="status">
-          当前页面展示的是实时比赛记录，正式赛果尚未生成。
-          <Link
-            href={`/rooms/${code}/${data.room.my_seat || data.room.can_control ? "debate" : "watch"}`}
-          >
-            返回比赛现场
-          </Link>
+          当前页面展示的是实时比赛记录，正式赛果尚未生成；比赛恢复或阶段推进后，本页会继续同步。
         </div>
       )}
       <div className="dashboard-grid">

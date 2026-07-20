@@ -39,7 +39,14 @@ test("赛事大厅、导航和参赛入口在桌面与手机端可用", async ({
 
   await page.getByRole("link", { name: "查看规则" }).first().click();
   await expect(page).toHaveURL(/\/competitions\/daily-4v4$/);
+  expect(await page.evaluate(() => window.scrollY), "进入赛事详情应回到页面顶部").toBeLessThanOrEqual(1);
   await expect(page.getByRole("tab", { name: "赛事介绍" })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileTabMetrics = await page.getByRole("tab").evaluateAll((tabs) => tabs.map((tab) => ({
+    height: tab.getBoundingClientRect().height,
+    whiteSpace: getComputedStyle(tab).whiteSpace,
+  })));
+  expect(mobileTabMetrics.every((tab) => tab.height <= 48 && tab.whiteSpace === "nowrap"), "手机端赛事栏目不应逐字换行").toBeTruthy();
   await page.getByRole("tab", { name: "规则说明" }).click();
   await expect(page.getByText(/文明发言/)).toBeVisible();
   await page.getByRole("tab", { name: "观战列表" }).click();

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowRight, CalendarClock, Eye, Radio, ShieldCheck, Trophy, Users } from "lucide-react";
-import { KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ParticipateDialog } from "@/components/participate-dialog";
 import { LoadError } from "@/components/load-error";
 import { apiFetch } from "@/lib/api";
@@ -33,6 +33,9 @@ export default function CompetitionDetailPage() {
     setError("");
     try { setData(await apiFetch<Detail>(`/api/competitions/${slug}`)); }
     catch (err) { setError(err instanceof Error ? err.message : "赛事详情载入失败"); }
+  }, [slug]);
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [slug]);
   useEffect(() => { void load(); }, [load]);
   if (!data && error) return <LoadError message={error} retry={() => void load()} />;

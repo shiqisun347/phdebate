@@ -132,29 +132,48 @@ def competitions(db: Session = Depends(get_db)) -> dict:
 
 @router.get("/competitions/{slug}")
 def competition_detail(slug: str, db: Session = Depends(get_db)) -> dict:
-    competition = db.scalar(select(Competition).where(Competition.slug == slug, Competition.is_public.is_(True)))
+    competition = db.scalar(
+        select(Competition)
+        .options(joinedload(Competition.season))
+        .where(Competition.slug == slug, Competition.is_public.is_(True))
+    )
     if not competition:
         raise HTTPException(status_code=404, detail="赛事不存在。")
     topics = db.scalars(
         select(CompetitionTopic).where(CompetitionTopic.competition_id == competition.id, CompetitionTopic.is_active.is_(True))
     ).all()
-    live_rooms = db.scalars(
-        select(Room)
-        .where(
-            Room.competition_id == competition.id,
-            Room.visibility == "public",
-            Room.status.in_(["preparing", "running", "paused", "judging"]),
-        )
+    pause_times = _public_pause_times()
+    live_filters = (
+        Room.competition_id == competition.id,
+        Room.visibility == "public",
+        Room.status.in_(["preparing", "running", "paused", "judging"]),
+        _public_room_is_fresh(pause_times),
+    )
+    live_count = db.scalar(
+        select(func.count(Room.id))
+        .outerjoin(pause_times, pause_times.c.room_id == Room.id)
+        .where(*live_filters)
+    ) or 0
+    live_rooms = db.execute(
+        select(Room, pause_times.c.paused_at)
+        .outerjoin(pause_times, pause_times.c.room_id == Room.id)
+        .where(*live_filters)
         .order_by(Room.updated_at.desc())
         .limit(20)
     ).all()
     return {
-        "competition": serialize_competition(competition, topics=list(topics), live_count=len(live_rooms)),
+        "competition": serialize_competition(competition, topics=list(topics), live_count=int(live_count)),
         "season": serialize_season(competition.season) if competition.season else None,
         "leaderboard": leaderboard(db, competition.id, competition.season_id, limit=20),
         "live_rooms": [
-            {"code": room.code, "topic": room.topic, "status": room.status, "updated_at": room.updated_at.isoformat()}
-            for room in live_rooms
+            {
+                "code": room.code,
+                "topic": room.topic,
+                "status": room.status,
+                "paused_at": paused_at.isoformat() if paused_at else None,
+                "updated_at": room.updated_at.isoformat(),
+            }
+            for room, paused_at in live_rooms
         ],
     }
 

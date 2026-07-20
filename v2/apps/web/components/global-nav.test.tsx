@@ -36,6 +36,7 @@ describe("global navigation", () => {
     expect(screen.getByRole("button", { name: "关闭导航菜单" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("navigation", { name: "主要导航" })).toHaveClass("open");
     expect(screen.getByRole("link", { name: "赛事大厅" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("link", { name: "赛事大厅" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "排行榜" })).toHaveAttribute("href", "/rankings");
     expect(screen.getByRole("link", { name: "系统管理" })).toHaveAttribute("href", "/admin");
     expect(screen.getByRole("link", { name: "系统管理员" })).toHaveAttribute("href", "/me");

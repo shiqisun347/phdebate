@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import axe from "axe-core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import HomePage from "@/app/page";
 import CompetitionDetailPage from "@/app/competitions/[slug]/page";
@@ -15,6 +15,10 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("public pages", () => {
+  beforeEach(() => {
+    vi.stubGlobal("scrollTo", vi.fn());
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -196,6 +200,24 @@ describe("public pages", () => {
     expect(intro).toHaveAttribute("aria-selected", "true");
     expect(live).toHaveAttribute("tabindex", "-1");
     expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "competition-tab-intro");
+  });
+
+  it("starts a competition detail at the top after client-side navigation", async () => {
+    const scrollTo = vi.fn();
+    vi.stubGlobal("scrollTo", scrollTo);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({
+      competition: {
+        id: "daily", slug: "daily-4v4", name: "4v4 人机辩论日常赛", tagline: "", description: "赛事说明", rules: "赛事规则",
+        format: "4v4", seat_count: 8, ranked: true, allow_custom_topic: false, accent: "violet", live_count: 0, topics: [],
+      },
+      leaderboard: [],
+      live_rooms: [],
+    })));
+
+    render(<CompetitionDetailPage />);
+
+    expect(await screen.findByRole("heading", { name: "4v4 人机辩论正式赛" })).toBeInTheDocument();
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: "auto" });
   });
 
   it("explains why a cancelled room deep link returned to the lobby", async () => {

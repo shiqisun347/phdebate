@@ -953,7 +953,7 @@ export default function AdminPage() {
       <div className="section-head">
         <div>
           <span className="eyebrow">System Administration</span>
-          <h2>稷下辩论系统管理</h2>
+          <h1>稷下辩论系统管理</h1>
           <p>全局设置、赛事配置、服务状态和审计中心，仅系统管理员可见。</p>
         </div>
         <div className={`badge ${dash.system_health.ok ? "live" : ""}`}>

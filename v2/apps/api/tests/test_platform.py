@@ -162,6 +162,15 @@ def test_public_catalog_aggregates_live_room_counts_and_room_metadata(client: Te
     assert third_room["code"] not in indexed
     assert fourth_room["code"] not in indexed
 
+    detail = client.get("/api/competitions/training-1v1")
+    assert detail.status_code == 200
+    detail_codes = {item["code"] for item in detail.json()["live_rooms"]}
+    assert first_room["code"] in detail_codes
+    assert second_room["code"] in detail_codes
+    assert third_room["code"] not in detail_codes
+    assert fourth_room["code"] not in detail_codes
+    assert detail.json()["competition"]["live_count"] == baseline_live_count + 2
+
 
 def test_room_projection_labels_completed_caption_as_previous_speech(client: TestClient, register_user) -> None:
     owner = register_user("previous_caption_owner")

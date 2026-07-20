@@ -136,7 +136,7 @@ export default function MePage() {
       <div className="section-head">
         <div>
           <span className="eyebrow">My Debate</span>
-          <h2>{data.user.real_name}的辩论档案</h2>
+          <h1>{data.user.real_name}的辩论档案</h1>
           <p>@{data.user.account} · 所有比赛身份均绑定至此账号</p>
         </div>
       </div>
