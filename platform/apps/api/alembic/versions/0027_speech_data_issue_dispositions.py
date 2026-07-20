@@ -1,6 +1,6 @@
 """Track human disposition of missing speech data artifacts.
 
-Revision ID: 0027_speech_data_issue_dispositions
+Revision ID: 0027_speech_data_disposition
 Revises: 0026_judge_task_identity
 """
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0027_speech_data_issue_dispositions"
+revision: str = "0027_speech_data_disposition"
 down_revision: str | None = "0026_judge_task_identity"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
