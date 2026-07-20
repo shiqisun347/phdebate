@@ -2520,7 +2520,7 @@ async def test_presence_expiry_releases_lobby_seat_and_substitutes_running_human
 
     abandoned_owner = register_user("expiry_abandoned_owner")
     abandoned_guest = register_user("expiry_abandoned_guest")
-    abandoned = create_training_room(abandoned_owner, "房主离线后的空房自动取消测试")
+    abandoned = create_training_room(abandoned_owner, "房主离线后仍可返回大厅测试")
     abandoned_guest.post(
         f"/api/rooms/{abandoned['code']}/claim-seat",
         headers=csrf(abandoned_guest),
@@ -2534,19 +2534,19 @@ async def test_presence_expiry_releases_lobby_seat_and_substitutes_running_human
         owner_seat.disconnected_at = now() - timedelta(seconds=121)
         guest_seat.connected = True
         guest_seat.disconnected_at = None
-        assert await match_engine._expire_presence(db, room) is True
+        assert await match_engine._expire_presence(db, room) is False
         db.commit()
-        assert owner_seat.occupant_type == "open" and owner_seat.user_id is None
+        assert owner_seat.occupant_type == "human" and owner_seat.user_id == room.owner_id
+        assert owner_seat.connected is False
         assert guest_seat.occupant_type == "human" and guest_seat.connected is True
         assert room.status == "lobby" and room.completed_at is None
-        assert room.owner_id == guest_seat.user_id
         transferred = db.scalar(
             select(MatchEvent).where(
                 MatchEvent.room_id == room.id,
                 MatchEvent.event_type == "room.owner_transferred",
             )
         )
-        assert transferred and transferred.payload["seat_key"] == guest_seat.seat_key
+        assert transferred is None
         assert not db.scalar(
             select(MatchEvent.id).where(
                 MatchEvent.room_id == room.id,
@@ -3787,6 +3787,147 @@ def test_review_requires_review_state_and_is_applied_once(client: TestClient, re
     assert public_correction["payload"]["old"]["winner"] in {"aff", "neg"}
     assert public_correction["payload"]["new"]["winner"] in {"neg", "draw"}
     assert "reasoning" not in public_correction["payload"]["old"]
+
+
+def test_admin_data_quality_separates_production_coverage_from_qa_data(client: TestClient, register_user) -> None:
+    baseline_admin = TestClient(client.app)
+    with baseline_admin:
+        assert baseline_admin.post(
+            "/api/auth/login",
+            json={"account": "admin_test", "password": "Admin-test-1234"},
+        ).status_code == 200
+        baseline = baseline_admin.get("/api/admin/data-quality").json()
+    healthy_owner = register_user("data_quality_healthy")
+    broken_owner = register_user("data_quality_broken")
+    qa_owner = register_user("data_quality_qa")
+    healthy = create_training_room(healthy_owner, "数据质量完整比赛")
+    broken = create_training_room(broken_owner, "数据质量缺失比赛")
+    qa = create_training_room(qa_owner, "数据质量 QA 比赛")
+    for owner, room in ((healthy_owner, healthy), (broken_owner, broken), (qa_owner, qa)):
+        assert owner.post(f"/api/rooms/{room['code']}/ready", headers=csrf(owner), json={"ready": True}).status_code == 200
+        assert owner.post(f"/api/rooms/{room['code']}/start", headers=csrf(owner), json={}).status_code == 200
+
+    with SessionLocal.begin() as db:
+        rooms = {
+            item.code: item
+            for item in db.scalars(select(Room).where(Room.code.in_([healthy["code"], broken["code"], qa["code"]]))).all()
+        }
+        matches = {
+            item.room_id: item
+            for item in db.scalars(select(Match).where(Match.room_id.in_([item.id for item in rooms.values()]))).all()
+        }
+        for room in rooms.values():
+            room.status = "completed"
+            room.completed_at = now()
+            matches[room.id].status = "completed"
+            matches[room.id].winner = "aff"
+        rooms[qa["code"]].is_test_data = True
+
+        healthy_match = matches[rooms[healthy["code"]].id]
+        healthy_speech = Speech(
+            match_id=healthy_match.id,
+            room_id=rooms[healthy["code"]].id,
+            seat_key="aff_1",
+            stage_key="aff_case",
+            speaker_type="human",
+            status="completed",
+            content="这是一段完整保存的真人发言。",
+            audio_url=f"/media/{healthy['code']}/healthy.wav",
+            duration_seconds=8,
+        )
+        db.add(healthy_speech)
+        db.flush()
+        db.add(TranscriptSegment(speech_id=healthy_speech.id, start_ms=0, end_ms=8000, text=healthy_speech.content))
+        db.add(
+            JudgeScorecard(
+                match_id=healthy_match.id,
+                status="approved",
+                winner="aff",
+                affirmative_score=88,
+                negative_score=82,
+                individual_scores={"aff_1": 88, "neg_1": 82},
+                reasoning="测试结论",
+            )
+        )
+
+        broken_match = matches[rooms[broken["code"]].id]
+        broken_speech = Speech(
+            match_id=broken_match.id,
+            room_id=rooms[broken["code"]].id,
+            seat_key="aff_1",
+            stage_key="aff_case",
+            speaker_type="human",
+            status="completed",
+            content="",
+            audio_url="",
+        )
+        db.add(broken_speech)
+        db.flush()
+        broken_match_id = broken_match.id
+        broken_speech_id = broken_speech.id
+
+        qa_match = matches[rooms[qa["code"]].id]
+        db.add(
+            Speech(
+                match_id=qa_match.id,
+                room_id=rooms[qa["code"]].id,
+                seat_key="aff_1",
+                stage_key="aff_case",
+                speaker_type="human",
+                status="completed",
+                content="",
+                audio_url="",
+            )
+        )
+
+    admin = TestClient(client.app)
+    with admin:
+        assert admin.post("/api/auth/login", json={"account": "admin_test", "password": "Admin-test-1234"}).status_code == 200
+        response = admin.get("/api/admin/data-quality")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["scope"] == "production"
+        assert payload["matches"] == baseline["matches"] | {
+            "total": baseline["matches"]["total"] + 2,
+            "completed": baseline["matches"]["completed"] + 2,
+        }
+        assert payload["speeches"]["human_completed"] == baseline["speeches"]["human_completed"] + 2
+        assert payload["speeches"]["human_with_transcript"] == baseline["speeches"]["human_with_transcript"] + 1
+        assert payload["speeches"]["human_with_audio"] == baseline["speeches"]["human_with_audio"] + 1
+        assert payload["speeches"]["ai_completed"] == baseline["speeches"]["ai_completed"]
+        assert payload["speeches"]["transcript_coverage_percent"] == round(
+            100
+            * (baseline["speeches"]["human_with_transcript"] + 1)
+            / (baseline["speeches"]["human_completed"] + 2),
+            1,
+        )
+        assert payload["speeches"]["audio_coverage_percent"] == round(
+            100
+            * (baseline["speeches"]["human_with_audio"] + 1)
+            / (baseline["speeches"]["human_completed"] + 2),
+            1,
+        )
+        assert (
+            payload["attention"]["published_without_scorecard"]
+            == baseline["attention"]["published_without_scorecard"] + 1
+        )
+        assert (
+            payload["attention"]["published_without_speeches"]
+            == baseline["attention"]["published_without_speeches"]
+        )
+        assert payload["attention"]["human_missing_transcript"] == baseline["attention"]["human_missing_transcript"] + 1
+        assert payload["attention"]["human_missing_audio"] == baseline["attention"]["human_missing_audio"] + 1
+        assert payload["attention"]["human_missing_segments"] == baseline["attention"]["human_missing_segments"] + 1
+        broken_sample = next(item for item in payload["attention"]["samples"] if item["speech_id"] == broken_speech_id)
+        assert broken_sample == {
+            "room_code": broken["code"],
+            "match_id": broken_match_id,
+            "speech_id": broken_speech_id,
+            "seat_key": "aff_1",
+            "stage_key": "aff_case",
+            "issues": ["missing_transcript", "missing_audio", "missing_segments"],
+        }
+        assert all(item["room_code"] != qa["code"] for item in payload["attention"]["samples"])
 
 
 def test_admin_media_inventory_and_cleanup_never_delete_referenced_audio(client: TestClient, register_user, monkeypatch) -> None:

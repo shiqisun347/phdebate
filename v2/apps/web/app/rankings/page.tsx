@@ -4,6 +4,7 @@ import { Medal, Trophy } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { LoadError } from "@/components/load-error";
+import { PageLoading } from "@/components/page-loading";
 import { apiFetch } from "@/lib/api";
 import {
   competitionDisplayName,
@@ -89,7 +90,7 @@ export default function RankingsPage() {
   if (!catalogLoaded && error)
     return <LoadError message={error} retry={() => void loadCatalog()} />;
   if (!catalogLoaded)
-    return <div className="loading-screen">正在载入排行榜…</div>;
+    return <PageLoading label="正在载入排行榜…" />;
 
   return (
     <div className="page-shell">

@@ -288,7 +288,10 @@ describe("participation dialog", () => {
     trigger.focus();
     const onClose = vi.fn();
     const view = render(<ParticipateDialog competition={training} onClose={onClose} />);
-    expect(screen.getByRole("button", { name: "关闭参赛窗口" })).toHaveFocus();
+    const close = screen.getByRole("button", { name: "关闭参赛窗口" });
+    expect(close).toHaveFocus();
+    trigger.focus();
+    expect(close).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
     view.unmount();

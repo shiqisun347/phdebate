@@ -79,7 +79,7 @@ describe("text speech fallback", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交本轮发言" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "改用文字完成本轮发言" })).not.toBeInTheDocument());
-    expect(onPendingChange).toHaveBeenLastCalledWith(false);
+    await waitFor(() => expect(onPendingChange).toHaveBeenLastCalledWith(false));
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/audio"))).toBe(false);
     const finishRequest = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/speech/finish"));

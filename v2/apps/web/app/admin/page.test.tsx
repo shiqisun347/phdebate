@@ -48,6 +48,27 @@ const legacyCompetition = {
   topics: [],
 };
 
+const dataQuality = {
+  scope: "production",
+  matches: { total: 1, active: 0, completed: 1, review_required: 0, terminated: 0 },
+  speeches: {
+    human_completed: 1,
+    human_with_transcript: 1,
+    human_with_audio: 1,
+    ai_completed: 7,
+    transcript_coverage_percent: 100,
+    audio_coverage_percent: 100,
+  },
+  attention: {
+    published_without_scorecard: 0,
+    published_without_speeches: 0,
+    human_missing_transcript: 0,
+    human_missing_audio: 0,
+    human_missing_segments: 0,
+    samples: [],
+  },
+};
+
 describe("admin operations", () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -102,6 +123,7 @@ describe("admin operations", () => {
         audio_url: "/media/_cues/cue-1.wav", is_active: true, updated_at: new Date().toISOString(),
       }] }));
       if (url.endsWith("/api/admin/media")) return Promise.resolve(response({ media: null }));
+      if (url.endsWith("/api/admin/data-quality")) return Promise.resolve(response(dataQuality));
       if (url.endsWith("/api/admin/archives")) return Promise.resolve(response({ archives: {
         scanned_files: 3, scanned_bytes: 4096, expected_matches: 1, complete_archives: 1,
         invalid_archive_count: 0, invalid_archives: [], orphan_candidate_count: 0,

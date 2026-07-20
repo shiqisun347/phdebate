@@ -1,22 +1,76 @@
-import { Download, RefreshCw, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { Download, RefreshCw, ShieldCheck, TriangleAlert, Trash2 } from "lucide-react";
 
-import { bytes, type ArchiveStatus, type MediaStatus } from "@/components/admin/admin-module-types";
+import { bytes, type ArchiveStatus, type DataQualityStatus, type MediaStatus } from "@/components/admin/admin-module-types";
 
 type Props = {
   media: MediaStatus | null;
   archives: ArchiveStatus | null;
+  dataQuality: DataQualityStatus | null;
   saving: boolean;
   onRefreshMedia: () => void;
   onCleanupMedia: () => void;
   onRefreshArchives: () => void;
+  onRefreshDataQuality: () => void;
   onRepairArchives: () => void;
   onCleanupArchives: () => void;
 };
 
-export default function MediaModule({ media, archives, saving, onRefreshMedia, onCleanupMedia, onRefreshArchives, onRepairArchives, onCleanupArchives }: Props) {
+const issueLabels: Record<string, string> = {
+  missing_transcript: "缺少逐字稿",
+  missing_audio: "缺少真人录音",
+  missing_segments: "缺少分段记录",
+};
+
+export default function MediaModule({ media, archives, dataQuality, saving, onRefreshMedia, onCleanupMedia, onRefreshArchives, onRefreshDataQuality, onRepairArchives, onCleanupArchives }: Props) {
+  const qualityAttention = dataQuality
+    ? dataQuality.attention.published_without_scorecard
+      + dataQuality.attention.published_without_speeches
+      + dataQuality.attention.human_missing_transcript
+      + dataQuality.attention.human_missing_audio
+      + dataQuality.attention.human_missing_segments
+    : 0;
   return (
     <>
-      <div className="panel-title"><h2>媒体存储与一致性</h2><span className="badge">默认只读盘点</span></div>
+      <div className="panel-title">
+        <div>
+          <h2>比赛数据质量</h2>
+          <p className="admin-section-copy">仅统计正式比赛，检查赛果、逐字稿、真人录音和分段记录是否可用于复盘与分析。</p>
+        </div>
+        <span className={`badge ${qualityAttention ? "closed" : ""}`}>{qualityAttention ? `${qualityAttention} 项需关注` : "数据链路完整"}</span>
+      </div>
+      {dataQuality ? (
+        <>
+          <div className="stats-grid">
+            <div className="stat-card"><span className="muted">已发布比赛</span><strong>{dataQuality.matches.completed}</strong><small>待复核 {dataQuality.matches.review_required} 场</small></div>
+            <div className="stat-card"><span className="muted">真人逐字稿覆盖</span><strong>{dataQuality.speeches.transcript_coverage_percent}%</strong><small>{dataQuality.speeches.human_with_transcript}/{dataQuality.speeches.human_completed} 段</small></div>
+            <div className="stat-card"><span className="muted">真人录音覆盖</span><strong>{dataQuality.speeches.audio_coverage_percent}%</strong><small>{dataQuality.speeches.human_with_audio}/{dataQuality.speeches.human_completed} 段</small></div>
+            <div className="stat-card"><span className="muted">AI 完成发言</span><strong>{dataQuality.speeches.ai_completed}</strong><small>正式比赛记录</small></div>
+          </div>
+          <div className="hero-actions" style={{ marginTop: 18 }}>
+            <button className="button button-secondary" disabled={saving} onClick={onRefreshDataQuality}><RefreshCw size={16} />重新检查数据质量</button>
+          </div>
+          {qualityAttention ? (
+            <div className="error-box" role="status">
+              <TriangleAlert size={17} />
+              已发布无有效裁判 {dataQuality.attention.published_without_scorecard} 场；无发言 {dataQuality.attention.published_without_speeches} 场；真人缺逐字稿 {dataQuality.attention.human_missing_transcript} 段；缺录音 {dataQuality.attention.human_missing_audio} 段；缺分段记录 {dataQuality.attention.human_missing_segments} 段。
+            </div>
+          ) : (
+            <div className="success-box" role="status"><ShieldCheck size={17} />正式比赛的赛果、真人逐字稿、录音和分段记录均通过完整性检查。</div>
+          )}
+          {!!dataQuality.attention.samples.length && (
+            <div className="history-list" style={{ marginTop: 16 }}>
+              {dataQuality.attention.samples.map((item) => (
+                <div className="history-row" key={item.speech_id}>
+                  <span className="row-main"><strong>房间 #{item.room_code} · {item.seat_key}</strong><small>{item.stage_key} · {item.issues.map((issue) => issueLabels[issue] || issue).join("、")}</small></span>
+                  <Link className="button button-small button-secondary" href={`/rooms/${item.room_code}/result`}>查看记录</Link>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : <div className="empty">正在检查正式比赛数据质量…</div>}
+      <div className="panel-title" style={{ marginTop: 36 }}><h2>媒体存储与一致性</h2><span className="badge">默认只读盘点</span></div>
       {media ? (
         <>
           <div className="stats-grid">

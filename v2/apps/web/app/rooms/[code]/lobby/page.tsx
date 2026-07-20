@@ -16,6 +16,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiRequestError, apiFetch } from "@/lib/api";
 import { LoadError } from "@/components/load-error";
+import { PageLoading } from "@/components/page-loading";
 import { MicrophonePreflight } from "@/components/microphone-preflight";
 import { competitionDisplayName } from "@/lib/primary-competition";
 import { roomCreationBlockedReason, seasonStatusLabel } from "@/lib/seasons";
@@ -237,9 +238,9 @@ export default function LobbyPage() {
   }
   if (!room && roomError)
     return <LoadError message={roomError} retry={reconnect} />;
-  if (!room) return <div className="loading-screen">正在进入房间…</div>;
+  if (!room) return <PageLoading label="正在进入比赛房间…" />;
   if (room.status !== "lobby")
-    return <div className="loading-screen">正在返回当前比赛…</div>;
+    return <PageLoading label="正在返回当前比赛…" />;
   const me = room.seats.find((seat) => seat.is_me);
   const deviceCanWrite = !me || deviceControl === "owned";
   const humans = room.seats.filter((seat) => seat.occupant_type === "human");

@@ -36,6 +36,7 @@ from app.models.entities import (
     RoomSeat,
     Season,
     Speech,
+    TranscriptSegment,
     User,
     UserSession,
 )
@@ -1193,6 +1194,153 @@ def cleanup_media(
 @router.get("/archives")
 def archive_status(admin: User = Depends(system_admin), db: Session = Depends(get_db)) -> dict:
     return {"archives": inspect_archives(db)}
+
+
+@router.get("/data-quality")
+def data_quality(admin: User = Depends(system_admin), db: Session = Depends(get_db)) -> dict:
+    """Summarize whether production debate records are usable for review and analysis."""
+    production_match = Room.is_test_data.is_(False)
+    match_row = db.execute(
+        select(
+            func.count(Match.id),
+            func.coalesce(func.sum(case((Match.status.in_(("lobby", "preparing", "running", "paused", "judging")), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Match.status == "completed", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Match.status == "review_required", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Match.status == "terminated", 1), else_=0)), 0),
+        )
+        .join(Room, Room.id == Match.room_id)
+        .where(production_match)
+    ).one()
+    completed_human = (Speech.speaker_type == "human") & (Speech.status == "completed")
+    speech_row = db.execute(
+        select(
+            func.coalesce(func.sum(case((completed_human, 1), else_=0)), 0),
+            func.coalesce(
+                func.sum(case((completed_human & (func.length(func.trim(Speech.content)) > 0), 1), else_=0)),
+                0,
+            ),
+            func.coalesce(
+                func.sum(case((completed_human & (func.length(func.trim(Speech.audio_url)) > 0), 1), else_=0)),
+                0,
+            ),
+            func.coalesce(
+                func.sum(case(((Speech.speaker_type == "ai") & (Speech.status == "completed"), 1), else_=0)),
+                0,
+            ),
+        )
+        .join(Room, Room.id == Speech.room_id)
+        .where(Room.is_test_data.is_(False))
+    ).one()
+    human_completed, human_with_transcript, human_with_audio, ai_completed = (int(value or 0) for value in speech_row)
+
+    published_without_scorecard = db.scalar(
+        select(func.count(Match.id))
+        .join(Room, Room.id == Match.room_id)
+        .outerjoin(JudgeScorecard, JudgeScorecard.match_id == Match.id)
+        .where(
+            Room.is_test_data.is_(False),
+            Match.status == "completed",
+            Match.legacy.is_(False),
+            or_(JudgeScorecard.id.is_(None), JudgeScorecard.status != "approved"),
+        )
+    ) or 0
+    published_without_speeches = db.scalar(
+        select(func.count(Match.id))
+        .join(Room, Room.id == Match.room_id)
+        .where(
+            Room.is_test_data.is_(False),
+            Match.status == "completed",
+            Match.legacy.is_(False),
+            ~select(Speech.id).where(Speech.match_id == Match.id).exists(),
+        )
+    ) or 0
+    human_missing_segments = db.scalar(
+        select(func.count(Speech.id))
+        .join(Room, Room.id == Speech.room_id)
+        .where(
+            Room.is_test_data.is_(False),
+            completed_human,
+            ~select(TranscriptSegment.id).where(TranscriptSegment.speech_id == Speech.id).exists(),
+        )
+    ) or 0
+    human_missing_transcript = max(0, human_completed - human_with_transcript)
+    human_missing_audio = max(0, human_completed - human_with_audio)
+
+    segment_exists = select(TranscriptSegment.id).where(TranscriptSegment.speech_id == Speech.id).exists()
+    sample_rows = db.execute(
+        select(
+            Room.code,
+            Match.id,
+            Speech.id,
+            Speech.seat_key,
+            Speech.stage_key,
+            Speech.content,
+            Speech.audio_url,
+            segment_exists.label("has_segment"),
+        )
+        .join(Match, Match.room_id == Room.id)
+        .join(Speech, Speech.match_id == Match.id)
+        .where(
+            Room.is_test_data.is_(False),
+            completed_human,
+            or_(
+                func.length(func.trim(Speech.content)) == 0,
+                func.length(func.trim(Speech.audio_url)) == 0,
+                ~segment_exists,
+            ),
+        )
+        .order_by(Speech.created_at.desc(), Speech.id)
+        .limit(20)
+    ).all()
+    samples = []
+    for room_code, match_id, speech_id, seat_key, stage_key, content, audio_url, has_segment in sample_rows:
+        issues = []
+        if not (content or "").strip():
+            issues.append("missing_transcript")
+        if not (audio_url or "").strip():
+            issues.append("missing_audio")
+        if not has_segment:
+            issues.append("missing_segments")
+        samples.append(
+            {
+                "room_code": room_code,
+                "match_id": match_id,
+                "speech_id": speech_id,
+                "seat_key": seat_key,
+                "stage_key": stage_key,
+                "issues": issues,
+            }
+        )
+
+    def coverage(numerator: int, denominator: int) -> float:
+        return round(100 * numerator / denominator, 1) if denominator else 100.0
+
+    return {
+        "scope": "production",
+        "matches": {
+            "total": int(match_row[0] or 0),
+            "active": int(match_row[1] or 0),
+            "completed": int(match_row[2] or 0),
+            "review_required": int(match_row[3] or 0),
+            "terminated": int(match_row[4] or 0),
+        },
+        "speeches": {
+            "human_completed": human_completed,
+            "human_with_transcript": human_with_transcript,
+            "human_with_audio": human_with_audio,
+            "ai_completed": ai_completed,
+            "transcript_coverage_percent": coverage(human_with_transcript, human_completed),
+            "audio_coverage_percent": coverage(human_with_audio, human_completed),
+        },
+        "attention": {
+            "published_without_scorecard": int(published_without_scorecard),
+            "published_without_speeches": int(published_without_speeches),
+            "human_missing_transcript": human_missing_transcript,
+            "human_missing_audio": human_missing_audio,
+            "human_missing_segments": int(human_missing_segments),
+            "samples": samples,
+        },
+    }
 
 
 @router.get("/archive-index.csv")

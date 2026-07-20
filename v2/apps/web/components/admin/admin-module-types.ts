@@ -57,6 +57,40 @@ export type ArchiveStatus = {
   deleted_bytes: number;
 };
 
+export type DataQualityStatus = {
+  scope: "production";
+  matches: {
+    total: number;
+    active: number;
+    completed: number;
+    review_required: number;
+    terminated: number;
+  };
+  speeches: {
+    human_completed: number;
+    human_with_transcript: number;
+    human_with_audio: number;
+    ai_completed: number;
+    transcript_coverage_percent: number;
+    audio_coverage_percent: number;
+  };
+  attention: {
+    published_without_scorecard: number;
+    published_without_speeches: number;
+    human_missing_transcript: number;
+    human_missing_audio: number;
+    human_missing_segments: number;
+    samples: {
+      room_code: string;
+      match_id: string;
+      speech_id: string;
+      seat_key: string;
+      stage_key: string;
+      issues: string[];
+    }[];
+  };
+};
+
 export type AutomationTemplate = {
   id: string;
   slug: string;

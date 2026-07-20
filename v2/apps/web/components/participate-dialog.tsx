@@ -71,9 +71,18 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
         first.focus();
       }
     };
+    const onFocusIn = (event: FocusEvent) => {
+      if (!dialogRef.current || dialogRef.current.contains(event.target as Node)) return;
+      const firstFocusable = dialogRef.current.querySelector<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      (firstFocusable || closeButtonRef.current)?.focus();
+    };
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
       document.body.style.overflow = previousBodyOverflow;
       previousFocus?.focus();
     };

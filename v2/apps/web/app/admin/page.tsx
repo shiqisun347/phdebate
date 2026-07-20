@@ -37,6 +37,7 @@ import type {
   AudioCue,
   Audit,
   AutomationTemplate,
+  DataQualityStatus,
   JudgeProfile,
   MediaStatus,
   ProviderConfig,
@@ -132,6 +133,7 @@ export default function AdminPage() {
   });
   const [media, setMedia] = useState<MediaStatus | null>(null);
   const [archives, setArchives] = useState<ArchiveStatus | null>(null);
+  const [dataQuality, setDataQuality] = useState<DataQualityStatus | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [recentReviews, setRecentReviews] = useState<Review[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
@@ -751,6 +753,17 @@ export default function AdminPage() {
       setSaving(false);
     }
   }
+  async function refreshDataQuality() {
+    setSaving(true);
+    setError("");
+    try {
+      setDataQuality(await apiFetch<DataQualityStatus>("/api/admin/data-quality"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "比赛数据质量检查失败");
+    } finally {
+      setSaving(false);
+    }
+  }
   async function repairArchives() {
     if (!confirm("将重新生成所有缺失或校验失败的终局比赛归档。确定继续？"))
       return;
@@ -944,12 +957,14 @@ export default function AdminPage() {
             loadedTabs.current.add("agents");
             break;
           case "media": {
-            const [mediaData, archiveData] = await Promise.all([
+            const [mediaData, archiveData, qualityData] = await Promise.all([
               apiFetch<{ media: MediaStatus }>("/api/admin/media"),
               apiFetch<{ archives: ArchiveStatus }>("/api/admin/archives"),
+              apiFetch<DataQualityStatus>("/api/admin/data-quality"),
             ]);
             setMedia(mediaData.media);
             setArchives(archiveData.archives);
+            setDataQuality(qualityData);
             loadedTabs.current.add("media");
             break;
           }
@@ -1152,10 +1167,12 @@ export default function AdminPage() {
             <MediaModule
               media={media}
               archives={archives}
+              dataQuality={dataQuality}
               saving={saving}
               onRefreshMedia={() => void refreshMedia()}
               onCleanupMedia={() => void cleanupMedia()}
               onRefreshArchives={() => void refreshArchives()}
+              onRefreshDataQuality={() => void refreshDataQuality()}
               onRepairArchives={() => void repairArchives()}
               onCleanupArchives={() => void cleanupArchives()}
             />

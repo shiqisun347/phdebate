@@ -6,6 +6,7 @@ import { ArrowRight, CalendarClock, Eye, Radio, ShieldCheck, Trophy, Users } fro
 import { KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ParticipateDialog } from "@/components/participate-dialog";
 import { LoadError } from "@/components/load-error";
+import { PageLoading } from "@/components/page-loading";
 import { apiFetch } from "@/lib/api";
 import { competitionDisplayName } from "@/lib/primary-competition";
 import { roomCreationBlockedReason, seasonStatusLabel } from "@/lib/seasons";
@@ -51,7 +52,7 @@ export default function CompetitionDetailPage() {
     void load();
   }, [load]);
   if (!data && error) return <LoadError message={error} retry={() => void load()} />;
-  if (!data) return <div className="loading-screen">正在载入赛事…</div>;
+  if (!data) return <PageLoading label="正在载入赛事详情…" />;
   const item = data.competition;
   const creationBlockedReason = roomCreationBlockedReason(item);
   const moveTabFocus = (event: KeyboardEvent<HTMLButtonElement>, current: DetailTab) => {

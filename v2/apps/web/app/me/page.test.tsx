@@ -77,6 +77,26 @@ describe("personal account", () => {
     expect(screen.getByRole("button", { name: "申请恢复真人席位" })).toBeEnabled();
   });
 
+  it("describes a lobby without repeating the room status as its detail", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({
+      ...meData,
+      summary: { ...meData.summary, active_total: 1 },
+      active_rooms: [{
+        code: "250649",
+        topic: "大厅状态说明测试",
+        status: "lobby",
+        seat_key: "aff_1",
+        occupant_type: "human",
+        can_resume: true,
+      }],
+    })));
+    render(<MePage />);
+
+    expect(await screen.findByText("等待房主锁定席位并开始比赛")).toBeInTheDocument();
+    expect(screen.getByText("返回房间大厅")).toBeInTheDocument();
+    expect(screen.getAllByText("房间大厅", { exact: true })).toHaveLength(1);
+  });
+
   it("keeps the personal center focused on competitions and account security", async () => {
     const fetchMock = vi.fn().mockResolvedValue(response(meData));
     vi.stubGlobal("fetch", fetchMock);
@@ -157,6 +177,25 @@ describe("personal account", () => {
     expect(item).toHaveTextContent("比赛已终止");
     expect(item).toHaveTextContent("已终止");
     expect(screen.getByRole("link", { name: "查看房间 192885 的比赛记录" })).toHaveAttribute("href", "/rooms/192885/result");
+  });
+
+  it("does not mislabel an imported completed match without a winner as pending review", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({
+      ...meData,
+      summary: { ...meData.summary, history_total: 1 },
+      history: [{
+        match_id: "legacy-match",
+        room_code: "194205",
+        topic: "导入的历史比赛",
+        status: "completed",
+        winner: null,
+        completed_at: "2025-01-03T12:00:00Z",
+      }],
+    })));
+    render(<MePage />);
+
+    expect(await screen.findByText("结果未记录")).toBeInTheDocument();
+    expect(screen.queryByText("待复核")).not.toBeInTheDocument();
   });
 
   it("makes a paused match recoverable without implying that it has ended", async () => {

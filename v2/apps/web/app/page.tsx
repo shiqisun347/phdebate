@@ -7,6 +7,7 @@ import { apiFetch } from "@/lib/api";
 import type { Competition, Ranking } from "@/lib/types";
 import { ParticipateDialog } from "@/components/participate-dialog";
 import { LoadError } from "@/components/load-error";
+import { PageLoading } from "@/components/page-loading";
 import { competitionDisplayName, competitionDisplayNameFromStoredName, isPrimaryCompetition, PRIMARY_COMPETITION_NAME } from "@/lib/primary-competition";
 import { roomCreationBlockedReason, seasonStatusLabel } from "@/lib/seasons";
 import { roomStatusLabel } from "@/lib/status-labels";
@@ -103,7 +104,7 @@ export default function HomePage() {
     window.history.replaceState(window.history.state, "", "/");
   }, [competitions]);
   if (!loaded && error) return <LoadError message={error} retry={() => void load()} />;
-  if (!loaded) return <div className="loading-screen">正在载入赛事大厅…</div>;
+  if (!loaded) return <PageLoading label="正在载入赛事大厅…" />;
   const primaryCompetition = competitions.find(isPrimaryCompetition) || null;
   return (
     <div className="page-shell">

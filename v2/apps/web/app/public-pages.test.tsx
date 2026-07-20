@@ -242,7 +242,7 @@ describe("public pages", () => {
       return Promise.resolve(response({ items: [] }));
     }));
     render(<HomePage />);
-    expect(await screen.findByRole("status")).toHaveTextContent("房间 #123456 已关闭");
+    expect(await screen.findByText(/房间 #123456 已关闭/)).toBeInTheDocument();
     expect(window.location.search).toBe("");
   });
 

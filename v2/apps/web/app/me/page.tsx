@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { LoadError } from "@/components/load-error";
+import { PageLoading } from "@/components/page-loading";
 import { apiFetch } from "@/lib/api";
 import { ratingReasonLabel, roomStatusLabel } from "@/lib/status-labels";
 import type { User } from "@/lib/types";
@@ -33,7 +34,8 @@ function resultLabel(item: HistoryItem): string {
   if (item.winner === "aff") return "正方胜";
   if (item.winner === "neg") return "反方胜";
   if (item.winner === "draw") return "平局";
-  return "待复核";
+  if (item.status === "review_required") return "待复核";
+  return "结果未记录";
 }
 
 function historyTone(item: HistoryItem): string {
@@ -140,7 +142,7 @@ export default function MePage() {
   }
 
   if (!data && error) return <LoadError message={error} retry={() => void load()} />;
-  if (!data) return <div className="loading-screen">正在载入个人记录…</div>;
+  if (!data) return <PageLoading label="正在载入个人比赛档案…" />;
 
   return (
     <div className="page-shell">
@@ -170,7 +172,11 @@ export default function MePage() {
                 ? room.status === "lobby" ? "返回房间大厅" : room.status === "paused" ? "查看并等待恢复" : "继续比赛"
                 : "返回观战";
               const detail = room.can_resume
-                ? room.status === "paused" ? "比赛已暂停 · 房主或管理员可在控制台恢复" : roomStatusLabel[room.status] || room.status
+                ? room.status === "lobby"
+                  ? "等待房主锁定席位并开始比赛"
+                  : room.status === "paused"
+                    ? "比赛已暂停 · 房主或管理员可在控制台恢复"
+                    : roomStatusLabel[room.status] || room.status
                 : room.restore_request?.status === "pending" ? "AI 已接替 · 恢复申请等待审批" : "AI 已接替 · 可观战并申请恢复真人席位";
               return (
               <div className={`active-room-entry ${needsAttention ? "attention" : ""}`} key={room.code}>

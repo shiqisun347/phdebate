@@ -27,10 +27,12 @@ describe("admin lazy modules", () => {
           deleted_bytes: 0,
         }}
         archives={null}
+        dataQuality={null}
         saving={false}
         onRefreshMedia={vi.fn()}
         onCleanupMedia={vi.fn()}
         onRefreshArchives={vi.fn()}
+        onRefreshDataQuality={vi.fn()}
         onRepairArchives={vi.fn()}
         onCleanupArchives={vi.fn()}
       />,
@@ -60,16 +62,65 @@ describe("admin lazy modules", () => {
           deleted_files: 0,
           deleted_bytes: 0,
         }}
+        dataQuality={null}
         saving={false}
         onRefreshMedia={vi.fn()}
         onCleanupMedia={vi.fn()}
         onRefreshArchives={vi.fn()}
+        onRefreshDataQuality={vi.fn()}
         onRepairArchives={vi.fn()}
         onCleanupArchives={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("link", { name: "下载正式比赛索引" })).toHaveAttribute("href", "/api/admin/archive-index.csv");
+  });
+
+  it("shows actionable production data coverage without mixing in QA records", () => {
+    render(
+      <MediaModule
+        media={null}
+        archives={null}
+        dataQuality={{
+          scope: "production",
+          matches: { total: 12, active: 2, completed: 8, review_required: 1, terminated: 1 },
+          speeches: {
+            human_completed: 20,
+            human_with_transcript: 19,
+            human_with_audio: 18,
+            ai_completed: 36,
+            transcript_coverage_percent: 95,
+            audio_coverage_percent: 90,
+          },
+          attention: {
+            published_without_scorecard: 0,
+            published_without_speeches: 0,
+            human_missing_transcript: 1,
+            human_missing_audio: 2,
+            human_missing_segments: 1,
+            samples: [{
+              room_code: "381526",
+              match_id: "match",
+              speech_id: "speech",
+              seat_key: "aff_1",
+              stage_key: "aff_case",
+              issues: ["missing_transcript", "missing_audio"],
+            }],
+          },
+        }}
+        saving={false}
+        onRefreshMedia={vi.fn()}
+        onCleanupMedia={vi.fn()}
+        onRefreshArchives={vi.fn()}
+        onRefreshDataQuality={vi.fn()}
+        onRepairArchives={vi.fn()}
+        onCleanupArchives={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("真人逐字稿覆盖").closest(".stat-card")).toHaveTextContent("95%");
+    expect(screen.getByText(/真人缺逐字稿 1 段/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看记录" })).toHaveAttribute("href", "/rooms/381526/result");
   });
 
   it("forwards the current audit query and page without losing keyboard semantics", () => {

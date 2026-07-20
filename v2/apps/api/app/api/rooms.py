@@ -1360,6 +1360,30 @@ async def finish_speech(
     if not speech or speech.match_id != match.id or speech.room_id != room.id or speech.seat_key != seat.seat_key:
         raise HTTPException(status_code=409, detail="发言标识与当前房间、席位或比赛不匹配。")
     if speech.status == "timed_out":
+        speech_stage = next(
+            (item for item in room.template_snapshot or [] if str(item.get("key")) == speech.stage_key),
+            None,
+        )
+        replacement = None
+        if not speech_stage or speech_stage.get("kind") != "free":
+            replacement = db.scalar(
+                select(Speech.id).where(
+                    Speech.match_id == match.id,
+                    Speech.id != speech.id,
+                    Speech.seat_key == speech.seat_key,
+                    Speech.stage_key == speech.stage_key,
+                    Speech.speaker_type == "ai",
+                    Speech.status == "completed",
+                )
+            )
+        if replacement:
+            # A disconnected human may return after an AI substitute has
+            # already completed the abandoned turn.  Accepting the browser's
+            # retained transcript at that point would create two authoritative
+            # speeches for one seat and one fixed stage, corrupting judge input,
+            # exports and the audit timeline.  We still accept ordinary weak-
+            # network late finalization when no replacement won the turn.
+            raise HTTPException(status_code=409, detail="该轮发言已由接替辩手完成，迟到内容不会重复写入比赛记录。")
         _synchronize_transcript_segments(db, speech, normalized_content)
         speech.content = normalized_content
         speech.status = "completed"
