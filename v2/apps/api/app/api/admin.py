@@ -268,7 +268,7 @@ def users(
 
 
 @router.patch("/users/{user_id}")
-def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(verify_csrf), db: Session = Depends(get_db)) -> dict:
+async def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(verify_csrf), db: Session = Depends(get_db)) -> dict:
     if admin.role != "system_admin":
         raise HTTPException(status_code=403, detail="仅系统管理员可操作。")
     active_admins = list(
@@ -288,6 +288,7 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(veri
     old_role = user.role
     old_is_test_account = user.is_test_account
     archive_match_ids: set[str] = set()
+    classified_rooms: list[tuple[str, int]] = []
     if payload.is_active is not None:
         user.is_active = payload.is_active
     if payload.role is not None:
@@ -315,6 +316,7 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(veri
                 if test_room.is_test_data:
                     continue
                 test_room.is_test_data = True
+                classified_rooms.append((test_room.code, test_room.seq))
                 match_id = db.scalar(select(Match.id).where(Match.room_id == test_room.id))
                 if match_id:
                     archive_match_ids.add(match_id)
@@ -346,6 +348,11 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(veri
     db.commit()
     for match_id in archive_match_ids:
         enqueue_match_archive(match_id)
+    for room_code, room_seq in classified_rooms:
+        await room_hub.publish(
+            room_code,
+            {"type": "room.data_scope.updated", "room_code": room_code, "seq": room_seq},
+        )
     return {"user": serialize_user(user)}
 
 

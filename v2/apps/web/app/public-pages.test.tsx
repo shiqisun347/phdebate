@@ -276,7 +276,7 @@ describe("public pages", () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual(expect.arrayContaining([
       expect.stringContaining("/api/competitions"),
       expect.stringContaining("/api/seasons"),
-      expect.stringContaining("/api/rankings?competition_slug=daily-4v4"),
+      expect.stringContaining("/api/rankings?competition_slug=daily-4v4&season_slug=season-1"),
     ]));
     const result = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(result.violations).toEqual([]);

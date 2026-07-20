@@ -459,9 +459,17 @@ describe("room lobby", () => {
     expect(screen.getByRole("button", { name: "返回检查" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(confirmStart).toHaveFocus();
+    start.focus();
+    fireEvent.focusIn(start);
+    expect(screen.getByRole("button", { name: "返回检查" })).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(document.body.style.overflow).toBe("");
+    await waitFor(() => expect(start).toHaveFocus());
+
+    fireEvent.click(start);
+    fireEvent.mouseDown(document.querySelector(".stage-confirm-backdrop")!);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     await waitFor(() => expect(start).toHaveFocus());
 
     fireEvent.click(start);

@@ -148,13 +148,19 @@ def recover_inflight_engine_tasks() -> dict[str, int]:
                 else None
             )
             if scorecard:
+                interrupted_task_id = scorecard.task_id
                 scorecard.status = "interrupted"
+                scorecard.task_id = ""
                 scorecard.reasoning = "比赛引擎重启，旧裁判任务已失效。"
                 append_event(
                     db,
                     room,
                     "judge.interrupted",
-                    {"scorecard_id": scorecard.id, "reason": "engine_restart"},
+                    {
+                        "scorecard_id": scorecard.id,
+                        "task_id": interrupted_task_id,
+                        "reason": "engine_restart",
+                    },
                 )
                 recovered_judges += 1
             db.commit()
@@ -1543,9 +1549,16 @@ class MatchEngine:
         scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
         if not scorecard or scorecard.status != "running":
             return False
+        interrupted_task_id = scorecard.task_id
         scorecard.status = "interrupted"
+        scorecard.task_id = ""
         scorecard.reasoning = reason
-        append_event(db, room, "judge.interrupted", {"scorecard_id": scorecard.id, "reason": reason})
+        append_event(
+            db,
+            room,
+            "judge.interrupted",
+            {"scorecard_id": scorecard.id, "task_id": interrupted_task_id, "reason": reason},
+        )
         return True
 
     async def _prepare_cues(self, db: Session, room_code: str) -> bool:
@@ -1746,11 +1759,20 @@ class MatchEngine:
         if scorecard and scorecard.status in {"approved", "review_required"}:
             return
         speeches = self._speech_rows(db, room.id)
+        task_id = str(uuid.uuid4())
         if not scorecard:
-            scorecard = JudgeScorecard(match_id=match.id, status="running")
+            scorecard = JudgeScorecard(match_id=match.id, status="running", task_id=task_id)
             db.add(scorecard)
         else:
             scorecard.status = "running"
+            scorecard.task_id = task_id
+        db.flush()
+        append_event(
+            db,
+            room,
+            "judge.started",
+            {"scorecard_id": scorecard.id, "task_id": task_id},
+        )
         db.commit()
         try:
             async with self._provider_semaphore():
@@ -1759,7 +1781,7 @@ class MatchEngine:
             room = load_room(db, room.code, lock=True)
             match = db.scalar(select(Match).where(Match.room_id == room.id))
             scorecard = db.get(JudgeScorecard, scorecard.id)
-            if not scorecard or scorecard.status != "running":
+            if not scorecard or scorecard.status != "running" or scorecard.task_id != task_id:
                 db.commit()
                 return
             if room.status not in {"judging", "running"}:
@@ -1788,7 +1810,7 @@ class MatchEngine:
             room = load_room(db, room.code, lock=True)
             match = db.scalar(select(Match).where(Match.room_id == room.id))
             scorecard = db.get(JudgeScorecard, scorecard.id)
-            if not scorecard or scorecard.status != "running":
+            if not scorecard or scorecard.status != "running" or scorecard.task_id != task_id:
                 db.commit()
                 return
             if room.status not in {"judging", "running"}:

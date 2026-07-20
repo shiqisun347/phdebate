@@ -106,7 +106,15 @@ def _create_session(db: Session, request: Request, response: Response, user: Use
 
 
 @router.post("/register")
-def register(payload: RegisterRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
+def register(
+    payload: RegisterRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    authenticated_user: User | None = Depends(optional_user),
+) -> dict:
+    if authenticated_user is not None:
+        raise HTTPException(status_code=409, detail="你已登录，如需注册其他账号，请先退出当前账号。")
     _guard(f"register:{request.client.host if request.client else 'unknown'}", limit=60)
     try:
         account = validate_account(payload.account)

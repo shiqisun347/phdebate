@@ -12,4 +12,10 @@ describe("PageLoading", () => {
     expect(screen.getByText("正在载入赛事大厅…")).toBeInTheDocument();
     expect((await axe.run(container, { rules: { "color-contrast": { enabled: false } } })).violations).toEqual([]);
   });
+
+  it("supports context-specific loading guidance", () => {
+    render(<PageLoading label="正在载入管理系统…" detail="正在同步服务状态与比赛数据" />);
+    expect(screen.getByText("正在同步服务状态与比赛数据")).toBeInTheDocument();
+    expect(screen.queryByText("正在同步最新比赛数据")).not.toBeInTheDocument();
+  });
 });

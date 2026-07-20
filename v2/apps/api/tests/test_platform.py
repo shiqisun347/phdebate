@@ -112,6 +112,29 @@ def test_public_catalog_and_registration(client: TestClient, register_user) -> N
     assert session_state.json()["user"]["id"] == session.json()["user"]["id"]
 
 
+def test_authenticated_session_cannot_register_a_second_account(register_user) -> None:
+    user = register_user("single_identity")
+    original_session = user.get("/api/auth/session").json()["user"]
+    with SessionLocal() as db:
+        user_count_before = db.scalar(select(func.count(User.id)))
+
+    blocked = user.post(
+        "/api/auth/register",
+        json={
+            "account": "single_identity_duplicate",
+            "real_name": "重复身份测试",
+            "password": "Password-1234",
+            "confirm_password": "Password-1234",
+        },
+    )
+
+    assert blocked.status_code == 409
+    assert "请先退出当前账号" in blocked.json()["detail"]
+    assert user.get("/api/auth/session").json()["user"]["id"] == original_session["id"]
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count(User.id))) == user_count_before
+
+
 def test_public_catalog_aggregates_live_room_counts_and_room_metadata(client: TestClient, register_user) -> None:
     first = register_user("catalog_live_first")
     second = register_user("catalog_live_second")
@@ -671,6 +694,7 @@ def test_registration_unique_constraint_race_returns_conflict() -> None:
             request,
             Response(),
             db,
+            None,
         )
     assert raised.value.status_code == 409
     assert db.rolled_back is True
@@ -7471,6 +7495,7 @@ def test_match_archive_is_complete_idempotent_tamper_resistant_and_access_contro
     assert "x-research-export-consent" not in first.headers
     assert first.headers["content-type"].startswith("application/json")
     assert "attachment" in first.headers["content-disposition"]
+    assert first.headers["x-archive-projection"] == "participant"
     assert first.headers["x-archive-sha256"] == hashlib.sha256(first.content).hexdigest()
     document = first.json()
     assert document["schema"] == "jixia-debate-match-archive" and document["version"] == 2
@@ -7501,7 +7526,10 @@ def test_match_archive_is_complete_idempotent_tamper_resistant_and_access_contro
     from app.services.match_archive import archive_lock_name, build_match_archive, read_match_archive
 
     task_result = build_match_archive(match_id)
-    assert task_result.reused is True and task_result.sha256 == updated.headers["x-archive-sha256"]
+    assert task_result.reused is True
+    assert task_result.sha256 == hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    assert updated.headers["x-archive-sha256"] == hashlib.sha256(updated.content).hexdigest()
+    assert task_result.sha256 != updated.headers["x-archive-sha256"]
 
     checksum_path = settings.archive_path / f"{match_id}.json.sha256"
     checksum_path.unlink()

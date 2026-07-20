@@ -191,6 +191,15 @@ def transfer_room_owner(
 
 
 def can_view_room(db: Session, room: Room, user: User | None) -> bool:
+    if room.is_test_data:
+        # QA rooms may deliberately use public visibility so browser and load
+        # tests exercise the production spectator path.  That must not turn
+        # synthetic students, transcripts or recordings into public data.
+        # Test data remains available only to its participants, room owner and
+        # system administrators through the same authenticated surfaces.
+        if not user:
+            return False
+        return can_control(db, room, user) or user_seat(room, user) is not None
     if room.visibility == "public":
         # A six-digit room code is a locator, not an authentication secret.
         # Waiting rooms expose real student names and readiness state, so they

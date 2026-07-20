@@ -175,9 +175,21 @@ export default function LobbyPage() {
         first.focus();
       }
     };
+    const keepFocusInside = (event: FocusEvent) => {
+      if (
+        !startConfirmDialog.current
+        || startConfirmDialog.current.contains(event.target as Node)
+      ) return;
+      const firstFocusable = startConfirmDialog.current.querySelector<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      (firstFocusable || startConfirmCancel.current)?.focus();
+    };
     document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("focusin", keepFocusInside);
     return () => {
       document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("focusin", keepFocusInside);
       document.body.style.overflow = previousBodyOverflow;
     };
   }, [confirmingStart]);
@@ -549,7 +561,14 @@ export default function LobbyPage() {
         </section>
       )}
       {confirmingStart && (
-        <div className="stage-confirm-backdrop">
+        <div
+          className="stage-confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget || busy) return;
+            setConfirmingStart(false);
+            requestAnimationFrame(() => startButton.current?.focus());
+          }}
+        >
           <div ref={startConfirmDialog} className="stage-confirm-dialog panel" role="alertdialog" aria-modal="true" aria-labelledby="lobby-start-confirm-title" aria-describedby="lobby-start-confirm-description">
             <strong id="lobby-start-confirm-title">确认锁定席位并开始比赛？</strong>
             <p id="lobby-start-confirm-description">开始后将锁定当前 {humans.length} 位真人席位，并由 AI 自动补齐 {room.seats.length - humans.length} 个空席。自动赛程会立即开始，不能再更换辩题或席位。</p>

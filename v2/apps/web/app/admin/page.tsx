@@ -27,6 +27,7 @@ import { competitionDisplayName } from "@/lib/primary-competition";
 import { useSession } from "@/lib/use-session";
 import type { Competition, Season, User } from "@/lib/types";
 import { LoadError } from "@/components/load-error";
+import { PageLoading } from "@/components/page-loading";
 import type { AdminPaginationState } from "@/components/admin/admin-pagination";
 import { RoomsPanel, type AdminRoomSummary } from "@/components/admin/rooms-panel";
 import { SystemOverview, type AdminDashboard } from "@/components/admin/system-overview";
@@ -994,10 +995,10 @@ export default function AdminPage() {
     setTab(requested);
     void loadTabHandler.current?.(requested);
   }, [dash]);
-  if (loading) return <div className="loading-screen">正在验证管理员身份…</div>;
+  if (loading) return <PageLoading label="正在验证管理员身份…" detail="正在核对账号权限" />;
   if (!dash && error)
     return <LoadError message={error} retry={() => void load()} />;
-  if (!dash) return <div className="loading-screen">正在载入管理系统…</div>;
+  if (!dash) return <PageLoading label="正在载入管理系统…" detail="正在同步服务状态与比赛数据" />;
   const activateTab = (nextTab: AdminTab) => {
     setTab(nextTab);
     persistAdminTab(nextTab);

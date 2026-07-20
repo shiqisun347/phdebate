@@ -45,5 +45,9 @@ def room_media(
     if target.is_symlink() or target.resolve().parent != room_directory or not target.is_file():
         raise HTTPException(status_code=404, detail="音频文件不存在。")
     media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    cache_control = "public, max-age=3600" if room.visibility == "public" else "private, no-store"
+    cache_control = (
+        "public, max-age=3600"
+        if room.visibility == "public" and not room.is_test_data
+        else "private, no-store"
+    )
     return FileResponse(target, media_type=media_type, headers={"Cache-Control": cache_control, "X-Content-Type-Options": "nosniff"})

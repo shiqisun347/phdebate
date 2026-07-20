@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -24,6 +25,7 @@ from app.models.entities import (
     User,
 )
 from app.services.match_archive import MatchArchiveNotFound, read_match_archive
+from app.services.participant_archive import serialize_participant_archive
 from app.services.room_service import (
     can_control,
     can_view_room,
@@ -112,6 +114,7 @@ def competitions(db: Session = Depends(get_db)) -> dict:
         .outerjoin(pause_times, pause_times.c.room_id == Room.id)
         .where(
             Room.visibility == "public",
+            Room.is_test_data.is_(False),
             Room.status.in_(["preparing", "running", "paused", "judging"]),
             _public_room_is_fresh(pause_times),
         )
@@ -146,6 +149,7 @@ def competition_detail(slug: str, db: Session = Depends(get_db)) -> dict:
     live_filters = (
         Room.competition_id == competition.id,
         Room.visibility == "public",
+        Room.is_test_data.is_(False),
         Room.status.in_(["preparing", "running", "paused", "judging"]),
         _public_room_is_fresh(pause_times),
     )
@@ -189,7 +193,9 @@ def rankings(competition_slug: str | None = None, season_slug: str | None = None
     competition_id = None
     competition = None
     if competition_slug:
-        competition = db.scalar(select(Competition).where(Competition.slug == competition_slug))
+        competition = db.scalar(
+            select(Competition).where(Competition.slug == competition_slug, Competition.is_public.is_(True))
+        )
         if not competition:
             raise HTTPException(status_code=404, detail="赛事不存在。")
         competition_id = competition.id
@@ -216,6 +222,7 @@ def live_rooms(db: Session = Depends(get_db)) -> dict:
         .options(joinedload(Room.competition))
         .where(
             Room.visibility == "public",
+            Room.is_test_data.is_(False),
             Room.status.in_(["preparing", "running", "paused", "judging"]),
             _public_room_is_fresh(pause_times),
         )
@@ -474,14 +481,21 @@ def download_match_archive(match_id: str, user: User = Depends(current_user), db
     except MatchArchiveNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     archive = payload.result
+    content = payload.content
+    archive_sha256 = archive.sha256
+    projection = "research"
+    if user.role != "system_admin":
+        content, archive_sha256 = serialize_participant_archive(json.loads(payload.content))
+        projection = "participant"
     return Response(
-        content=payload.content,
+        content=content,
         media_type="application/json",
         headers={
             "Content-Disposition": f'attachment; filename="debate-{room.code}-{match.id}.json"',
-            "Cache-Control": "private, no-cache",
-            "ETag": f'"{archive.sha256}"',
-            "X-Archive-SHA256": archive.sha256,
+            "Cache-Control": "private, no-store",
+            "ETag": f'"{archive_sha256}"',
+            "X-Archive-SHA256": archive_sha256,
             "X-Archive-Source-SHA256": archive.source_sha256,
+            "X-Archive-Projection": projection,
         },
     )

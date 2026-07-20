@@ -295,6 +295,19 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 return
 
     if not user:
+        # The public snapshot cache is keyed only by room code and can contain
+        # QA rooms whose visibility intentionally mirrors production.  Check
+        # authoritative access before reading the cache so test transcripts
+        # and presence never become an anonymous WebSocket projection.
+        try:
+            with SessionLocal() as db:
+                room = load_room(db, code)
+                if not can_view_room(db, room, None):
+                    await close_socket(4401)
+                    return
+        except HTTPException:
+            await close_socket(4404)
+            return
         try:
             public_initial_message = await public_snapshot_cache.initial_message(code)
         except Exception:
@@ -519,6 +532,11 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 for event_type, seq in presence_events:
                     await room_hub.publish(code, {"type": event_type, "room_code": code, "seq": seq})
             else:
+                with SessionLocal() as db:
+                    room = load_room(db, code)
+                    if not can_view_room(db, room, None):
+                        await close_socket(4401)
+                        return
                 if message.get("type") == "_sync":
                     projection = await public_snapshot_cache.get_if_newer(code, known_seq=initial_snapshot_seq)
                 else:
@@ -550,12 +568,11 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 if not _websocket_session_active(websocket, user):
                     await close_socket(4401)
                     return
-                if user:
-                    with SessionLocal() as db:
-                        room = load_room(db, code)
-                        if not can_view_room(db, room, user):
-                            await close_socket(4403)
-                            return
+                with SessionLocal() as db:
+                    room = load_room(db, code)
+                    if not can_view_room(db, room, user):
+                        await close_socket(4403 if user else 4401)
+                        return
                 await send_json({"type": "pong"})
 
     tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]

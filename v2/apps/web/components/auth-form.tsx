@@ -2,21 +2,27 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { apiFetch, safeNextPath } from "@/lib/api";
-import { notifySessionChanged } from "@/lib/use-session";
+import { notifySessionChanged, useSession } from "@/lib/use-session";
 
 export function AuthForm({ mode }: { mode: "login" | "register" }) {
   const router = useRouter();
   const params = useSearchParams();
+  const { user, loading: sessionLoading } = useSession();
   const [account, setAccount] = useState("");
   const [realName, setRealName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const submittedAuth = useRef(false);
   const nextPath = safeNextPath(params.get("next"));
+  const authenticatedDestination = nextPath === "/" ? "/me" : nextPath;
   const alternateAuthHref = `${mode === "login" ? "/register" : "/login"}?next=${encodeURIComponent(nextPath)}`;
+  useEffect(() => {
+    if (!sessionLoading && user && !submittedAuth.current) router.replace(authenticatedDestination);
+  }, [authenticatedDestination, router, sessionLoading, user]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     // Safari autofill and some assisted-input paths can update the visible input
@@ -27,6 +33,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
     const submittedRealName = String(fields.get("real_name") ?? realName);
     const submittedPassword = String(fields.get("password") ?? password);
     const submittedConfirm = String(fields.get("confirm_password") ?? confirm);
+    submittedAuth.current = true;
     setBusy(true); setError("");
     try {
       await apiFetch(`/api/auth/${mode}`, {
@@ -43,8 +50,19 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
       notifySessionChanged();
       router.push(nextPath);
       router.refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : "操作失败"); }
+    } catch (err) {
+      submittedAuth.current = false;
+      setError(err instanceof Error ? err.message : "操作失败");
+    }
     finally { setBusy(false); }
+  }
+  if (sessionLoading || user) {
+    return (
+      <div className="success-box" role="status">
+        <strong>{sessionLoading ? "正在确认登录状态…" : "你已登录"}</strong>
+        <span>{sessionLoading ? "确认后再显示账号表单。" : "正在返回你的辩论档案。"}</span>
+      </div>
+    );
   }
   return (
     <form className="form-stack" onSubmit={submit}>

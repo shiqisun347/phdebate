@@ -9,7 +9,6 @@ import { apiFetch } from "@/lib/api";
 import {
   competitionDisplayName,
   isPrimaryCompetition,
-  PRIMARY_COMPETITION_SLUG,
 } from "@/lib/primary-competition";
 import type { Competition, Ranking, Season } from "@/lib/types";
 
@@ -28,10 +27,9 @@ export default function RankingsPage() {
   const loadCatalog = useCallback(async () => {
     setError("");
     try {
-      const [data, seasonData, rankingData] = await Promise.all([
+      const [data, seasonData] = await Promise.all([
         apiFetch<{ items: Competition[] }>("/api/competitions"),
         apiFetch<{ items: Season[] }>("/api/seasons"),
-        apiFetch<{ items: Ranking[] }>(`/api/rankings?competition_slug=${PRIMARY_COMPETITION_SLUG}`),
       ]);
       setCompetitions(data.items);
       setSeasons(seasonData.items);
@@ -40,17 +38,13 @@ export default function RankingsPage() {
       const initialSeason = ranked?.season?.slug || seasonData.items.find((item) => item.is_open)?.slug || seasonData.items[0]?.slug || "";
       setSelected((current) => current || initialCompetition);
       setSelectedSeason((current) => current || initialSeason);
-      // The parallel warm request is only authoritative for the primary
-      // competition. If an installation has a different ranked event, let the
-      // selection-specific request below load it instead of briefly showing a
-      // leaderboard from another competition.
-      if (initialCompetition === PRIMARY_COMPETITION_SLUG) {
-        setItems(rankingData.items);
-        lastLoadedRankingKey.current = `${initialCompetition}:${initialSeason}`;
-      } else {
-        setItems([]);
-        lastLoadedRankingKey.current = "";
-      }
+      // Rankings depend on both selections. Do not treat an unscoped warm
+      // response as the selected season's leaderboard: the backend default
+      // season can differ from the competition's published season during a
+      // rollover. The selection-specific effect below issues the authoritative
+      // request once both catalog dependencies are known.
+      setItems([]);
+      lastLoadedRankingKey.current = "";
       setCatalogLoaded(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "赛事列表载入失败");

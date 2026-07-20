@@ -464,6 +464,18 @@ curl -fsS https://新服务器IP/debate/api/health
 - 每个恢复批次应生成一个只读 manifest，绑定源码 commit、所有文件 SHA-256、数据库 Alembic
   版本、GPU 指纹和创建时间。
 
+数据卷恢复包不得无限累积占满生产磁盘。完成新批次的清单校验和数据库/数据卷恢复演练后，先
+执行只读预览；工具默认至少保留最近 3 个有效 schema 2 恢复批次，并保护这些清单引用的数据卷：
+
+```bash
+./deploy/prune-recovery-sets.sh dry-run
+./deploy/prune-recovery-sets.sh apply
+```
+
+该工具不删除 MOSS 离线包、私密配置、可靠语音归档、V2/Agent 数据库备份或未识别的旧格式
+清单。数据库仍由各自的 14 天保留任务管理；release 使用 `prune-releases.sh` 独立保留最近回滚
+版本。磁盘清理前后都必须执行 readiness 和当前恢复清单校验。
+
 完成三类备份和恢复验证后，使用版本化工具生成绑定清单；私密归档路径必须显式传入，避免误选：
 
 ```bash

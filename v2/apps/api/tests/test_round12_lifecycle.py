@@ -446,7 +446,10 @@ async def test_round12_complete_mixed_human_agent_lifecycle_is_recoverable_and_r
         assert archive.reused is False and archive.sha256 and archive.source_sha256
         downloaded = participant.get(f"/api/matches/{match_id}/archive")
         assert downloaded.status_code == 200, downloaded.text
-        assert downloaded.headers["x-archive-sha256"] == archive.sha256
+        assert downloaded.headers["x-archive-projection"] == "participant"
+        assert downloaded.headers["x-archive-sha256"] == hashlib.sha256(downloaded.content).hexdigest()
+        assert downloaded.headers["x-archive-sha256"] != archive.sha256
+        assert downloaded.headers["x-archive-source-sha256"] == archive.source_sha256
 
     rematch_headers = csrf(owner) | {"X-Idempotency-Key": "round12-rematch-once"}
     rematch = owner.post(f"/api/rooms/{ranked_code}/rematch", headers=rematch_headers, json={})

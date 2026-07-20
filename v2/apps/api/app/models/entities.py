@@ -292,6 +292,7 @@ class JudgeScorecard(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
     match_id: Mapped[str] = mapped_column(ForeignKey("matches.id"), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(24), default="pending")
+    task_id: Mapped[str] = mapped_column(String(36), default="")
     winner: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     affirmative_score: Mapped[float] = mapped_column(Float, default=0)
     negative_score: Mapped[float] = mapped_column(Float, default=0)

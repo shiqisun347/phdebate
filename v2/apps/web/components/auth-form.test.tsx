@@ -3,8 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AuthForm } from "@/components/auth-form";
 
-const navigation = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
+const navigation = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }));
 const searchState = vi.hoisted(() => ({ value: "" }));
+const sessionState = vi.hoisted(() => ({ user: null as { id: string } | null, loading: false }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => navigation,
@@ -13,6 +14,7 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/lib/use-session", () => ({
   notifySessionChanged: vi.fn(),
+  useSession: () => sessionState,
 }));
 
 function setVisibleValueWithoutReactChange(input: HTMLInputElement, value: string) {
@@ -23,9 +25,21 @@ function setVisibleValueWithoutReactChange(input: HTMLInputElement, value: strin
 describe("AuthForm", () => {
   afterEach(() => {
     navigation.push.mockReset();
+    navigation.replace.mockReset();
     navigation.refresh.mockReset();
     searchState.value = "";
+    sessionState.user = null;
+    sessionState.loading = false;
     vi.unstubAllGlobals();
+  });
+
+  it("redirects an already authenticated user instead of allowing a second account to be registered", async () => {
+    sessionState.user = { id: "existing-user" };
+    render(<AuthForm mode="register" />);
+
+    expect(screen.queryByLabelText("登录账号")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("你已登录");
+    await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/me"));
   });
 
   it("submits visible Safari autofill values even when React change events did not fire", async () => {
