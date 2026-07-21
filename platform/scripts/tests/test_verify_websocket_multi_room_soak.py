@@ -21,10 +21,10 @@ SPEC.loader.exec_module(MODULE)
 def args(**overrides) -> Namespace:
     values = {
         "rooms": 5,
-        "clients_per_room": 5,
+        "clients_per_room": 1,
         "cycles": 3,
         "handshake_concurrency": 50,
-        "slow_clients_per_room": 5,
+        "slow_clients_per_room": 1,
         "hold_seconds": 5,
         "between_cycle_seconds": 0,
         "abrupt_ratio": 0.5,
@@ -36,7 +36,12 @@ def args(**overrides) -> Namespace:
 def test_default_soak_matches_five_rooms_and_five_spectators() -> None:
     MODULE.validate_args(args())
     assert MODULE.MAX_ACTIVE_ROOMS == 5
-    assert MODULE.MAX_SPECTATORS_PER_ROOM == 5
+    assert MODULE.MAX_TOTAL_SPECTATORS == 5
+
+
+def test_soak_rejects_more_than_five_spectators_across_different_rooms() -> None:
+    with pytest.raises(SystemExit, match="combined cannot exceed 5"):
+        MODULE.validate_args(args(rooms=2, clients_per_room=3))
 
 
 def test_abrupt_disconnect_cleanup_waits_past_the_authoritative_redis_lease() -> None:

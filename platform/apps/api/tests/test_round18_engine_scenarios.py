@@ -266,7 +266,7 @@ async def test_disconnect_grace_ai_substitution_and_real_websocket_restore(regis
         ) == 1
 
 
-def test_five_spectators_are_room_scoped_and_all_repair_roles_remain_exempt(
+def test_five_spectators_are_globally_shared_and_all_repair_roles_remain_exempt(
     client: TestClient,
     register_user,
 ) -> None:
@@ -300,15 +300,17 @@ def test_five_spectators_are_room_scoped_and_all_repair_roles_remain_exempt(
                 assert participant_socket.receive_json()["room"]["my_seat"] == "neg_1"
             with admin.websocket_connect(f"/ws/rooms/{code}") as admin_socket:
                 assert admin_socket.receive_json()["room"]["can_control"] is True
-            with client.websocket_connect(f"/ws/rooms/{other_code}") as other_room_socket:
-                assert other_room_socket.receive_json()["room"]["code"] == other_code
+            with pytest.raises(WebSocketDisconnect) as other_room_overflow:
+                with client.websocket_connect(f"/ws/rooms/{other_code}") as other_room_socket:
+                    other_room_socket.receive_json()
+            assert other_room_overflow.value.code == 4429
 
             with pytest.raises(WebSocketDisconnect) as overflow:
                 with outsider.websocket_connect(f"/ws/rooms/{code}") as overflow_socket:
                     overflow_socket.receive_json()
             assert overflow.value.code == 4429
 
-        with outsider.websocket_connect(f"/ws/rooms/{code}") as released_socket:
-            assert released_socket.receive_json()["room"]["code"] == code
+        with outsider.websocket_connect(f"/ws/rooms/{other_code}") as released_socket:
+            assert released_socket.receive_json()["room"]["code"] == other_code
     finally:
         admin.__exit__(None, None, None)

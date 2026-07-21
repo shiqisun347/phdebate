@@ -3,7 +3,7 @@
 
 The verifier creates short-lived public hold rooms without starting Agent,
 ASR, TTS, judging, or ranking work.  Every room stays within the product's
-5-spectator limit and all synthetic database rows are removed in ``finally``.
+global 5-spectator limit and all synthetic database rows are removed in ``finally``.
 Run it from the API release as the platform service account.
 """
 
@@ -27,14 +27,14 @@ import websockets
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.entities import MatchEvent, Room, RoomSeat, User, UserSession
-from app.services.realtime import SPECTATOR_KEY_PREFIX, SPECTATOR_LEASE_SECONDS, room_hub
+from app.services.realtime import SPECTATOR_GLOBAL_KEY, SPECTATOR_LEASE_SECONDS, room_hub
 from app.services.room_service import append_event, load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
 from websockets.exceptions import ConnectionClosed
 
 MAX_ACTIVE_ROOMS = 5
-MAX_SPECTATORS_PER_ROOM = 5
+MAX_TOTAL_SPECTATORS = 5
 PASSWORD = "Websocket-soak-1234"
 
 
@@ -70,8 +70,12 @@ def percentile(values: list[float], fraction: float) -> float | None:
 def validate_args(args: argparse.Namespace) -> None:
     if not 1 <= args.rooms <= MAX_ACTIVE_ROOMS:
         raise SystemExit(f"--rooms must be between 1 and {MAX_ACTIVE_ROOMS}")
-    if not 1 <= args.clients_per_room <= MAX_SPECTATORS_PER_ROOM:
-        raise SystemExit(f"--clients-per-room must be between 1 and {MAX_SPECTATORS_PER_ROOM}")
+    if not 1 <= args.clients_per_room <= MAX_TOTAL_SPECTATORS:
+        raise SystemExit(f"--clients-per-room must be between 1 and {MAX_TOTAL_SPECTATORS}")
+    if args.rooms * args.clients_per_room > MAX_TOTAL_SPECTATORS:
+        raise SystemExit(
+            f"all rooms combined cannot exceed {MAX_TOTAL_SPECTATORS} spectators"
+        )
     if not 1 <= args.cycles <= 20:
         raise SystemExit("--cycles must be between 1 and 20")
     if not 1 <= args.handshake_concurrency <= 100:
@@ -166,19 +170,15 @@ async def wait_for_lease_cleanup(
     codes: list[str], *, timeout_seconds: float = SPECTATOR_LEASE_SECONDS + 5
 ) -> dict[str, int]:
     """Wait through the authoritative Redis TTL for abruptly closed sockets."""
+    del codes
     client = redis.from_url(settings.redis_url, decode_responses=True)
     try:
         deadline = time.monotonic() + timeout_seconds
         residue: dict[str, int] = {}
         while True:
             now_ms = int(time.time() * 1000)
-            pipe = client.pipeline()
-            for code in codes:
-                key = f"{SPECTATOR_KEY_PREFIX}{code}"
-                pipe.zremrangebyscore(key, "-inf", now_ms)
-                pipe.zcard(key)
-            results = await pipe.execute()
-            residue = {code: int(results[index * 2 + 1]) for index, code in enumerate(codes)}
+            await client.zremrangebyscore(SPECTATOR_GLOBAL_KEY, "-inf", now_ms)
+            residue = {"global": int(await client.zcard(SPECTATOR_GLOBAL_KEY))}
             if not any(residue.values()) or time.monotonic() >= deadline:
                 return residue
             await asyncio.sleep(0.25)
@@ -226,7 +226,7 @@ async def run_cycle(
         expected = len(codes) * args.clients_per_room
         if len(sockets) != expected or metrics.errors:
             raise RuntimeError(f"only {len(sockets)}/{expected} sockets connected: {metrics.errors[:5]}")
-        if args.clients_per_room == MAX_SPECTATORS_PER_ROOM:
+        if len(codes) * args.clients_per_room == MAX_TOTAL_SPECTATORS:
             await expect_overflow_rejected(ws_base, codes[0], ssl_context)
 
         # Publish only after every socket has consumed its initial snapshot.
@@ -438,10 +438,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     parser.add_argument("--rooms", type=int, default=MAX_ACTIVE_ROOMS)
-    parser.add_argument("--clients-per-room", type=int, default=MAX_SPECTATORS_PER_ROOM)
+    parser.add_argument("--clients-per-room", type=int, default=1)
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--handshake-concurrency", type=int, default=50)
-    parser.add_argument("--slow-clients-per-room", type=int, default=5)
+    parser.add_argument("--slow-clients-per-room", type=int, default=1)
     parser.add_argument("--hold-seconds", type=float, default=5)
     parser.add_argument("--between-cycle-seconds", type=float, default=0)
     parser.add_argument("--abrupt-ratio", type=float, default=0.5)

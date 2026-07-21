@@ -221,20 +221,29 @@ async def test_spectator_limit_is_atomic_across_workers_and_releases_slots(monke
     admissions = await asyncio.gather(
         *[
             (first_worker if index % 2 == 0 else second_worker).spectator_join(
-                "123456", connection_id=f"watcher-{index}"
+                "123456" if index % 2 == 0 else "654321", connection_id=f"watcher-{index}"
             )
             for index in range(realtime_service.SPECTATOR_LIMIT)
         ]
     )
     assert all(admissions)
-    assert await second_worker.spectator_join("123456", connection_id="watcher-overflow") is False
+    assert await second_worker.spectator_join("999999", connection_id="watcher-overflow") is False
 
     await first_worker.spectator_leave("123456", connection_id="watcher-0")
-    assert await second_worker.spectator_join("123456", connection_id="watcher-overflow") is True
-    assert await second_worker.spectator_refresh("123456", connection_id="watcher-overflow") is True
+    assert await second_worker.spectator_join("999999", connection_id="watcher-overflow") is True
+    assert await second_worker.spectator_refresh("999999", connection_id="watcher-overflow") is True
 
     await first_worker.close()
     await second_worker.close()
+
+
+async def test_redis_free_spectator_fallback_shares_one_global_limit_across_rooms() -> None:
+    hub = RoomHub(redis_enabled=False)
+    for index in range(realtime_service.SPECTATOR_LIMIT):
+        assert await hub.spectator_join(f"room-{index}", connection_id=f"watcher-{index}") is True
+    assert await hub.spectator_join("another-room", connection_id="watcher-overflow") is False
+    await hub.spectator_leave("room-0", connection_id="watcher-0")
+    assert await hub.spectator_join("another-room", connection_id="watcher-overflow") is True
 
 
 async def test_spectator_lease_expiry_recovers_capacity(monkeypatch) -> None:

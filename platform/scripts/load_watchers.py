@@ -16,7 +16,7 @@ import httpx
 import websockets
 
 MAX_ACTIVE_ROOMS = 5
-MAX_SPECTATORS_PER_ROOM = 5
+MAX_TOTAL_SPECTATORS = 5
 
 
 @dataclass
@@ -144,11 +144,8 @@ async def run(args: argparse.Namespace) -> int:
         raise SystemExit("--rooms must contain at least one room code")
     if len(room_codes) > MAX_ACTIVE_ROOMS:
         raise SystemExit(f"--rooms exceeds the product limit of {MAX_ACTIVE_ROOMS} simultaneous rooms")
-    if args.clients > len(room_codes) * MAX_SPECTATORS_PER_ROOM:
-        raise SystemExit(
-            f"--clients exceeds the product limit of {MAX_SPECTATORS_PER_ROOM} spectators per room; "
-            f"provide at least {(args.clients + MAX_SPECTATORS_PER_ROOM - 1) // MAX_SPECTATORS_PER_ROOM} rooms"
-        )
+    if args.clients > MAX_TOTAL_SPECTATORS:
+        raise SystemExit(f"--clients exceeds the global product limit of {MAX_TOTAL_SPECTATORS} spectators")
     async with httpx.AsyncClient(base_url=args.base_url, verify=not args.insecure, timeout=15) as client:
         health, catalog = await asyncio.gather(client.get("/api/health"), client.get("/api/competitions"))
         health.raise_for_status()

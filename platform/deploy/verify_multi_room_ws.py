@@ -12,7 +12,7 @@ import httpx
 import websockets
 
 MAX_ACTIVE_ROOMS = 5
-MAX_SPECTATORS_PER_ROOM = 5
+MAX_TOTAL_SPECTATORS = 5
 
 
 def validate_args(room_codes: list[str], connections_per_room: int, concurrency: int) -> None:
@@ -22,11 +22,12 @@ def validate_args(room_codes: list[str], connections_per_room: int, concurrency:
         raise SystemExit("--room-codes must not contain duplicates")
     if len(room_codes) > MAX_ACTIVE_ROOMS:
         raise SystemExit(f"--room-codes cannot exceed {MAX_ACTIVE_ROOMS} simultaneous rooms")
-    if not 1 <= connections_per_room <= MAX_SPECTATORS_PER_ROOM:
+    if not 1 <= connections_per_room <= MAX_TOTAL_SPECTATORS:
         raise SystemExit(
-            f"--connections-per-room must be between 1 and {MAX_SPECTATORS_PER_ROOM}; "
-            "the product admits at most 5 spectators to one room"
+            f"--connections-per-room must be between 1 and {MAX_TOTAL_SPECTATORS}"
         )
+    if len(room_codes) * connections_per_room > MAX_TOTAL_SPECTATORS:
+        raise SystemExit(f"all rooms combined admit at most {MAX_TOTAL_SPECTATORS} spectators")
     if not 1 <= concurrency <= 100:
         raise SystemExit("--concurrency must be between 1 and 100")
 
@@ -100,8 +101,8 @@ def main() -> None:
     parser.add_argument(
         "--connections-per-room",
         type=int,
-        default=MAX_SPECTATORS_PER_ROOM,
-        help=f"simultaneous spectators per room (1-{MAX_SPECTATORS_PER_ROOM})",
+        default=1,
+        help=f"spectators per room; all rooms combined may not exceed {MAX_TOTAL_SPECTATORS}",
     )
     parser.add_argument("--concurrency", type=int, default=20)
     args = parser.parse_args()

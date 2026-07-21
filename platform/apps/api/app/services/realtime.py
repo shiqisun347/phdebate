@@ -35,6 +35,7 @@ PRESENCE_INDEX_KEY = "jixia:presence:index"
 SPECTATOR_LIMIT = 5
 SPECTATOR_LEASE_SECONDS = PRESENCE_LEASE_SECONDS
 SPECTATOR_KEY_PREFIX = "jixia:spectators:leases:"
+SPECTATOR_GLOBAL_KEY = f"{SPECTATOR_KEY_PREFIX}global"
 
 _PRESENCE_JOIN_SCRIPT = """
 local now_ms = tonumber(ARGV[1])
@@ -418,7 +419,11 @@ class RoomHub:
 
     @staticmethod
     def _spectator_key(room_code: str) -> str:
-        return f"{SPECTATOR_KEY_PREFIX}{room_code}"
+        del room_code
+        return SPECTATOR_GLOBAL_KEY
+
+    def _local_spectator_count(self) -> int:
+        return sum(len(leases) for leases in self._spectator_leases.values())
 
     async def spectator_join(self, room_code: str, *, connection_id: str) -> bool:
         """Atomically reserve one of a room's public spectator slots.
@@ -432,7 +437,7 @@ class RoomHub:
             if connection_id in local:
                 return True
             if not self._redis_enabled:
-                if len(local) >= SPECTATOR_LIMIT:
+                if self._local_spectator_count() >= SPECTATOR_LIMIT:
                     return False
                 local.add(connection_id)
                 return True
@@ -447,7 +452,7 @@ class RoomHub:
         if result is None and settings.app_env == "test":
             with self._states_lock:
                 local = self._spectator_leases[room_code]
-                if len(local) >= SPECTATOR_LIMIT:
+                if self._local_spectator_count() >= SPECTATOR_LIMIT:
                     return False
                 local.add(connection_id)
             return True

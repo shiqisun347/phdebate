@@ -26,7 +26,7 @@ def test_disconnect_storm_refuses_counts_above_one_room_product_limit(clients: i
         insecure=False,
     )
 
-    with pytest.raises(SystemExit, match="at most 5 spectators"):
+    with pytest.raises(SystemExit, match="at most 5 spectators across all rooms"):
         asyncio.run(MODULE.run(args))
 
 

@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 import websockets
 
-MAX_SPECTATORS_PER_ROOM = 5
+MAX_TOTAL_SPECTATORS = 5
 
 
 @dataclass
@@ -41,10 +41,10 @@ async def abort_connection(index: int, url: str, ssl_context: ssl.SSLContext | N
 
 
 async def run(args: argparse.Namespace) -> int:
-    if not 1 <= args.clients <= MAX_SPECTATORS_PER_ROOM:
+    if not 1 <= args.clients <= MAX_TOTAL_SPECTATORS:
         raise SystemExit(
-            f"--clients must be between 1 and {MAX_SPECTATORS_PER_ROOM}; "
-            "the product admits at most 5 spectators to one room",
+            f"--clients must be between 1 and {MAX_TOTAL_SPECTATORS}; "
+            "the product admits at most 5 spectators across all rooms",
         )
     async with httpx.AsyncClient(base_url=args.base_url, verify=not args.insecure, timeout=15) as client:
         response = await client.get("/api/health")
@@ -79,8 +79,8 @@ def main() -> int:
     parser.add_argument(
         "--clients",
         type=int,
-        default=MAX_SPECTATORS_PER_ROOM,
-        help=f"simultaneous aborted spectators (1-{MAX_SPECTATORS_PER_ROOM})",
+        default=MAX_TOTAL_SPECTATORS,
+        help=f"simultaneous aborted spectators across the platform (1-{MAX_TOTAL_SPECTATORS})",
     )
     parser.add_argument("--settle-seconds", type=float, default=2.0)
     parser.add_argument("--insecure", action="store_true")

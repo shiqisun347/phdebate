@@ -156,7 +156,7 @@ export function useRoom(code: string) {
           4401: "登录状态已失效，或当前账号无权访问该房间。",
           4403: "当前账号无权访问该房间。",
           4404: "比赛房间不存在或已被删除。",
-          4429: "本场观战人数已达 5 人，请稍后重试。",
+          4429: "系统观战总人数已达 5 人，请稍后重试。",
         };
         if (terminalMessage[event.code]) {
           terminalClosed = true;

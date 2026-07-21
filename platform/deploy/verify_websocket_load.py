@@ -20,7 +20,7 @@ HOLD_SECONDS = max(1.0, float(os.getenv("VERIFY_HOLD_SECONDS", "10")))
 
 async def run() -> dict:
     if CONNECTIONS > 5:
-        raise RuntimeError("VERIFY_CONNECTIONS cannot exceed the 5-spectator per-room product limit")
+        raise RuntimeError("VERIFY_CONNECTIONS cannot exceed the global 5-spectator product limit")
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
