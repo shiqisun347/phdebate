@@ -479,6 +479,19 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
             await release_spectator()
             await close_socket(1011)
             return
+    # Register the local queue and cross-process Redis subscription before the
+    # browser receives its initial snapshot. The first stream item is retained
+    # until sender() starts, so the wire protocol still guarantees snapshot
+    # first while no event can fall into a subscription-free hand-off window.
+    room_stream = room_hub.stream(code, initial_sync=True)
+    try:
+        first_stream_message = await room_stream.__anext__()
+    except Exception:
+        await release_presence()
+        await release_spectator()
+        await close_socket(1011)
+        return
+
     try:
         if presence_connected_seq is not None:
             await room_hub.publish(code, {"type": "presence.connected", "room_code": code, "seq": presence_connected_seq})
@@ -489,6 +502,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
             await send_json({"type": "snapshot", "room": snapshot})
             initial_snapshot_seq = int(snapshot["seq"])
     except WebSocketDisconnect:
+        await room_stream.aclose()
         await release_presence()
         await release_spectator()
         return
@@ -575,7 +589,12 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
 
     async def sender() -> None:
         nonlocal initial_snapshot_seq
-        async for message in room_hub.stream(code, initial_sync=True):
+        async def prepared_messages():
+            yield first_stream_message
+            async for queued_message in room_stream:
+                yield queued_message
+
+        async for message in prepared_messages():
             if user and joined_presence:
                 await room_hub.presence_refresh(
                     code,
@@ -591,6 +610,12 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
             if not _websocket_session_active(websocket, user):
                 await close_socket(4401)
                 return
+            message_seq = message.get("seq") if isinstance(message.get("seq"), int) else None
+            if message.get("type") != "_sync" and message_seq is not None and message_seq <= initial_snapshot_seq:
+                # The initial or most recently sent authoritative snapshot
+                # already contains this transition. Do not leave a stale event
+                # buffered ahead of security closes or newer room state.
+                continue
             if user:
                 with SessionLocal() as db:
                     room = load_room(db, code)
@@ -635,6 +660,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 continue
             outgoing_event = anonymous_realtime_event(message) if public_event_projection else message
             await send_json({"type": "snapshot", "event": outgoing_event, "room": projection})
+            initial_snapshot_seq = max(initial_snapshot_seq, int(projection.get("seq", 0)))
 
     async def receiver() -> None:
         while True:
@@ -696,6 +722,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await room_stream.aclose()
             await release_presence()
             await release_spectator()
 

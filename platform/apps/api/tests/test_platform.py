@@ -1924,10 +1924,10 @@ async def test_room_websocket_awaits_cancelled_sender_cleanup(register_user, mon
     async def blocked_stream(_code: str, **_kwargs):
         stream_started.set()
         try:
+            yield {"type": "_sync"}
             await asyncio.Event().wait()
         finally:
             stream_closed.set()
-        yield {"type": "unreachable"}
 
     monkeypatch.setattr(realtime_api.room_hub, "stream", blocked_stream)
 
@@ -2739,7 +2739,7 @@ async def test_room_hub_initial_sync_closes_snapshot_subscription_gap_and_keeps_
 
 
 async def test_room_hub_waits_for_redis_subscription_before_initial_sync(monkeypatch) -> None:
-    hub = RoomHub()
+    hub = RoomHub(wait_for_redis_subscription=True)
     allow_subscription = asyncio.Event()
 
     async def delayed_listener(room_code, state) -> None:

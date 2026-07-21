@@ -222,8 +222,16 @@ class RoomHub:
     never cross those loop boundaries.
     """
 
-    def __init__(self, *, redis_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        redis_enabled: bool = True,
+        wait_for_redis_subscription: bool | None = None,
+    ) -> None:
         self._redis_enabled = redis_enabled
+        self._wait_for_redis_subscription = (
+            settings.app_env != "test" if wait_for_redis_subscription is None else wait_for_redis_subscription
+        )
         self._origin = uuid.uuid4().hex
         self._states: dict[asyncio.AbstractEventLoop, _LoopState] = {}
         self._local: dict[str, set[_Subscriber]] = defaultdict(set)
@@ -680,7 +688,7 @@ class RoomHub:
             # otherwise a cross-process event can fall between the initial
             # database snapshot and SUBSCRIBE. Redis outages still degrade to
             # the authoritative sync and heartbeat path after the timeout.
-            if listener_ready and not listener_ready.is_set():
+            if self._wait_for_redis_subscription and listener_ready and not listener_ready.is_set():
                 try:
                     await asyncio.wait_for(listener_ready.wait(), timeout=2)
                 except asyncio.TimeoutError:
