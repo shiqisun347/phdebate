@@ -62,6 +62,7 @@ from app.services.livekit_audio import (
 from app.services.match_archive import enqueue_match_archive
 from app.services.match_engine import match_engine
 from app.services.provider_config import build_service_snapshot
+from app.services.providers import moss_tts_realtime
 from app.services.realtime import room_hub
 from app.services.room_service import (
     PUBLIC_MATCH_TIMELINE_EVENT_TYPES,
@@ -117,6 +118,32 @@ MEDIA_DECODE_TIMEOUT_SECONDS = 60
 ACTIVE_PARTICIPANT_STATUSES = {"lobby", "preparing", "running", "paused", "judging"}
 _AUDIO_VALIDATION_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio-validation")
 _RTC_DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+async def _require_realtime_voice_ready_for_start() -> None:
+    """Keep a cold or rejected production voice runtime out of the match path.
+
+    Rooms may still be created and arranged while MOSS is starting.  Starting a
+    match, however, locks seats and creates the authoritative match snapshot, so
+    reject the action before those mutations when no warmed endpoint exists.
+    The engine's provider-failure pause remains the second line of defence for
+    failures that happen after this short readiness check.
+    """
+
+    if not (
+        settings.app_env == "production"
+        and settings.realtime_voice_backend == "moss_realtime"
+        and settings.moss_tts_realtime_enabled
+    ):
+        return
+    snapshot = await moss_tts_realtime.readiness_snapshot()
+    if int(snapshot.get("ready_endpoints") or 0) > 0:
+        return
+    raise HTTPException(
+        status_code=503,
+        detail="实时语音服务正在启动，比赛尚未锁定。席位和准备状态已保留，请稍后重试。",
+        headers={"Retry-After": "5"},
+    )
 
 
 def _lock_participants(db: Session, user_ids: list[str]) -> None:
@@ -1232,6 +1259,7 @@ async def start_room(
     owner_seat = user_seat(room, user)
     if owner_seat and user.role != "system_admin":
         _require_lobby_device_control(owner_seat, auth_session)
+    await _require_realtime_voice_ready_for_start()
     humans = [seat for seat in room.seats if seat.occupant_type == "human"]
     _lock_participants(db, [seat.user_id for seat in humans if seat.user_id])
     for seat in humans:
@@ -1892,6 +1920,7 @@ async def control(
         failed = db.scalars(select(Speech).where(Speech.room_id == room.id, Speech.status == "failed")).all()
         if not room.failure_reason and not failed:
             raise HTTPException(status_code=409, detail="当前是人工暂停，请使用恢复比赛。")
+        await _require_realtime_voice_ready_for_start()
         for item in failed:
             item.status = "failed_retried"
         room.failure_reason = ""

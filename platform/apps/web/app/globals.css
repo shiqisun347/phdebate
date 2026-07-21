@@ -726,6 +726,7 @@ th { color: #838faa; font-weight: 600; }
   .stage-topic { text-align:left; }
   .stage-topic small { display:block; overflow:hidden; color:#8995b0; font-size:8px; letter-spacing:.02em; text-overflow:ellipsis; white-space:nowrap; }
   .stage-topic strong { margin-top:2px; font-size:12px; }
+  .stage-page.watch-mode .stage-topic strong { display:-webkit-box; overflow:hidden; white-space:normal; line-height:1.25; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
   .stage-brand:is(button) { min-width:44px; min-height:44px; justify-content:center; }
   .connection { font-size:0; }
   .stage-arena { grid-template-columns:1fr 1fr; grid-template-rows:1fr auto; gap:8px; padding:10px 10px 4px; overflow:auto; }

@@ -57,10 +57,20 @@ describe("watch result redirect", () => {
   });
 
   it("keeps an active match on the watch stage", () => {
-    mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
+    mocks.room = {
+      id: "room",
+      code: "123456",
+      status: "running",
+      seq: 1,
+      active_speech: { id: "speech-private", content: "观众不应看见的逐句文字" },
+      caption_segments: [{ speech_id: "speech-private", segment_id: "caption-private", text: "观众不应看见的字幕" }],
+      can_view_transcript: true,
+    } as unknown as Room;
     render(<WatchPage />);
     expect(mocks.push).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "文字记录" })).not.toBeInTheDocument();
+    expect(screen.queryByText("观众不应看见的逐句文字")).not.toBeInTheDocument();
+    expect(screen.queryByText("观众不应看见的字幕")).not.toBeInTheDocument();
   });
 
   it("tells a redirected non-owner why the control console became read-only", async () => {

@@ -422,7 +422,10 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
     events = db.scalars(select(MatchEvent).where(MatchEvent.room_id == room.id).order_by(MatchEvent.seq.desc()).limit(40)).all()
     recent_speeches = db.scalars(select(Speech).where(Speech.room_id == room.id).order_by(Speech.created_at.desc()).limit(20)).all()
     active_caption_segments = []
-    if active:
+    # Captions are participant/control data.  A public projection must not
+    # query or serialize them: anonymous and signed-in spectators are audio-
+    # only viewers, even while the speech is live.
+    if active and not public:
         active_caption_segments = list(
             reversed(
                 list(
@@ -510,10 +513,9 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
                 "seat_key": active.seat_key,
                 "speaker_type": active.speaker_type,
                 "status": active.status,
-                # Public watchers may receive bounded, ephemeral caption
-                # segments while a speech is playing, but never the
-                # authoritative/replayable transcript. AI generation can
-                # populate this field before all of the text has been spoken.
+                # Public viewers receive only playback identity. AI generation
+                # can populate this field before all of the text has been
+                # spoken, so it is never part of a spectator projection.
                 "content": "" if public else active.content,
                 "playback_started_at": active.playback_started_at.isoformat() if active.playback_started_at else None,
                 "stream_generation": active.stream_generation,
@@ -567,8 +569,7 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
                 "speaker": f"上一段发言 · {seat_label(item.seat_key)}",
                 "stage_key": item.stage_key,
                 # Spectators need the audio fallback metadata but must not
-                # receive a replayable written transcript. Live captions use
-                # the separate, bounded caption projection above.
+                # receive any written transcript or live-caption projection.
                 "content": "" if public else item.content,
                 "audio_url": item.audio_url,
                 "duration_seconds": item.duration_seconds,
@@ -647,8 +648,9 @@ ANONYMOUS_STAGE_FIELDS = frozenset({"key", "name", "kind", "side", "seat", "cue"
 # active_speech.{id,status,stream_generation,stream_sample_rate,playback_started_at}
 # identifies and resumes the PCM stream, while speeches.{audio_url,
 # duration_seconds,playback_started_at,playback_ends_at} provides the compatible
-# file fallback. Events only need the fields below to render captions/stages,
-# start an announcement cue, and flush the currently identified generation.
+# file fallback. Events only need the fields below to render stages, start an
+# announcement cue, and flush the currently identified generation. Written
+# speech and caption text is intentionally excluded for every spectator.
 ANONYMOUS_EVENT_FIELDS = frozenset(
     {
         "competition",
@@ -669,7 +671,6 @@ ANONYMOUS_EVENT_FIELDS = frozenset(
         "winner",
         "scorecard_id",
         "stage_key",
-        "text",
         "generation",
     }
 )
@@ -709,19 +710,9 @@ def anonymous_realtime_event(message: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"type": event_type} if isinstance(event_type, str) else {}
     if type(message.get("seq")) is int:
         result["seq"] = message["seq"]
-    if event_type in {"asr", "caption.segment"}:
-        if isinstance(message.get("text"), str):
-            result["text"] = message["text"]
-        if isinstance(message.get("is_final"), bool):
-            result["is_final"] = message["is_final"]
-        for key in ("speech_id", "seat_key", "segment_id"):
-            if isinstance(message.get(key), str):
-                result[key] = message[key]
-        for key in ("start_ms", "end_ms"):
-            if type(message.get(key)) is int:
-                result[key] = message[key]
-        if message.get("timing_basis") in {"agent_text", "asr"}:
-            result["timing_basis"] = message["timing_basis"]
+    # Preserve only the event/sequence envelope so a spectator can reconcile
+    # the accompanying room snapshot. Never forward ASR or caption text (or
+    # timing/identity metadata that could be accumulated as a transcript).
     if event_type in {"audio.rtc.interrupt", "audio.realtime.aborted", "audio.stream.aborted"} and isinstance(
         message.get("generation"), str
     ):

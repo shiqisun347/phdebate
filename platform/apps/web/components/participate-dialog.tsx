@@ -10,6 +10,13 @@ import { roomCreationBlockedReason, seasonStatusLabel } from "@/lib/seasons";
 import { useSession } from "@/lib/use-session";
 import type { Competition, Room } from "@/lib/types";
 
+function roomLookupError(error: unknown, roomCode: string): string {
+  if (error instanceof ApiRequestError && error.status === 404) {
+    return `没有找到房间 #${roomCode}。请核对房间号，或向房主确认比赛是否已关闭。`;
+  }
+  return error instanceof Error ? error.message : "房间查询失败，请稍后重试。";
+}
+
 export function ParticipateDialog({ competition, onClose }: { competition: Competition; onClose: () => void }) {
   const router = useRouter();
   const { user, loading: sessionLoading } = useSession();
@@ -126,7 +133,7 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
         if (err instanceof ApiRequestError && [401, 403].includes(err.status)) {
           continueToLogin(`/rooms/${normalized}/lobby`);
         } else {
-          setError(err instanceof Error ? err.message : "房间查询失败，请稍后重试。");
+          setError(roomLookupError(err, normalized));
         }
       } finally {
         setBusy(false);
@@ -165,7 +172,9 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
         router.push(`/rooms/${data.room.code}/lobby`);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "操作失败";
+      const message = mode === "join"
+        ? roomLookupError(err, code.replace(/\D/g, "").slice(0, 6))
+        : err instanceof Error ? err.message : "操作失败";
       if (message.includes("登录")) {
         const normalized = code.replace(/\D/g, "").slice(0, 6);
         const next = mode === "join" && normalized.length === 6

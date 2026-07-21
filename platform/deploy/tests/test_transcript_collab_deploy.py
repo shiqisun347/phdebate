@@ -12,6 +12,9 @@ def test_transcript_collaboration_has_releasable_supervisor_runtime() -> None:
     assert '"$NPM" ci --ignore-scripts' in build
     assert '"$NPM" run check' in build
     assert '"$node_major" -lt 22' in build
+    assert 'export PATH="$ROOT/runtime/node/bin:$PATH"' in build
+    assert 'rm -rf "$TARGET"' in build
+    assert "trap cleanup EXIT" in build
     assert 'chown -R "$SERVICE_USER:$SERVICE_GROUP" "$TARGET"' in build
     assert 'find "$TARGET" -type d -exec chmod 750 {} +' in build
     assert 'find "$TARGET" -type f -exec chmod 640 {} +' in build

@@ -2524,12 +2524,7 @@ def test_anonymous_room_websocket_strips_hub_diagnostics(register_user, client: 
         initial = socket.receive_json()
         assert initial["room"]["code"] == room["code"]
         update = socket.receive_json()
-        assert update["event"] == {
-            "type": "asr",
-            "text": "观众可见字幕",
-            "is_final": False,
-            "speech_id": "private-speech-id",
-        }
+        assert update["event"] == {"type": "asr"}
 
 
 def test_authenticated_nonparticipant_websocket_uses_public_event_redaction(register_user, monkeypatch) -> None:
@@ -2562,12 +2557,7 @@ def test_authenticated_nonparticipant_websocket_uses_public_event_redaction(regi
         assert initial["room"]["my_seat"] is None
         assert initial["room"]["can_control"] is False
         update = socket.receive_json()
-        assert update["event"] == {
-            "type": "asr",
-            "text": "观众可见字幕",
-            "is_final": True,
-            "speech_id": "private-speech-id",
-        }
+        assert update["event"] == {"type": "asr"}
 
 
 async def test_redis_client_initialization_is_single_flight(monkeypatch) -> None:
@@ -5999,7 +5989,7 @@ def test_public_projection_redacts_internal_failures(client: TestClient, registe
     assert public_result.json()["detail"] == "比赛尚未结束，请前往观战页面查看实时内容。"
 
 
-def test_anonymous_realtime_event_allows_captions_and_flush_identity_only() -> None:
+def test_anonymous_realtime_event_hides_captions_and_keeps_flush_identity_only() -> None:
     caption = room_service_service.anonymous_realtime_event(
         {
             "type": "asr",
@@ -6012,13 +6002,7 @@ def test_anonymous_realtime_event_allows_captions_and_flush_identity_only() -> N
             "agent_latency_ms": 812,
         }
     )
-    assert caption == {
-        "type": "asr",
-        "seq": 42,
-        "text": "观众需要看到的实时字幕",
-        "is_final": False,
-        "speech_id": "internal-speech-id",
-    }
+    assert caption == {"type": "asr", "seq": 42}
 
     interrupted = room_service_service.anonymous_realtime_event(
         {

@@ -224,7 +224,24 @@ describe("participation dialog", () => {
     fireEvent.click(screen.getByRole("button", { name: /搜索房间/ }));
     fireEvent.change(screen.getByLabelText("六位房间号"), { target: { value: "000000" } });
     fireEvent.click(screen.getByRole("button", { name: "登录或注册后进入" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("房间不存在");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("没有找到房间 #000000");
+    expect(alert).toHaveTextContent("请核对房间号");
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it("gives a logged-in student an actionable nonexistent-room error", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(response({ competition: training }))
+      .mockResolvedValueOnce(response({ detail: "房间不存在。" }, 404)));
+    render(<ParticipateDialog competition={training} onClose={vi.fn()} />);
+    await screen.findByLabelText("自定义辩题（可选）");
+    fireEvent.click(screen.getByRole("button", { name: /搜索房间/ }));
+    fireEvent.change(screen.getByLabelText("六位房间号"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "进入房间" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("没有找到房间 #123456");
+    expect(alert).toHaveTextContent("向房主确认比赛是否已关闭");
     expect(navigation.push).not.toHaveBeenCalled();
   });
 

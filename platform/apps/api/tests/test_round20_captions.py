@@ -11,11 +11,15 @@ from test_platform import create_training_room
 
 
 @pytest.mark.asyncio
-async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(register_user, monkeypatch) -> None:
+async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(
+    client, register_user, monkeypatch
+) -> None:
     owner = register_user("round20_caption_owner")
+    outsider = register_user("round20_caption_outsider")
     code = create_training_room(owner, "Round20 AI 逐句字幕")['code']
     with SessionLocal() as db:
         room = load_room(db, code, lock=True)
+        room.status = "running"
         match = Match(room_id=room.id, competition_id=room.competition_id, status="running")
         db.add(match)
         db.flush()
@@ -63,8 +67,14 @@ async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(r
         assert snapshot["active_speech"]["content"] == ""
         assert snapshot["speeches"][0]["content"] == ""
         assert snapshot["speeches"][0]["audio_url"] == "/api/media/speech.wav"
-        assert [item["text"] for item in snapshot["caption_segments"]] == ["第一句已经完整。", "第二句仍在继续。"]
-        assert {item["timing_basis"] for item in snapshot["caption_segments"]} == {"agent_text"}
+        assert snapshot["caption_segments"] == []
+    anonymous_room = client.get(f"/api/rooms/{code}/public").json()["room"]
+    signed_in_spectator_room = outsider.get(f"/api/rooms/{code}").json()["room"]
+    for spectator_room in (anonymous_room, signed_in_spectator_room):
+        assert spectator_room["can_view_transcript"] is False
+        assert spectator_room["caption_segments"] == []
+        assert spectator_room["active_speech"]["content"] == ""
+        assert all(item["content"] == "" for item in spectator_room["speeches"])
     assert [item["text"] for item in published] == ["第一句已经完整。", "第二句仍在继续。"]
     assert all(item["timing_basis"] == "agent_text" for item in published)
 
@@ -102,7 +112,7 @@ def test_caption_persistence_rejects_cross_room_projection_and_declares_cascade(
     assert room_fk.ondelete == "CASCADE"
 
 
-def test_public_caption_event_keeps_only_presentation_fields() -> None:
+def test_public_caption_event_never_exposes_written_or_timing_fields() -> None:
     projected = anonymous_realtime_event(
         {
             "type": "caption.segment",
@@ -118,17 +128,7 @@ def test_public_caption_event_keeps_only_presentation_fields() -> None:
             "provider_debug": "secret",
         }
     )
-    assert projected == {
-        "type": "caption.segment",
-        "speech_id": "speech-1",
-        "seat_key": "aff_1",
-        "segment_id": "segment-1",
-        "text": "逐句字幕。",
-        "is_final": True,
-        "start_ms": 120,
-        "end_ms": 840,
-        "timing_basis": "agent_text",
-    }
+    assert projected == {"type": "caption.segment"}
 
 
 def test_public_match_event_never_exposes_authoritative_transcript_content() -> None:
@@ -179,4 +179,4 @@ def test_asr_caption_projection_is_recoverable_and_duplicate_safe(register_user)
         snapshot = serialize_room(db, room, None, public=True)
     assert [item.text for item in transcripts] == ["人类发言第一句。"]
     assert [item.text for item in captions] == ["人类发言第一句。"]
-    assert snapshot["caption_segments"][0]["timing_basis"] == "asr"
+    assert snapshot["caption_segments"] == []

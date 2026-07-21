@@ -30,6 +30,14 @@ if [[ -e "$TARGET" ]]; then
   exit 2
 fi
 
+completed=false
+cleanup() {
+  if [[ "$completed" != true ]]; then
+    rm -rf "$TARGET"
+  fi
+}
+trap cleanup EXIT
+
 if [[ "$(id -u)" -eq 0 ]]; then
   install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$RELEASES" "$TARGET"
 else
@@ -43,6 +51,10 @@ rsync -rlp --delete \
 
 (
   cd "$TARGET"
+  # npm's executable uses /usr/bin/env node for package lifecycle commands.
+  # Pin PATH as well as the npm binary so builds cannot silently fall back to
+  # an older system Node after the managed runtime has passed admission.
+  export PATH="$ROOT/runtime/node/bin:$PATH"
   "$NPM" ci --ignore-scripts
   "$NPM" run check
   "$NPM" prune --omit=dev --ignore-scripts
@@ -60,4 +72,5 @@ find "$TARGET" -type f -exec chmod 640 {} +
 temporary="$CURRENT.new.$$"
 ln -s "$TARGET" "$temporary"
 mv -Tf "$temporary" "$CURRENT"
+completed=true
 echo "transcript_collab_release=$RELEASE current=$TARGET"

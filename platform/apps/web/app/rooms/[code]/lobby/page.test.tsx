@@ -500,4 +500,38 @@ describe("room lobby", () => {
       expect.objectContaining({ method: "POST" }),
     ));
   });
+
+  it("keeps the lobby recoverable when the realtime voice service is still warming", async () => {
+    const readyRoom = lobbyRoom({
+      competition: { ...lobbyRoom().competition, ranked: false },
+      season: null,
+      seats: lobbyRoom().seats.map((seat) => seat.seat_key === "aff_1" ? { ...seat, is_ready: true, is_owner: true } : seat),
+    });
+    mocks.room = readyRoom;
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/control-lease")) return { seq: 3, lease_fingerprint: "current-device" };
+      if (path.endsWith("/start")) {
+        const { ApiRequestError } = await import("@/lib/api");
+        throw new ApiRequestError(
+          503,
+          { detail: "实时语音服务正在启动，比赛尚未锁定。席位和准备状态已保留，请稍后重试。" },
+          "实时语音服务正在启动，比赛尚未锁定。席位和准备状态已保留，请稍后重试。",
+        );
+      }
+      throw new Error(`unexpected request: ${path}`);
+    });
+
+    render(<LobbyPage />);
+    const start = await screen.findByRole("button", { name: "锁定席位并开始" });
+    await waitFor(() => expect(start).toBeEnabled());
+    fireEvent.click(start);
+    fireEvent.click(screen.getByRole("button", { name: "确认开始比赛" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("比赛尚未锁定");
+    expect(alert).toHaveTextContent("席位和准备状态已保留，请稍后重试");
+    expect(start).toBeEnabled();
+    expect(mocks.replace).not.toHaveBeenCalled();
+    expect(mocks.push).not.toHaveBeenCalledWith("/rooms/123456/debate");
+  });
 });
