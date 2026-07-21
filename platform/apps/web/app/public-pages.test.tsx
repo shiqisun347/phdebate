@@ -124,6 +124,37 @@ describe("public pages", () => {
     expect(screen.getByText("正在同步赛季榜单…")).toBeInTheDocument();
   });
 
+  it("deduplicates leaderboard retries while a request is still in flight", async () => {
+    const rankingRetry = new Promise<Response>(() => undefined);
+    let rankingRequests = 0;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/competitions")) {
+        return Promise.resolve(response({ items: [{
+          id: "daily", slug: "daily-4v4", name: "4v4 人机辩论日常赛", tagline: "", description: "", rules: "",
+          format: "4v4", seat_count: 8, ranked: true, allow_custom_topic: false, accent: "violet", live_count: 0,
+        }] }));
+      }
+      if (url.includes("/api/rankings")) {
+        rankingRequests += 1;
+        return rankingRequests === 1
+          ? Promise.reject(new Error("temporary ranking failure"))
+          : rankingRetry;
+      }
+      return Promise.resolve(response({ items: [] }));
+    }));
+
+    render(<HomePage />);
+    expect(await screen.findByRole("button", { name: "创建 4v4 比赛" })).toBeEnabled();
+    const retry = await screen.findByRole("button", { name: "重新载入排行榜" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(rankingRequests).toBe(2);
+    expect(screen.getByText("正在重新载入排行榜…").closest(".ranking-list")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText("完成首场积分赛后，你的名字会出现在这里")).not.toBeInTheDocument();
+  });
+
   it("refreshes public rooms in the background only while the page is visible", async () => {
     vi.useFakeTimers();
     let liveRequestCount = 0;

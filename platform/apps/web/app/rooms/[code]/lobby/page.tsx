@@ -270,7 +270,7 @@ export default function LobbyPage() {
     <div className="page-shell">
       <div className="section-head">
         <div>
-          <span className="eyebrow">Room Lobby</span>
+          <span className="eyebrow">赛前大厅</span>
           <h1>
             比赛房间 <span className="room-code">#{room.code}</span>
           </h1>

@@ -141,6 +141,8 @@ describe("room lobby", () => {
       season: null,
     });
     render(<LobbyPage />);
+    expect(screen.getByText("赛前大厅", { selector: ".eyebrow" })).toBeInTheDocument();
+    expect(screen.queryByText("Room Lobby")).not.toBeInTheDocument();
     expect(screen.queryByText("赛事录音说明")).not.toBeInTheDocument();
     expect(screen.queryByText("录音知情同意")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "确认准备" })).toBeEnabled());

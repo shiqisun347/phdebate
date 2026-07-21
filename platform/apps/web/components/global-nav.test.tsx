@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import axe from "axe-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -8,13 +8,15 @@ import type { User } from "@/lib/types";
 const session = vi.hoisted(() => ({
   user: { id: "admin", account: "admin", real_name: "系统管理员", role: "system_admin", is_active: true } as User,
 }));
+const navigation = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
-  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => navigation,
 }));
 
 vi.mock("@/lib/use-session", () => ({
+  notifySessionChanged: vi.fn(),
   useSession: () => ({
     user: session.user,
     loading: false,
@@ -25,6 +27,9 @@ vi.mock("@/lib/use-session", () => ({
 describe("global navigation", () => {
   afterEach(() => {
     session.user = { id: "admin", account: "admin", real_name: "系统管理员", role: "system_admin", is_active: true };
+    navigation.push.mockReset();
+    navigation.refresh.mockReset();
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -66,5 +71,27 @@ describe("global navigation", () => {
     expect(screen.getByRole("link", { name: "排行榜" })).toHaveAttribute("href", "/rankings");
     expect(screen.getByRole("link", { name: realName })).toHaveAttribute("href", "/me");
     expect(screen.queryByRole("link", { name: /教学活动|政策管理|研究导出|系统管理/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps the user signed in and offers a retry when logout fails", async () => {
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+      attempts += 1;
+      if (attempts === 1) return Promise.reject(new Error("network offline"));
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    }));
+    render(<GlobalNav />);
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("网络连接失败");
+    expect(navigation.push).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试退出" }));
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith("/"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(attempts).toBe(2);
   });
 });

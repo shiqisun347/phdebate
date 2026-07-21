@@ -43,6 +43,19 @@ describe("watch result redirect", () => {
     expect(screen.getByText("观战舞台")).toBeInTheDocument();
   });
 
+  it.each(["review_required", "terminated"])("returns a participant from an unpublished %s match to its result", async (status) => {
+    mocks.room = {
+      id: "room",
+      code: "123456",
+      status,
+      seq: 2,
+      my_seat: "aff_1",
+      can_control: false,
+    } as unknown as Room;
+    render(<WatchPage />);
+    await waitFor(() => expect(mocks.push).toHaveBeenCalledWith("/rooms/123456/result"));
+  });
+
   it("keeps an active match on the watch stage", () => {
     mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
     render(<WatchPage />);

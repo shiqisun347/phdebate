@@ -64,7 +64,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
   }
   if (sessionLoading || user) {
     return (
-      <div className="success-box" role="status">
+      <div className={`success-box auth-session-state ${mode}`} role="status">
         <strong>{sessionLoading ? "正在确认登录状态…" : "你已登录"}</strong>
         <span>{sessionLoading ? "确认后再显示账号表单。" : "正在返回你的辩论档案。"}</span>
       </div>

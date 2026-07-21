@@ -27,14 +27,22 @@ export default function WatchPage() {
   useEffect(() => {
     if (room?.status === "cancelled") {
       router.replace(`/?room_closed=${code}`);
-    } else if (room?.status === "completed") {
+    } else if (
+      room
+      && ["completed", "review_required", "terminated"].includes(room.status)
+      && (room.status === "completed" || Boolean(room.my_seat) || room.can_control)
+    ) {
       router.push(`/rooms/${code}/result`);
     }
   }, [room, code, router]);
 
   if (!room && error) return <LoadError message={error} retry={reconnect} />;
   if (!room) return <div className="loading-screen">正在连接公开观战…</div>;
-  if (["cancelled", "completed"].includes(room.status)) {
+  if (
+    room.status === "cancelled"
+    || (["completed", "review_required", "terminated"].includes(room.status)
+      && (room.status === "completed" || Boolean(room.my_seat) || room.can_control))
+  ) {
     return <div className="loading-screen">正在返回正确的比赛页面…</div>;
   }
   return (

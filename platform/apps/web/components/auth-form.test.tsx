@@ -39,6 +39,7 @@ describe("AuthForm", () => {
 
     expect(screen.queryByLabelText("登录账号")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("你已登录");
+    expect(screen.getByRole("status")).toHaveClass("auth-session-state", "register");
     await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/me"));
   });
 

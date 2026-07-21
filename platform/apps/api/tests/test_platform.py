@@ -4632,6 +4632,9 @@ def test_admin_can_restore_ai_substituted_human_seat(client: TestClient, registe
     admin = TestClient(client.app)
     with admin:
         assert admin.post("/api/auth/login", json={"account": "admin_test", "password": "Admin-test-1234"}).status_code == 200
+        admin_room = admin.get(f"/api/rooms/{code}").json()["room"]
+        assert admin_room["can_admin_restore"] is True
+        assert substituted_room_view["can_admin_restore"] is False
         offline = admin.post(f"/api/admin/rooms/{code}/seats/aff_1/restore", headers=csrf(admin), json={})
         assert offline.status_code == 409 and "尚未重新连接" in offline.json()["detail"]
         with SessionLocal() as db:

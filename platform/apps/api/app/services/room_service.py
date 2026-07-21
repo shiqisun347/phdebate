@@ -548,6 +548,11 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
         "can_speak": allowed,
         "speak_reason": reason,
         "can_control": bool(user and can_control(db, room, user)),
+        # Room owners and system administrators share the match-wide control
+        # console, but only a system administrator may bypass the participant
+        # restore-request workflow. Expose that distinction explicitly so the
+        # UI never advertises an action the current viewer cannot perform.
+        "can_admin_restore": bool(user and user.role == "system_admin" and not public),
         "can_view_transcript": not public,
         "seat_restore_requests": restore_requests,
         "free_turn_queue": free_turn_queue,

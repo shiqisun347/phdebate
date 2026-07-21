@@ -12,6 +12,8 @@ export function GlobalNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
   const menuToggleRef = useRef<HTMLButtonElement | null>(null);
   const isStage = pathname.includes("/debate") || pathname.includes("/watch");
   const isLobbyPage = pathname === "/";
@@ -31,10 +33,19 @@ export function GlobalNav() {
   }, [menuOpen]);
   if (isStage) return null;
   async function logout() {
-    await apiFetch("/api/auth/logout", { method: "POST" });
-    notifySessionChanged();
-    router.push("/");
-    router.refresh();
+    if (logoutBusy) return;
+    setLogoutBusy(true);
+    setLogoutError("");
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+      notifySessionChanged();
+      router.push("/");
+      router.refresh();
+    } catch (error) {
+      setLogoutError(error instanceof Error ? error.message : "退出失败，请检查网络后重试。");
+    } finally {
+      setLogoutBusy(false);
+    }
   }
   return (
     <header className="global-nav">
@@ -52,7 +63,7 @@ export function GlobalNav() {
         {loading ? <span className="muted">载入中</span> : user ? (
           <>
             <Link href="/me" className="user-chip" title={user.real_name}><UserRound size={17} /><span>{user.real_name}</span></Link>
-            <button className="icon-button" onClick={logout} aria-label="退出登录"><LogOut size={17} /></button>
+            <button className="icon-button" type="button" disabled={logoutBusy} aria-busy={logoutBusy} onClick={() => void logout()} aria-label={logoutBusy ? "正在退出登录" : "退出登录"}><LogOut size={17} /></button>
           </>
         ) : (
           <>
@@ -61,6 +72,7 @@ export function GlobalNav() {
           </>
         )}
       </div>
+      {logoutError && <div className="nav-session-error" role="alert"><span>{logoutError}</span><button type="button" className="text-button" disabled={logoutBusy} onClick={() => void logout()}>重试退出</button></div>}
     </header>
   );
 }

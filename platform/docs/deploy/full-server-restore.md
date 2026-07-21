@@ -503,7 +503,29 @@ PHDEBATE_ALLOW_RECOVERY_PRUNE=yes \
 14 天保留任务管理；release 使用 `prune-releases.sh` 独立保留最近回滚版本。磁盘清理前后都必须
 执行 readiness、`audit-storage.py` 和当前恢复清单校验。
 
-早期不完整清单不能直接删除，也不能为了让清理继续而手工移出扫描目录。先运行受审计隔离工具：
+历史 schema 1 清单使用六行 `SHA-256 + 绝对路径`，不是普通的截断清单。不要手工改写绝对路径，
+也不要直接隔离。先用非破坏性升级工具只读核验实际归档：
+
+```bash
+./deploy/upgrade-schema1-recovery-manifests.py audit
+PHDEBATE_ALLOW_SCHEMA1_MANIFEST_UPGRADE=yes \
+  ./deploy/upgrade-schema1-recovery-manifests.py write \
+  --report runtime/deploy-backups/schema1-upgrade-$(date -u +%Y%m%dT%H%M%SZ).json
+./deploy/prune-recovery-sets.sh dry-run
+```
+
+升级工具不信任旧清单中的绝对路径，只从批准的 平台 数据库、Agent 数据库和部署备份目录按安全
+basename 查找；每件归档必须唯一存在，且实际 SHA-256 与旧清单一致。它不会覆盖、移动或删除原清单，
+只在 `runtime/deploy-backups/manifest-upgrades/` 以排他方式创建 `0600` 的 schema 3 伴随清单。
+伴随清单绑定原 schema 1 清单自身的文件名、大小和 SHA-256，因此原清单之后哪怕只改变一个字节，
+清理器也会重新失败关闭。生成前先审阅 audit；write 必须显式确认，并且报告路径已存在时拒绝覆盖。
+
+`prune-recovery-sets.sh` 会把通过完整 recovery index 校验的 schema 1 伴随清单识别为“已验证但受保护
+的历史恢复集”：它们不阻塞其他 schema 2/3 清理，但原清单及其数据卷不会成为自动删除候选。若要
+最终淘汰这批历史恢复集，仍需单独的迁出、隔离恢复和人工退役批准，不能把本次升级当作删除授权。
+
+其他早期不完整清单不能直接删除，也不能为了让清理继续而手工移出扫描目录。对无法转换但仍含安全
+数据卷字段的清单，再运行受审计隔离工具：
 
 ```bash
 ./deploy/quarantine-recovery-manifests.py dry-run

@@ -123,6 +123,24 @@ describe("room control console", () => {
     expect(mocks.apiFetch).not.toHaveBeenCalled();
   });
 
+  it("requires confirmation before skipping an irreversible stage", async () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    render(<ControlPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "跳过当前阶段" }));
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("正方立论"));
+    expect(mocks.apiFetch).not.toHaveBeenCalled();
+
+    confirmMock.mockReturnValue(true);
+    mocks.apiFetch.mockResolvedValueOnce({ room: { ...runningRoom, seq: 2 } });
+    fireEvent.click(screen.getByRole("button", { name: "跳过当前阶段" }));
+    await waitFor(() => expect(mocks.apiFetch).toHaveBeenCalledWith(
+      "/api/rooms/123456/control/skip",
+      expect.objectContaining({ method: "POST" }),
+    ));
+  });
+
   it("lets the room owner approve an explicit restoration request after speech ends", async () => {
     const substitutedSeat = {
       seat_key: "aff_1",
@@ -187,6 +205,34 @@ describe("room control console", () => {
     expect(screen.getByRole("button", { name: "等待辩手连接" })).toBeDisabled();
     expect(screen.getByText(/尚未打开比赛页/)).toBeInTheDocument();
     expect(mocks.apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("lets a system administrator directly restore a connected AI-substituted seat", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const substitutedSeat = {
+      seat_key: "aff_1", side: "aff" as const, position: 1, label: "正方一辩",
+      occupant_type: "ai_substitute" as const, display_name: "AI 接替·张三",
+      is_ready: true, connected: true, is_me: false,
+    };
+    const restored = {
+      ...runningRoom,
+      seq: 2,
+      can_admin_restore: true,
+      seats: [{ ...substitutedSeat, occupant_type: "human" as const, display_name: "张三" }],
+    } as Room;
+    mocks.room = { ...runningRoom, can_admin_restore: true, seats: [substitutedSeat] } as Room;
+    mocks.apiFetch.mockResolvedValueOnce({ room: restored });
+
+    render(<ControlPage />);
+    fireEvent.click(screen.getByRole("button", { name: "直接恢复真人" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("张三"));
+    await waitFor(() => expect(mocks.apiFetch).toHaveBeenCalledWith(
+      "/api/admin/rooms/123456/seats/aff_1/restore",
+      { method: "POST", body: "{}" },
+    ));
+    expect(mocks.setRoom).toHaveBeenCalledOnce();
+    expect(screen.getByRole("status")).toHaveTextContent("张三 已恢复为真人辩手");
   });
 
   it("safely transfers room recovery control to a connected human participant", async () => {

@@ -26,10 +26,12 @@ export default function HomePage() {
   const [rankingsError, setRankingsError] = useState("");
   const [liveRoomsLoaded, setLiveRoomsLoaded] = useState(false);
   const [rankingsLoaded, setRankingsLoaded] = useState(false);
+  const [rankingsLoading, setRankingsLoading] = useState(false);
   const [liveRoomsLoading, setLiveRoomsLoading] = useState(false);
   const [lastLiveRoomsUpdatedAt, setLastLiveRoomsUpdatedAt] = useState<Date | null>(null);
   const [notice, setNotice] = useState("");
   const liveRoomsInFlight = useRef(false);
+  const rankingsInFlight = useRef(false);
   const loadLiveRooms = useCallback(async () => {
     if (liveRoomsInFlight.current) return;
     liveRoomsInFlight.current = true;
@@ -48,6 +50,9 @@ export default function HomePage() {
     }
   }, []);
   const loadRankings = useCallback(async () => {
+    if (rankingsInFlight.current) return;
+    rankingsInFlight.current = true;
+    setRankingsLoading(true);
     setRankingsError("");
     try {
       const data = await apiFetch<{ items: Ranking[] }>("/api/rankings");
@@ -56,6 +61,8 @@ export default function HomePage() {
       setRankingsError(err instanceof Error ? err.message : "排行榜载入失败");
     } finally {
       setRankingsLoaded(true);
+      setRankingsLoading(false);
+      rankingsInFlight.current = false;
     }
   }, []);
   const load = useCallback(async () => {
@@ -160,10 +167,12 @@ export default function HomePage() {
         </div>
         <div className="panel">
           <div className="panel-title"><h2>赛季领先者</h2><Link href="/rankings" className="muted">完整榜单</Link></div>
-          <div className="ranking-list">
-            {rankingsError && rankings.length > 0 && <div className="warning-box" role="status"><span>榜单同步失败，以下为最近一次成功结果。</span><button type="button" className="text-button" onClick={() => void loadRankings()}>立即重试</button></div>}
-            {rankingsError && !rankings.length
-              ? <div className="empty" role="status"><p>排行榜暂时未载入，参赛功能仍可正常使用。</p><button type="button" className="button button-small button-secondary" onClick={() => void loadRankings()}>重新载入排行榜</button></div>
+          <div className="ranking-list" aria-busy={rankingsLoading}>
+            {rankingsError && rankings.length > 0 && <div className="warning-box" role="status"><span>榜单同步失败，以下为最近一次成功结果。</span><button type="button" className="text-button" disabled={rankingsLoading} onClick={() => void loadRankings()}>{rankingsLoading ? "正在重试…" : "立即重试"}</button></div>}
+            {rankingsLoading && rankingsLoaded && !rankings.length
+              ? <div className="empty" role="status">正在重新载入排行榜…</div>
+              : rankingsError && !rankings.length
+              ? <div className="empty" role="status"><p>排行榜暂时未载入，参赛功能仍可正常使用。</p><button type="button" className="button button-small button-secondary" disabled={rankingsLoading} onClick={() => void loadRankings()}>{rankingsLoading ? "正在载入…" : "重新载入排行榜"}</button></div>
               : !rankingsLoaded
                 ? <div className="empty" role="status">正在同步赛季榜单…</div>
                 : <>{rankings.slice(0, 6).map((item) => <div className="ranking-row" key={item.user_id}><span className="rank">{item.rank}</span><strong>{item.real_name}</strong><span>{item.points} 分</span><span className="muted">{item.wins} 胜</span></div>)}{!rankings.length && <div className="empty">完成首场积分赛后，你的名字会出现在这里</div>}</>}

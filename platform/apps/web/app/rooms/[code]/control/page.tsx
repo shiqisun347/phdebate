@@ -67,6 +67,25 @@ export default function ControlPage() {
     }
   }
 
+  async function restoreSeatAsAdmin(seatKey: string, displayName: string) {
+    if (!confirm(`确认直接恢复 ${displayName} 的真人控制权？恢复后，该辩手当前设备将重新获得发言资格。`)) return;
+    const action = `admin-restore:${seatKey}`;
+    setBusy(action);
+    setError("");
+    try {
+      const result = await apiFetch<{ room: Room }>(`/api/admin/rooms/${code}/seats/${seatKey}/restore`, {
+        method: "POST",
+        body: "{}",
+      });
+      setRoom((current) => !current || result.room.seq >= current.seq ? result.room : current);
+      setNotice(`${displayName} 已恢复为真人辩手。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "真人席位恢复失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function transferOwnership(seatKey: string, displayName: string, seatLabel: string) {
     if (!confirm(`确认将房主控制权移交给 ${displayName}（${seatLabel}）？移交后，对方将负责异常暂停、恢复和终止等应急操作。`)) return;
     const action = `transfer-owner:${seatKey}`;
@@ -183,7 +202,7 @@ export default function ControlPage() {
             ) : (
               <button className="button button-secondary" aria-busy={busy === "pause"} disabled={Boolean(busy) || !canPause} onClick={() => control("pause")}><Pause />{busy === "pause" ? "正在暂停…" : humanSpeaking?"真人发言中":"暂停比赛"}</button>
             )}
-            <button className="button button-secondary" aria-busy={busy === "skip"} disabled={Boolean(busy) || !canSkip} onClick={() => control("skip")}><SkipForward />{busy === "skip" ? "正在跳过…" : humanSpeaking ? "真人发言中，不可跳过" : "跳过当前阶段"}</button>
+            <button className="button button-secondary" aria-busy={busy === "skip"} disabled={Boolean(busy) || !canSkip} onClick={() => confirm(`确认跳过“${room.current_stage?.name || "当前阶段"}”？系统会立即进入下一阶段，此操作不能撤销。`) && control("skip")}><SkipForward />{busy === "skip" ? "正在跳过…" : humanSpeaking ? "真人发言中，不可跳过" : "跳过当前阶段"}</button>
             <button className="button button-danger" aria-busy={busy === "terminate"} disabled={Boolean(busy) || !canTerminate} onClick={() => confirm("确定终止本场比赛？") && control("terminate")}><Square />{busy === "terminate" ? "正在终止…" : "终止比赛"}</button>
             {error && <div className="error-box" role="alert">{error}</div>}
             {notice && <div className="notice-box" role="status">{notice}</div>}
@@ -256,7 +275,18 @@ export default function ControlPage() {
               {substitutes.map((seat) => (
                 <div className="substitute-row" key={seat.seat_key}>
                   <span><Bot size={15} /><strong>{seat.display_name}</strong><small>{seat.label} · {seat.connected ? "原辩手已返回" : "原辩手离线"}</small></span>
-                  <small>{pendingRestoreRequests.some((request) => request.seat_key === seat.seat_key) ? "等待审批" : "等待原辩手发起申请"}</small>
+                  {room.can_admin_restore ? (
+                    <button
+                      type="button"
+                      className="button button-small button-green"
+                      aria-busy={busy === `admin-restore:${seat.seat_key}`}
+                      disabled={Boolean(busy) || !seat.connected || Boolean(room.active_speech)}
+                      onClick={() => void restoreSeatAsAdmin(seat.seat_key, seat.display_name.replace(/^AI 接替·/, ""))}
+                    >
+                      <RotateCcw size={15} />
+                      {!seat.connected ? "等待辩手连接" : room.active_speech ? "发言结束后恢复" : busy === `admin-restore:${seat.seat_key}` ? "正在恢复…" : "直接恢复真人"}
+                    </button>
+                  ) : <small>{pendingRestoreRequests.some((request) => request.seat_key === seat.seat_key) ? "等待审批" : "等待原辩手发起申请"}</small>}
                 </div>
               ))}
             </div>
