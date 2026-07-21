@@ -91,6 +91,7 @@ class AgentTextPrefetch:
     payload: dict[str, Any]
     provider_config: dict[str, Any]
     content: str = ""
+    audio_asset_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -110,9 +111,88 @@ def _remove_generated_audio(room_code: str, asset_id: str) -> None:
         return
     target_dir = settings.media_path / room_code
     (target_dir / f"{asset_id}.wav").unlink(missing_ok=True)
+    (target_dir / f"{asset_id}.source.wav").unlink(missing_ok=True)
     for temporary in target_dir.glob(f".{asset_id}.*.wav.part"):
         if temporary.is_file() and not temporary.is_symlink():
             temporary.unlink(missing_ok=True)
+
+
+def _adopt_prefetched_audio(room_code: str, source_id: str, speech_id: str) -> str:
+    target_dir = settings.media_path / room_code
+    source_playback = target_dir / f"{source_id}.wav"
+    source_original = target_dir / f"{source_id}.source.wav"
+    target_playback = target_dir / f"{speech_id}.wav"
+    target_original = target_dir / f"{speech_id}.source.wav"
+    if not source_playback.is_file() or source_playback.is_symlink():
+        return ""
+    target_playback.unlink(missing_ok=True)
+    target_original.unlink(missing_ok=True)
+    source_playback.replace(target_playback)
+    if source_original.is_file() and not source_original.is_symlink():
+        source_original.replace(target_original)
+    return f"/media/{room_code}/{speech_id}.wav"
+
+
+async def _prepare_stable_playback_asset(room_code: str, speech_id: str, speed: float) -> str:
+    """Keep the original WAV and atomically create one pitch-preserving asset."""
+
+    target_dir = settings.media_path / room_code
+    target = target_dir / f"{speech_id}.wav"
+    source = target_dir / f"{speech_id}.source.wav"
+    temporary = target_dir / f".{speech_id}.speed.wav.part"
+    if not target.is_file() or target.is_symlink():
+        raise ProviderError("完整 TTS WAV 不存在，无法准备稳定播放。", code="stable_audio_missing")
+    source.unlink(missing_ok=True)
+    temporary.unlink(missing_ok=True)
+    if abs(speed - 1.0) < 0.001:
+        shutil.copy2(target, source)
+        return f"/media/{room_code}/{target.name}"
+    target.replace(source)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            settings.ffmpeg_binary,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-filter:a",
+            f"atempo={speed:.4f}",
+            "-acodec",
+            "pcm_s16le",
+            "-f",
+            "wav",
+            str(temporary),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()[-500:]
+            raise ProviderError(
+                f"稳定语音变速失败：{detail or 'ffmpeg failed'}",
+                code="stable_audio_tempo_failed",
+                retryable=True,
+            )
+        if wav_duration(temporary) <= 0:
+            raise ProviderError("稳定语音变速结果无效。", code="stable_audio_tempo_failed", retryable=True)
+        temporary.replace(target)
+        return f"/media/{room_code}/{target.name}"
+    except asyncio.TimeoutError as exc:
+        raise ProviderError(
+            "稳定语音变速超时。",
+            code="stable_audio_tempo_timeout",
+            retryable=True,
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ProviderError(
+            "服务器缺少稳定语音处理工具。",
+            code="stable_audio_tool_missing",
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def recover_inflight_engine_tasks() -> dict[str, int]:
@@ -639,7 +719,9 @@ class MatchEngine:
         self._room_retry_at.pop(code, None)
 
     def _invalidate_agent_prefetch(self, room_code: str) -> None:
-        self._agent_prefetch_cache.pop(room_code, None)
+        cached = self._agent_prefetch_cache.pop(room_code, None)
+        if cached and cached.audio_asset_id:
+            _remove_generated_audio(room_code, cached.audio_asset_id)
         self._agent_prefetch_attempted.pop(room_code, None)
         task = self._agent_prefetch_tasks.pop(room_code, None)
         if task and not task.done():
@@ -747,7 +829,12 @@ class MatchEngine:
             self._invalidate_agent_prefetch(room_code)
             return
         cached = self._agent_prefetch_cache.get(room_code)
-        if cached and cached.fingerprint == descriptor.fingerprint and cached.content:
+        if (
+            cached
+            and cached.fingerprint == descriptor.fingerprint
+            and cached.content
+            and cached.audio_asset_id
+        ):
             return
         if self._agent_prefetch_attempted.get(room_code) == descriptor.fingerprint:
             return
@@ -772,6 +859,7 @@ class MatchEngine:
         task.add_done_callback(finished)
 
     async def _run_agent_prefetch(self, descriptor: AgentTextPrefetch) -> None:
+        audio_asset_id = ""
         try:
             async with self._provider_semaphore():
                 content = await debate_agent.generate(
@@ -779,31 +867,65 @@ class MatchEngine:
                 )
             if not isinstance(content, str) or not usable_transcript(content, require_substantive=True):
                 return
+            if (
+                settings.moss_tts_stable_playback_enabled
+                and settings.realtime_voice_backend == "moss_realtime"
+                and settings.moss_tts_realtime_enabled
+            ):
+                audio_asset_id = str(
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:agent-prefetch-audio:{descriptor.fingerprint}")
+                )
+                await moss_tts_realtime.synthesize(
+                    content.strip(),
+                    room_code=descriptor.room_code,
+                    speech_id=audio_asset_id,
+                    voice=voice_for_seat(descriptor.seat_key),
+                    deadline_monotonic=(
+                        asyncio.get_running_loop().time()
+                        + settings.moss_tts_realtime_job_timeout_seconds
+                    ),
+                    publish_live=False,
+                )
+                await _prepare_stable_playback_asset(
+                    descriptor.room_code,
+                    audio_asset_id,
+                    settings.moss_tts_playback_speed,
+                )
             with SessionLocal() as db:
                 room = load_room(db, descriptor.room_code)
                 expected = self._agent_prefetch_descriptor(db, room, descriptor.stage_index)
                 if not expected or expected.fingerprint != descriptor.fingerprint:
+                    if audio_asset_id:
+                        _remove_generated_audio(descriptor.room_code, audio_asset_id)
                     return
             self._agent_prefetch_cache[descriptor.room_code] = AgentTextPrefetch(
-                **{**descriptor.__dict__, "content": content.strip()}
+                **{
+                    **descriptor.__dict__,
+                    "content": content.strip(),
+                    "audio_asset_id": audio_asset_id,
+                }
             )
         except asyncio.CancelledError:
+            if audio_asset_id:
+                _remove_generated_audio(descriptor.room_code, audio_asset_id)
             raise
         except ProviderError as exc:
+            if audio_asset_id:
+                _remove_generated_audio(descriptor.room_code, audio_asset_id)
             logger.info(
-                "Agent text prefetch unavailable room=%s stage=%s code=%s",
+                "Agent/audio prefetch unavailable room=%s stage=%s code=%s",
                 descriptor.room_code,
                 descriptor.stage_key,
                 exc.code,
             )
 
-    def _consume_agent_prefetch(
+    def _take_agent_prefetch(
         self, db: Session, room: Room, current: dict[str, Any], seat: RoomSeat
-    ) -> str:
+    ) -> AgentTextPrefetch | None:
         cached = self._agent_prefetch_cache.pop(room.code, None)
         self._agent_prefetch_attempted.pop(room.code, None)
         if not cached:
-            return ""
+            return None
         expected = self._agent_prefetch_descriptor(db, room, room.current_stage_index)
         if (
             not expected
@@ -811,8 +933,20 @@ class MatchEngine:
             or cached.stage_key != current.get("key")
             or cached.seat_key != seat.seat_key
         ):
-            return ""
-        return cached.content if usable_transcript(cached.content, require_substantive=True) else ""
+            if cached.audio_asset_id:
+                _remove_generated_audio(room.code, cached.audio_asset_id)
+            return None
+        if not usable_transcript(cached.content, require_substantive=True):
+            if cached.audio_asset_id:
+                _remove_generated_audio(room.code, cached.audio_asset_id)
+            return None
+        return cached
+
+    def _consume_agent_prefetch(
+        self, db: Session, room: Room, current: dict[str, Any], seat: RoomSeat
+    ) -> str:
+        cached = self._take_agent_prefetch(db, room, current, seat)
+        return cached.content if cached else ""
 
     def _history_for_agent_prefetch(
         self, db: Session, room: Room, target_stage_index: int
@@ -1593,9 +1727,12 @@ class MatchEngine:
             )
             else ""
         )
-        prefetched_content = speculative_content or (
-            "" if retry_content or free_turn else self._consume_agent_prefetch(db, room, current, seat)
+        prefetched_entry = (
+            None
+            if retry_content or free_turn or speculative_content
+            else self._take_agent_prefetch(db, room, current, seat)
         )
+        prefetched_content = speculative_content or (prefetched_entry.content if prefetched_entry else "")
         reusable_content = retry_content or prefetched_content
         speech = Speech(
             match_id=match.id,
@@ -1608,6 +1745,11 @@ class MatchEngine:
         )
         db.add(speech)
         db.flush()
+        prefetched_audio_url = (
+            _adopt_prefetched_audio(room.code, prefetched_entry.audio_asset_id, speech.id)
+            if prefetched_entry and prefetched_entry.audio_asset_id
+            else ""
+        )
         current = self._mark_ai_preparation(
             room,
             current,
@@ -1680,7 +1822,7 @@ class MatchEngine:
         # active provider calls from finishing.  All state needed by the call has
         # been copied, so this safely releases the connection first.
         db.commit()
-        audio_url = ""
+        audio_url = prefetched_audio_url
         room_code = room.code
         speech_id = speech.id
         stage_key = current["key"]
@@ -1787,7 +1929,16 @@ class MatchEngine:
                 await self._broadcast(db, stream_room, authoritative_event)
 
         content = reusable_content
-        realtime_pipeline = bool(settings.realtime_voice_pipeline_enabled and realtime_tts.enabled())
+        stable_moss_playback = bool(
+            settings.moss_tts_stable_playback_enabled
+            and settings.realtime_voice_backend == "moss_realtime"
+            and settings.moss_tts_realtime_enabled
+        )
+        realtime_pipeline = bool(
+            settings.realtime_voice_pipeline_enabled
+            and realtime_tts.enabled()
+            and not stable_moss_playback
+        )
         if realtime_pipeline:
             db.expire_all()
             room = load_room(db, room_code, lock=True)
@@ -1956,11 +2107,48 @@ class MatchEngine:
             speech.status = "synthesizing"
             db.commit()
         if tts_deadline_monotonic <= 0:
-            tts_deadline_monotonic = asyncio.get_running_loop().time() + settings.lighttts_job_timeout_seconds
+            timeout_seconds = (
+                settings.moss_tts_realtime_job_timeout_seconds
+                if stable_moss_playback
+                else settings.lighttts_job_timeout_seconds
+            )
+            tts_deadline_monotonic = asyncio.get_running_loop().time() + timeout_seconds
 
         async def synthesize_once() -> str:
+            if prefetched_audio_url:
+                if livekit_audio_enabled():
+                    await lighttts.publish_wav_to_livekit(
+                        room_code=room_code,
+                        speech_id=speech_id,
+                        should_cancel=should_cancel_tts,
+                        on_stream_event=handle_stream_event,
+                    )
+                return prefetched_audio_url
             if audio_url:
                 return audio_url
+            if stable_moss_playback:
+                synthesized_url = await moss_tts_realtime.synthesize(
+                    content,
+                    room_code=room_code,
+                    speech_id=speech_id,
+                    voice=voice,
+                    should_cancel=should_cancel_tts,
+                    deadline_monotonic=tts_deadline_monotonic,
+                    publish_live=False,
+                )
+                await _prepare_stable_playback_asset(
+                    room_code,
+                    speech_id,
+                    settings.moss_tts_playback_speed,
+                )
+                if livekit_audio_enabled():
+                    await lighttts.publish_wav_to_livekit(
+                        room_code=room_code,
+                        speech_id=speech_id,
+                        should_cancel=should_cancel_tts,
+                        on_stream_event=handle_stream_event,
+                    )
+                return synthesized_url
             synthesized_url = await lighttts.synthesize(
                 content,
                 room_code=room_code,

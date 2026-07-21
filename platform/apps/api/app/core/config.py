@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # 60-90 second speeches.
     moss_tts_realtime_close_timeout_seconds: float = Field(default=15, ge=1, le=60)
     moss_tts_realtime_job_timeout_seconds: float = Field(default=240, ge=5, le=300)
+    # The local MOSS runtime currently produces only about 0.70 seconds of
+    # audio per wall-clock second. Formal matches prepare a complete WAV first
+    # so long speeches cannot underrun the browser playback path.
+    moss_tts_stable_playback_enabled: bool = True
+    moss_tts_playback_speed: float = Field(default=1.1, ge=0.5, le=2.0)
+    ffmpeg_binary: str = "ffmpeg"
     # Authenticated, unstarted sockets are process-local and never consume a
     # gateway synthesis slot. They are replaced before long-lived NAT/proxy
     # idle timeouts can turn the first speech into a reconnect path.

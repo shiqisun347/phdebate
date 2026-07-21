@@ -4,14 +4,15 @@ import asyncio
 from datetime import timedelta
 
 import pytest
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.entities import RoomSeat
-from app.services.match_engine import MatchEngine
-from app.services.providers import ProviderError, debate_agent
+from app.services.match_engine import MatchEngine, _adopt_prefetched_audio
+from app.services.providers import ProviderError, debate_agent, moss_tts_realtime
 from app.services.room_service import load_room, now
 from conftest import csrf
 from sqlalchemy import select
-from test_platform import create_training_room
+from test_platform import _wav_bytes, create_training_room
 
 
 def _running_announcement_room(owner, topic: str) -> str:
@@ -146,3 +147,55 @@ async def test_prefetch_provider_failure_is_attempted_once_per_fingerprint(
     assert calls == 1
     assert code not in engine._agent_prefetch_tasks
     assert code not in engine._agent_prefetch_cache
+
+
+@pytest.mark.asyncio
+async def test_prefetch_prepares_complete_stable_wav_and_atomically_adopts_it(
+    register_user, monkeypatch
+) -> None:
+    owner = register_user("prefetch_audio_owner")
+    code = _running_announcement_room(owner, "下一阶段完整语音预生成")
+
+    async def generate(payload, *, provider_config=None):
+        return "下一位辩手的正文和完整语音都应该在轮次到来前准备。"
+
+    async def synthesize(
+        _text: str,
+        *,
+        room_code: str,
+        speech_id: str,
+        publish_live: bool,
+        **_kwargs,
+    ) -> str:
+        assert publish_live is False
+        target = settings.media_path / room_code / f"{speech_id}.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_wav_bytes(1.1))
+        return f"/media/{room_code}/{speech_id}.wav"
+
+    monkeypatch.setattr(settings, "realtime_voice_backend", "moss_realtime")
+    monkeypatch.setattr(settings, "moss_tts_realtime_enabled", True)
+    monkeypatch.setattr(settings, "moss_tts_stable_playback_enabled", True)
+    monkeypatch.setattr(settings, "moss_tts_playback_speed", 1.1)
+    monkeypatch.setattr(debate_agent, "generate", generate)
+    monkeypatch.setattr(moss_tts_realtime, "synthesize", synthesize)
+    engine = MatchEngine()
+    engine._ensure_runtime()
+    engine._schedule_next_agent_prefetch(code, 0)
+    await engine._agent_prefetch_tasks[code]
+
+    cached = engine._agent_prefetch_cache[code]
+    assert cached.audio_asset_id
+    assert (settings.media_path / code / f"{cached.audio_asset_id}.wav").is_file()
+    assert (settings.media_path / code / f"{cached.audio_asset_id}.source.wav").is_file()
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.current_stage_index = 1
+        seat = next(item for item in room.seats if item.seat_key == "neg_1")
+        taken = engine._take_agent_prefetch(db, room, room.template_snapshot[1], seat)
+        assert taken and taken.audio_asset_id == cached.audio_asset_id
+
+    adopted = _adopt_prefetched_audio(code, cached.audio_asset_id, "formal-speech-id")
+    assert adopted == f"/media/{code}/formal-speech-id.wav"
+    assert (settings.media_path / code / "formal-speech-id.wav").is_file()
+    assert (settings.media_path / code / "formal-speech-id.source.wav").is_file()

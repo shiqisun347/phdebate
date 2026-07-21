@@ -54,7 +54,7 @@ from app.services import realtime as realtime_service
 from app.services import room_service as room_service_service
 from app.services import system_health as system_health_service
 from app.services.match_engine import match_engine, recover_inflight_engine_tasks
-from app.services.providers import ProviderError, debate_agent, judge_provider, lighttts
+from app.services.providers import ProviderError, debate_agent, judge_provider, lighttts, moss_tts_realtime
 from app.services.public_snapshot import public_snapshot_cache
 from app.services.realtime import RoomHub
 from app.services.room_service import append_event, leaderboard, load_room, now, reset_connected_presence
@@ -6436,6 +6436,92 @@ async def test_ai_one_shot_tts_wav_uses_livekit_fallback_without_enabling_bistre
         assert speech.stream_generation == generation
         assert speech.audio_url.endswith(f"/{speech.id}.wav")
         assert rtc_started and rtc_started.payload["transport"] == "livekit"
+
+
+async def test_moss_formal_speech_waits_for_complete_wav_then_publishes_stable_1_1x_audio(
+    client: TestClient,
+    register_user,
+    monkeypatch,
+) -> None:
+    owner = register_user("moss_stable_playback")
+    room_data = create_training_room(owner, "MOSS 完整 WAV 稳定播放测试")
+    code = room_data["code"]
+    owner.post(f"/api/rooms/{code}/ready", headers=csrf(owner), json={"ready": True})
+    owner.post(f"/api/rooms/{code}/start", headers=csrf(owner), json={})
+    with SessionLocal() as db:
+        target_room = load_room(db, code, lock=True)
+        target_room.status = "running"
+        target_room.current_stage_index = 2
+        target_room.stage_started_at = now()
+        target_room.stage_deadline_at = now() + timedelta(seconds=150)
+        db.commit()
+
+    generation = uuid.uuid4().hex
+    order: list[str] = []
+
+    async def generated_content(*_args, **_kwargs) -> str:
+        order.append("agent-final")
+        return "完整语音准备好以后再进入稳定播放，不能边生成边欠载。"
+
+    async def complete_moss_wav(
+        _text: str,
+        *,
+        room_code: str,
+        speech_id: str,
+        publish_live: bool,
+        **_kwargs,
+    ) -> str:
+        order.append("moss-wav")
+        assert publish_live is False
+        target = settings.media_path / room_code / f"{speech_id}.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_wav_bytes(1.1))
+        return f"/media/{room_code}/{speech_id}.wav"
+
+    async def publish_wav(*, room_code: str, speech_id: str, should_cancel, on_stream_event) -> str:
+        order.append("livekit-publish")
+        target = settings.media_path / room_code / f"{speech_id}.wav"
+        source = settings.media_path / room_code / f"{speech_id}.source.wav"
+        assert target.is_file() and source.is_file()
+        assert should_cancel() is False
+        await on_stream_event(
+            {
+                "type": "audio.stream.started",
+                "room_code": room_code,
+                "speech_id": speech_id,
+                "generation": generation,
+                "stream_url": None,
+                "sample_rate": 24_000,
+                "channels": 1,
+                "sample_width": 2,
+                "transport": "livekit",
+                "track_sid": "TR_stable",
+                "server_first_capture_at": now().isoformat(),
+            }
+        )
+        return generation
+
+    monkeypatch.setattr(settings, "realtime_voice_pipeline_enabled", True)
+    monkeypatch.setattr(settings, "realtime_voice_backend", "moss_realtime")
+    monkeypatch.setattr(settings, "moss_tts_realtime_enabled", True)
+    monkeypatch.setattr(settings, "moss_tts_stable_playback_enabled", True)
+    monkeypatch.setattr(settings, "moss_tts_playback_speed", 1.1)
+    monkeypatch.setattr(settings, "webrtc_audio_enabled", True)
+    monkeypatch.setattr(settings, "webrtc_audio_backend", "livekit")
+    monkeypatch.setattr(debate_agent, "generate", generated_content)
+    monkeypatch.setattr(moss_tts_realtime, "synthesize", complete_moss_wav)
+    monkeypatch.setattr(lighttts, "publish_wav_to_livekit", publish_wav)
+
+    await match_engine.process_room(code)
+
+    assert order == ["agent-final", "moss-wav", "livekit-publish"]
+    with SessionLocal() as db:
+        target_room = load_room(db, code)
+        speech = db.scalar(select(Speech).where(Speech.room_id == target_room.id, Speech.stage_key == "neg_1_case"))
+        assert speech and speech.status == "playing"
+        assert speech.stream_generation == generation
+        assert speech.duration_seconds == pytest.approx(1.0, abs=0.08)
+        assert (settings.media_path / code / f"{speech.id}.source.wav").is_file()
 
 
 async def test_realtime_voice_pipeline_starts_tts_from_agent_delta_before_final(
