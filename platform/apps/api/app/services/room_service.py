@@ -96,7 +96,18 @@ def remaining_seconds(room: Room) -> int | None:
         return room.paused_remaining_seconds
     current = stage(room)
     if current and current.get("host_announcement_pending"):
-        return max(1, int(current.get("host_target_duration_seconds") or current.get("duration", 30)))
+        raw_deadline = current.get("host_announcement_deadline_at")
+        try:
+            deadline = datetime.fromisoformat(str(raw_deadline))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            deadline = room.stage_deadline_at
+            if deadline and deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+        if deadline:
+            return max(0, int((deadline - now()).total_seconds()))
+        return max(0, int(current.get("host_target_duration_seconds") or current.get("duration", 30)))
     if current and current.get("ai_preparing"):
         frozen = current.get("preparing_stage_remaining_seconds")
         return max(0, int(frozen)) if frozen is not None else None

@@ -20,6 +20,9 @@ function formatTime(value: number | null) {
 const ASR_FINAL_WAIT_MS = 30_500;
 const ASR_READY_STOP_WAIT_MS = 2_000;
 const ASR_TAIL_DRAIN_MS = 150;
+const ASR_RECONNECT_MAX_ATTEMPTS = 3;
+const ASR_RECONNECT_BASE_DELAY_MS = 250;
+const ASR_RECONNECTING_MESSAGE = "字幕连接暂时中断，正在重连…";
 const ASR_PREROLL_MAX_SAMPLES = 32_000;
 const ASR_CAPTURE_CHUNK_MS = 20;
 const ASR_TARGET_SAMPLE_RATE = 16_000;
@@ -137,8 +140,12 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   const [starting, setStarting] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [speechId, setSpeechId] = useState("");
-  const [transcript, setTranscript] = useState("");
   const [partial, setPartial] = useState("");
+  // The transcript is the durable value used when a turn is submitted.  The
+  // stage caption is deliberately a separate, one-segment projection: keeping
+  // the whole transcript in the stage made every interim update grow into a
+  // multi-line wall of text that users could not follow in real time.
+  const [asrCaption, setAsrCaption] = useState("");
   const [captureError, setCaptureError] = useState("");
   const [deviceControl, setDeviceControl] = useState<"acquiring" | "owned" | "lost" | "unavailable">(mode === "watch" ? "unavailable" : "acquiring");
   const [controlSeq, setControlSeq] = useState<number | null>(null);
@@ -179,6 +186,8 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   const mediaChunkGeneration = useRef(0);
   const asrSocket = useRef<WebSocket | null>(null);
   const asrSession = useRef<AsrSession | null>(null);
+  const asrReconnectTimer = useRef<number | null>(null);
+  const asrReconnectAttempts = useRef(0);
   const audioContext = useRef<AudioContext | null>(null);
   const asrAudioInitialization = useRef<Promise<AudioContext> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -217,6 +226,7 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   const recoveredTranscriptBaseline = useRef("");
   const asrRejectionMessage = useRef("");
   const asrFinalWaiter = useRef<(() => void) | null>(null);
+  const subtitleText = useRef<HTMLParagraphElement | null>(null);
   const settingsButton = useRef<HTMLButtonElement | null>(null);
   const brandButton = useRef<HTMLButtonElement | null>(null);
   const settingsDialog = useRef<HTMLDivElement | null>(null);
@@ -818,6 +828,8 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     startingRef.current = false;
     captureActive.current = false;
     invalidateAsrSession(asrSession.current);
+    if (asrReconnectTimer.current !== null) window.clearTimeout(asrReconnectTimer.current);
+    asrReconnectTimer.current = null;
     disposePlayback(false);
     if (streamRestartTimer.current !== null) window.clearTimeout(streamRestartTimer.current);
     streamRestartTimer.current = null;
@@ -837,6 +849,12 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       setLiveCaption("");
     }
   }, [liveEvent]);
+
+  useEffect(() => {
+    const target = subtitleText.current;
+    if (!target) return;
+    target.scrollLeft = target.scrollWidth;
+  }, [asrCaption, capturing, liveCaption, partial, room.active_speech?.content, room.seq]);
 
   useEffect(() => {
     if (!rtcAudioConnected) return;
@@ -967,10 +985,13 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     observedSamples.current = 0;
     recoveredTranscriptBaseline.current = recoveredTranscript;
     asrRejectionMessage.current = "";
+    asrReconnectAttempts.current = 0;
+    if (asrReconnectTimer.current !== null) window.clearTimeout(asrReconnectTimer.current);
+    asrReconnectTimer.current = null;
     forceTranscriptReview.current = false;
     stopPromise.current = null;
     stopServerTimedOut.current = false;
-    setCaptureError(""); setTranscript(recoveredTranscript); setPartial(""); mediaChunks.current = [];
+    setCaptureError(""); setPartial(""); setAsrCaption(""); mediaChunks.current = [];
     timeoutHandled.current = "";
     let stream: MediaStream | null = null;
     let recorder: MediaRecorder | null = null;
@@ -1179,6 +1200,11 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
         if (data.type === "ready") {
           if (session.failed) return;
           try {
+            asrReconnectAttempts.current = 0;
+            if (asrRejectionMessage.current === ASR_RECONNECTING_MESSAGE) {
+              asrRejectionMessage.current = "";
+              setCaptureError("");
+            }
             session.ready = true;
             for (const chunk of session.preReadyChunks) socket.send(chunk);
             session.preReadyChunks = [];
@@ -1193,19 +1219,20 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
             session.finalCompleted = true;
             transcriptRef.current = `${transcriptRef.current}${recognized}`;
             partialRef.current = "";
-            setTranscript(transcriptRef.current);
+            if (recognized.trim()) setAsrCaption(recognized.trim());
             setPartial("");
             asrFinalWaiter.current?.();
             asrFinalWaiter.current = null;
           } else {
             partialRef.current = recognized;
+            if (recognized.trim()) setAsrCaption(recognized.trim());
             setPartial(recognized);
           }
         } else if (data.type === "asr_rejected") {
           session.finalCompleted = true;
           transcriptRef.current = recoveredTranscriptBaseline.current;
           partialRef.current = "";
-          setTranscript(recoveredTranscriptBaseline.current);
+          setAsrCaption("");
           setPartial("");
           asrRejectionMessage.current = data.reason === "silence"
             ? "未检测到清晰语音，请补充本次发言文字。"
@@ -1221,6 +1248,14 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       };
       socket.onerror = () => {
         if (!isCurrent()) return;
+        // A transient browser/network error is followed by onclose. Keep the
+        // recording alive and let that handler establish a fresh duplex ASR
+        // stream; the MediaRecorder remains the lossless recovery path.
+        if (captureActive.current && !session.stopping) {
+          asrRejectionMessage.current ||= ASR_RECONNECTING_MESSAGE;
+          setCaptureError(asrRejectionMessage.current);
+          return;
+        }
         rejectAsr("语音识别连接失败，录音仍会正常保存；请在结束后核对文字。");
         asrFinalWaiter.current?.();
         asrFinalWaiter.current = null;
@@ -1228,6 +1263,29 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       socket.onclose = (event) => {
         if (!isCurrent()) return;
         if (!session.ready) session.settleReady(false);
+        if (captureActive.current && !session.stopping && event.code !== 4409
+          && generation === startGeneration.current
+          && asrReconnectAttempts.current < ASR_RECONNECT_MAX_ATTEMPTS) {
+          session.aborted = true;
+          session.ready = false;
+          session.processor?.port.postMessage({ type: "stop", generation });
+          if (session.processor) session.processor.port.onmessage = null;
+          session.processor?.disconnect?.();
+          session.source?.disconnect?.();
+          if (asrSession.current === session) asrSession.current = null;
+          if (asrSocket.current === socket) asrSocket.current = null;
+          const attempt = asrReconnectAttempts.current++;
+          const delay = ASR_RECONNECT_BASE_DELAY_MS * (2 ** attempt);
+          if (asrReconnectTimer.current === null) {
+            asrReconnectTimer.current = window.setTimeout(() => {
+              asrReconnectTimer.current = null;
+              if (captureActive.current && generation === startGeneration.current) {
+                void startAsr(stream, generation);
+              }
+            }, delay);
+          }
+          return;
+        }
         if (session.stopping && !session.finalCompleted) {
           asrRejectionMessage.current ||= "语音识别连接在最终字幕返回前中断，录音已保留，请核对并补充本次发言文字。";
           setCaptureError(asrRejectionMessage.current);
@@ -1319,6 +1377,8 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   async function performStopSpeaking() {
     const generation = startGeneration.current;
     captureActive.current = false;
+    if (asrReconnectTimer.current !== null) window.clearTimeout(asrReconnectTimer.current);
+    asrReconnectTimer.current = null;
     setCapturing(false);
     setFinishing(true);
     const session = asrSession.current?.generation === generation ? asrSession.current : null;
@@ -1453,6 +1513,7 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     mediaChunkGeneration.current = startGeneration.current;
     transcriptRef.current = "";
     partialRef.current = "";
+    setAsrCaption("");
     voicedSamples.current = 0;
     observedSamples.current = 0;
     recoveredTranscriptBaseline.current = "";
@@ -1492,6 +1553,7 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     mediaChunkGeneration.current = startGeneration.current;
     transcriptRef.current = "";
     partialRef.current = "";
+    setAsrCaption("");
     recoveredTranscriptBaseline.current = "";
     asrRejectionMessage.current = "";
     forceTranscriptReview.current = false;
@@ -1505,7 +1567,6 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     setStarting(false);
     setCapturing(false);
     setSpeechId("");
-    setTranscript("");
     setPartial("");
     setCaptureError("");
     onPendingFinishChange?.(false);
@@ -1670,7 +1731,9 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     ? room.current_stage?.name
       ? `${room.current_stage.name} · 等待恢复`
       : "比赛已安全暂停"
-    : room.current_stage?.name || "等待比赛开始";
+    : room.status === "preparing"
+      ? "正在准备比赛"
+      : room.current_stage?.name || "比赛即将开始";
   const currentSpeaker = room.active_speech
     ? room.seats.find((seat) => seat.seat_key === room.active_speech?.seat_key)
     : room.current_stage?.seat
@@ -1761,11 +1824,11 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       <section className="stage-arena">
         <aside className="team-column aff"><div className="team-title"><span>正方</span><strong>PROPOSITION</strong></div>{aff.map((seat) => <SeatCard seat={seat} active={activeSeatKey === seat.seat_key || activeSeatKey === "aff_"} key={seat.seat_key} />)}</aside>
         <main className="stage-center">
-          <div className="stage-status"><span className={`badge ${["running", "judging"].includes(room.status) && !serviceFailurePaused ? "live" : ""}`}>{stageStatusLabel}</span><h1>{stageHeading}</h1></div>
+          <div className="stage-status"><span className={`badge stage-status-badge ${["running", "judging"].includes(room.status) && !serviceFailurePaused ? "live" : ""}`}><i aria-hidden="true" />{stageStatusLabel}</span><h1>{stageHeading}</h1><small className="stage-status-note">{serviceFailurePaused ? "比赛进度已保存，等待房主处理" : room.status === "preparing" ? "所有席位准备完成后将自动开赛" : watchFocusLabel}</small></div>
           <div className={`timer-orb ${!aiPreparing && remaining !== null && remaining <= 15 ? "danger" : ""}`} role="timer" aria-live="off" aria-label={aiPreparing ? `AI 正在准备发言，计时暂停在 ${formatTime(remaining)}` : `剩余时间 ${formatTime(remaining)}`}><Clock3 size={22}/><strong>{formatTime(remaining)}</strong><small>{aiPreparing ? "AI 准备中 · 计时暂停" : room.current_stage?.kind === "free" ? "自由辩论总计时" : "本环节剩余"}</small>{!aiPreparing && remaining !== null && remaining <= 15 && <span className="sr-only">即将结束</span>}</div>
           {mode === "debate" ? <div className="subtitle-stage">
             <span className="quote-mark">“</span>
-            <p>{capturing ? `${transcript}${partial}` || "正在聆听你的发言…" : liveCaption || (room.active_speech ? `${room.active_speech.content || (aiPreparing ? "AI 正在组织论点并合成语音…" : "发言正在生成或进行中…")}` : currentSpeech?.content || room.current_stage?.cue || "比赛发言将在这里实时呈现")}</p>
+            <p ref={subtitleText}>{capturing ? asrCaption || partial || "正在聆听你的发言…" : liveCaption || (room.active_speech ? room.active_speech.content || (aiPreparing ? "AI 正在组织论点并合成语音…" : "字幕准备中…") : currentSpeech?.content || room.current_stage?.cue || "字幕准备中…")}</p>
             <small>{room.active_speech ? room.seats.find((seat) => seat.seat_key === room.active_speech?.seat_key)?.display_name : currentSpeech?.speaker || "自动赛程"}</small>
           </div> : <div className="watch-stage-focus" aria-label="当前赛况">
             <span>{currentSpeaker?.display_name || (room.current_stage?.kind === "free" ? `${room.current_stage.side === "neg" ? "反方" : "正方"}辩手` : "自动赛程")}</span>
@@ -1778,8 +1841,8 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       </section>
       <footer className="stage-controls">
         <div className="control-info"><span className="seat-avatar">{room.my_seat ? mySeat?.display_name.slice(0,1) : <Users size={18}/>}</span><span><strong>{mode === "watch" ? room.can_control ? "房主观战 · 只读" : "观战模式" : mySeat?.display_name || "未绑定席位"}</strong><small>{mode === "watch" ? room.can_control ? "需要操作时请进入比赛控制页" : "公开只读画面" : deviceReason}</small></span></div>
-        {mode === "debate" && <button type="button" className={`speak-button ${starting || capturing || pendingFinish || finishing ? "recording" : canStartSpeaking ? "ready" : ""}`} disabled={pendingFinishMustDiscard || starting || finishing || (pendingFinish ? !pendingFinish.content.trim() : !capturing && !canStartSpeaking)} onClick={pendingFinishMustDiscard ? undefined : pendingFinish ? () => void submitFinish(pendingFinish) : capturing ? () => void stopSpeaking(false) : () => void startSpeaking()}>{pendingFinishMustDiscard ? <><MicOff size={24}/><span>本次发言无法提交<small>请处理本页尚未提交的内容</small></span></> : starting ? <><Mic size={24}/><span>正在启动麦克风<small>请确认浏览器权限提示…</small></span></> : finishing ? <><MicOff size={24}/><span>正在整理发言<small>{pendingFinishFinalized ? "文字已提交，正在上传录音…" : "等待最终字幕并安全提交…"}</small></span></> : pendingFinish ? <><MicOff size={24}/><span>{pendingFinishFinalized ? "重试上传录音" : "提交保留的发言"}<small>{pendingFinishFinalized ? "发言文字已提交且锁定" : pendingFinish.content.trim() ? lateFinalizeAvailable ? "比赛流程已结束，本次超时发言仍可补交" : "录音与文字已保留在本页" : "请先补充发言文字"}</small></span></> : capturing ? <><MicOff size={24}/><span>结束发言<small>{turnRemaining === null ? "正在录音与识别" : `本轮剩余 ${formatTime(turnRemaining)}`}</small></span></> : <><Mic size={24}/><span>{!connected ? "等待实时连接" : canRecoverSpeaking ? "恢复发言" : canStartSpeaking ? "开始发言" : deviceControl === "acquiring" ? "绑定设备中" : deviceControl === "lost" ? "其他设备已接管" : "等待轮次"}<small>{!connected ? readyReason : canRecoverSpeaking ? "恢复同一设备的进行中发言" : readyReason}</small></span></>}</button>}
-        <div className="control-tools"><button type="button" aria-label={muted ? "开启比赛声音" : playbackNeedsGesture ? "播放比赛声音" : playbackError ? "重试比赛声音" : "关闭比赛声音"} aria-pressed={!muted && !playbackNeedsGesture && !playbackError} aria-busy={playbackPending} disabled={playbackPending} onClick={togglePlaybackSound}>{muted || playbackNeedsGesture || playbackError ? <VolumeX/> : <Volume2/>}<small>{muted ? "开启声音" : playbackNeedsGesture ? "点击播放" : playbackError ? "重试声音" : "声音"}</small></button><button type="button" aria-label="切换全屏" onClick={fullscreen}><Maximize/><small>全屏</small></button><button ref={settingsButton} type="button" aria-label={mode === "watch" ? "观看设置" : "比赛操作"} aria-controls="stage-settings-dialog" aria-expanded={showSettings} onClick={() => setShowSettings((value) => !value)}><Settings/><small>{mode === "watch" ? "设置" : "操作"}</small></button></div>
+        {mode === "debate" && <button type="button" title={readyReason} data-state={capturing ? "speaking" : starting ? "starting" : pendingFinish ? "review" : canStartSpeaking ? "ready" : "blocked"} className={`speak-button ${starting || capturing || pendingFinish || finishing ? "recording" : canStartSpeaking ? "ready" : ""}`} disabled={pendingFinishMustDiscard || starting || finishing || (pendingFinish ? !pendingFinish.content.trim() : !capturing && !canStartSpeaking)} onClick={pendingFinishMustDiscard ? undefined : pendingFinish ? () => void submitFinish(pendingFinish) : capturing ? () => void stopSpeaking(false) : () => void startSpeaking()}>{pendingFinishMustDiscard ? <><MicOff size={24}/><span>本次发言无法提交<small>请处理本页尚未提交的内容</small></span></> : starting ? <><Mic size={24}/><span>正在启动麦克风<small>请确认浏览器权限提示…</small></span></> : finishing ? <><MicOff size={24}/><span>正在整理发言<small>{pendingFinishFinalized ? "文字已提交，正在上传录音…" : "等待最终字幕并安全提交…"}</small></span></> : pendingFinish ? <><MicOff size={24}/><span>{pendingFinishFinalized ? "重试上传录音" : "提交保留的发言"}<small>{pendingFinishFinalized ? "发言文字已提交且锁定" : pendingFinish.content.trim() ? lateFinalizeAvailable ? "比赛流程已结束，本次超时发言仍可补交" : "录音与文字已保留在本页" : "请先补充发言文字"}</small></span></> : capturing ? <><MicOff size={24}/><span>结束发言<small>{turnRemaining === null ? "正在录音与识别" : `本轮剩余 ${formatTime(turnRemaining)}`}</small></span></> : <><Mic size={24}/><span>{!connected ? "等待实时连接" : canRecoverSpeaking ? "恢复发言" : canStartSpeaking ? "开始发言" : deviceControl === "acquiring" ? "绑定设备中" : deviceControl === "lost" ? "其他设备已接管" : "等待轮次"}<small>{!connected ? readyReason : canRecoverSpeaking ? "恢复同一设备的进行中发言" : readyReason}</small></span></>}</button>}
+        <div className="control-tools"><button type="button" aria-label={muted ? "开启比赛声音" : playbackNeedsGesture ? "播放比赛声音" : playbackError ? "重试比赛声音" : "关闭比赛声音"} aria-pressed={!muted && !playbackNeedsGesture && !playbackError} aria-busy={playbackPending} disabled={playbackPending} onClick={togglePlaybackSound}>{muted || playbackNeedsGesture || playbackError ? <VolumeX/> : <Volume2/>}<small>{muted ? "开启声音" : playbackNeedsGesture ? "点击播放" : playbackError ? "重试声音" : "声音"}</small></button><button type="button" aria-label="切换全屏" onClick={fullscreen}><Maximize/><small>全屏</small></button><button ref={settingsButton} type="button" title={mode === "watch" ? "声音与观看设置" : "暂停、继续或提前结束比赛"} aria-label={mode === "watch" ? "观看设置" : "比赛操作"} aria-controls="stage-settings-dialog" aria-expanded={showSettings} onClick={() => setShowSettings((value) => !value)}><Settings/><small>{mode === "watch" ? "设置" : "操作"}</small></button></div>
       </footer>
       {mode === "debate" && room.recording_consent?.required && onConsentChanged && <div className="stage-consent-control"><RecordingConsentControl consent={room.recording_consent} onChanged={onConsentChanged} compact /></div>}
       {(room.failure_reason || (connectionError && !connected)) && <div className="stage-notice-stack">{room.failure_reason && <div className="stage-failure-warning" role="alert" aria-live="assertive"><AlertTriangle size={18}/><span><strong>比赛因临时服务异常暂停。</strong><small>{mode === "debate" && room.can_control ? "比赛进度已保存，确认后可重试当前步骤。" : "比赛进度已保存，请等待房主在比赛控制页处理；恢复后页面会自动同步。"}</small>{retryFailureError && <small className="stage-failure-error">{retryFailureError}</small>}</span>{mode === "debate" && room.can_control && <button type="button" aria-busy={retryingFailure} disabled={retryingFailure} onClick={requestRetry}><RotateCcw size={15}/>{retryingFailure ? "正在重试…" : "重试异常步骤"}</button>}</div>}{connectionError && !connected && <div className={`stage-connection-warning ${connectionBlockedReason ? "blocked" : ""}`} role="alert"><WifiOff size={16}/><span>{connectionError}{connectionBlockedReason === "capacity_full" ? " 当前连接不会自动重试，请稍后刷新页面。" : ""}</span>{onReconnect && !connectionBlockedReason && <button type="button" onClick={onReconnect}>立即重连</button>}{connectionBlockedReason === "capacity_full" && <Link href="/">返回赛事大厅</Link>}</div>}</div>}

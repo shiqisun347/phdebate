@@ -92,6 +92,7 @@ export function StageCaptionProjection({ room, liveEvent }: { room: Room; liveEv
     const originalState = target.getAttribute(MANAGED_ATTRIBUTE);
     target.textContent = displayText;
     target.setAttribute(MANAGED_ATTRIBUTE, captionState);
+    target.scrollLeft = target.scrollWidth;
     return () => {
       if (!target.hasAttribute(MANAGED_ATTRIBUTE)) return;
       target.textContent = originalText;

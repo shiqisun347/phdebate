@@ -22,7 +22,7 @@ def _room_with_teammate(owner, teammate, topic: str) -> str:
     return code
 
 
-async def test_lobby_owner_presence_expiry_preserves_control_for_returning_creator(
+async def test_lobby_owner_presence_expiry_transfers_control_to_online_successor(
     register_user,
 ) -> None:
     owner = register_user("round9_lobby_owner")
@@ -48,25 +48,47 @@ async def test_lobby_owner_presence_expiry_preserves_control_for_returning_creat
     with SessionLocal() as db:
         room = load_room(db, code)
         assert room.status == "lobby"
-        assert room.owner_id == owner_id
+        assert room.owner_id == teammate_id
         owner_seat = next(seat for seat in room.seats if seat.seat_key == "aff_1")
-        assert owner_seat.occupant_type == "human"
-        assert owner_seat.connected is False
+        assert owner_seat.occupant_type == "open"
+        assert owner_seat.user_id is None
         event = db.scalar(
             select(MatchEvent).where(
                 MatchEvent.room_id == room.id,
                 MatchEvent.event_type == "room.owner_transferred",
             )
         )
-        assert event is None
+        assert event is not None
         other = load_room(db, other_code)
         assert other.status == "lobby" and other.owner_id == other_owner.get("/api/auth/session").json()["user"]["id"]
 
-    # Another participant cannot acquire destructive room controls merely by
-    # waiting for the creator's browser presence lease to expire.
-    cancelled = teammate.post(f"/api/rooms/{code}/cancel", headers=csrf(teammate), json={})
-    assert cancelled.status_code == 403
-    assert owner.post(f"/api/rooms/{code}/cancel", headers=csrf(owner), json={}).status_code == 200
+    # The online successor now owns repair controls and can close the lobby.
+    assert teammate.post(f"/api/rooms/{code}/cancel", headers=csrf(teammate), json={}).status_code == 200
+
+
+async def test_lobby_owner_presence_expiry_cancels_when_no_online_successor(register_user) -> None:
+    owner = register_user("round9_abandoned_lobby_owner")
+    code = create_training_room(owner, "Round9 无人大厅自动回收")["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        owner_seat = next(seat for seat in room.seats if seat.user_id == room.owner_id)
+        owner_seat.connected = False
+        owner_seat.disconnected_at = now() - timedelta(seconds=121)
+        db.commit()
+
+    await match_engine.process_room(code)
+
+    with SessionLocal() as db:
+        room = load_room(db, code)
+        owner_seat = next(seat for seat in room.seats if seat.seat_key == "aff_1")
+        assert room.status == "cancelled" and room.completed_at is not None
+        assert owner_seat.occupant_type == "open" and owner_seat.user_id is None
+        assert db.scalar(
+            select(MatchEvent.id).where(
+                MatchEvent.room_id == room.id,
+                MatchEvent.event_type == "room.cancelled",
+            )
+        )
 
 
 async def test_running_owner_substitution_transfers_control_and_keeps_other_room_isolated(

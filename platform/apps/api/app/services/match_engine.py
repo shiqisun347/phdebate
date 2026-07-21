@@ -386,6 +386,7 @@ class MatchEngine:
         self._agent_prefetch_cache: dict[str, AgentTextPrefetch] = {}
         self._agent_prefetch_attempted: dict[str, str] = {}
         self._free_agent_speculations: dict[str, FreeAgentSpeculation] = {}
+        self._cue_prefetch_tasks: dict[str, asyncio.Task] = {}
 
     def start(self) -> None:
         if not settings.engine_enabled or self._task:
@@ -417,6 +418,12 @@ class MatchEngine:
         if free_tasks:
             await asyncio.gather(*free_tasks, return_exceptions=True)
         self._free_agent_speculations.clear()
+        cue_tasks = list(self._cue_prefetch_tasks.values())
+        for task in cue_tasks:
+            task.cancel()
+        if cue_tasks:
+            await asyncio.gather(*cue_tasks, return_exceptions=True)
+        self._cue_prefetch_tasks.clear()
         await livekit_audio_registry.close()
         self._room_locks.clear()
         self._room_failures.clear()
@@ -588,6 +595,9 @@ class MatchEngine:
             code for code, task in self._agent_prefetch_tasks.items() if not task.done()
         ]
         pending_codes.extend(pending_prefetch_codes)
+        pending_codes.extend(
+            code for code, task in self._cue_prefetch_tasks.items() if not task.done()
+        )
         if pending_codes:
             raise RuntimeError(
                 "match engine event loop changed while room tasks were active; "
@@ -603,6 +613,7 @@ class MatchEngine:
         self._agent_prefetch_tasks = {}
         self._agent_prefetch_cache = {}
         self._agent_prefetch_attempted = {}
+        self._cue_prefetch_tasks = {}
         self._provider_slots = asyncio.Semaphore(settings.engine_max_concurrent_rooms)
 
     def _provider_semaphore(self) -> asyncio.Semaphore:
@@ -1084,8 +1095,22 @@ class MatchEngine:
                 return
             if room.status == "preparing":
                 self._invalidate_agent_prefetch(room.code)
+                first_stage_key = str(room.template_snapshot[0].get("key") or "") if room.template_snapshot else ""
+                required_stage_keys = {first_stage_key} if first_stage_key else set()
+                pending_cue_count = sum(1 for item in room.template_snapshot if str(item.get("cue") or "").strip())
+                append_event(
+                    db,
+                    room,
+                    "audio.cue.preparing",
+                    {
+                        "stage_key": first_stage_key,
+                        "pending_cue_count": pending_cue_count,
+                        "required_for_start": True,
+                    },
+                    idempotency_key=f"{room.id}:cue-preparing",
+                )
                 db.commit()
-                if not await self._prepare_cues(db, room.code):
+                if not await self._prepare_cues(db, room.code, stage_keys=required_stage_keys):
                     return
                 db.expire_all()
                 room = load_room(db, room.code, lock=True)
@@ -1093,6 +1118,7 @@ class MatchEngine:
                     return
                 self._enter_stage(db, room, 0)
                 db.commit()
+                self._schedule_remaining_cue_prefetch(room.code, skip_stage_keys=required_stage_keys)
                 await self._broadcast(db, room, "match.started")
                 return
             if room.status not in {"running", "judging"}:
@@ -1213,6 +1239,41 @@ class MatchEngine:
                             else:
                                 await self._free_ai_speech_with_intent(db, room, ai_seat, current)
                             return
+
+    def _schedule_remaining_cue_prefetch(self, room_code: str, *, skip_stage_keys: set[str]) -> None:
+        if not settings.engine_enabled:
+            return
+        existing = self._cue_prefetch_tasks.get(room_code)
+        if existing and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._run_remaining_cue_prefetch(room_code, skip_stage_keys=skip_stage_keys),
+            name=f"jixia-cue-prefetch-{room_code}",
+        )
+        self._cue_prefetch_tasks[room_code] = task
+
+        def finished(completed: asyncio.Task, code: str = room_code) -> None:
+            if self._cue_prefetch_tasks.get(code) is completed:
+                self._cue_prefetch_tasks.pop(code, None)
+            if completed.cancelled():
+                return
+            exception = completed.exception()
+            if exception:
+                logger.warning("host cue prefetch failed room=%s error_type=%s", code, type(exception).__name__)
+
+        task.add_done_callback(finished)
+
+    async def _run_remaining_cue_prefetch(self, room_code: str, *, skip_stage_keys: set[str]) -> None:
+        with SessionLocal() as db:
+            room = load_room(db, room_code)
+            stage_keys = {
+                str(item.get("key") or "")
+                for item in room.template_snapshot
+                if str(item.get("cue") or "").strip() and str(item.get("key") or "") not in skip_stage_keys
+            }
+            if not stage_keys:
+                return
+            await self._prepare_cues(db, room_code, stage_keys=stage_keys, required=False)
 
     def _enter_stage(self, db: Session, room: Room, index: int) -> None:
         if index >= len(room.template_snapshot):
@@ -2541,19 +2602,33 @@ class MatchEngine:
         )
         return True
 
-    async def _prepare_cues(self, db: Session, room_code: str) -> bool:
+    async def _prepare_cues(
+        self,
+        db: Session,
+        room_code: str,
+        *,
+        stage_keys: set[str] | None = None,
+        required: bool = True,
+    ) -> bool:
         with SessionLocal() as read_db:
             initial = load_room(read_db, room_code)
             template = [dict(item) for item in initial.template_snapshot]
             room_id = initial.id
+        # Deferred cues are opportunistic.  Once a room is paused or reaches
+        # judging, stop the provider attempt so it cannot compete with repair
+        # or the authoritative judge call.  A later engine tick can regenerate
+        # any missing cue if the room resumes.
+        allowed_statuses = {"preparing"} if required else {"preparing", "running"}
         for item in template:
+            if stage_keys is not None and str(item.get("key") or "") not in stage_keys:
+                continue
             cue = str(item.get("cue") or "").strip()
             if not cue:
                 continue
             kind = f"cue:{item['key']}"
             db.expire_all()
             room = load_room(db, room_code, lock=True)
-            if room.status != "preparing":
+            if room.status not in allowed_statuses:
                 db.rollback()
                 return False
             match = db.scalar(select(Match).where(Match.room_id == room.id))
@@ -2593,6 +2668,21 @@ class MatchEngine:
             # merely because the key matches when its declared text does not.
             if preset and " ".join((preset.text or "").split()) != " ".join(cue.split()):
                 preset = None
+            # Training and formal competitions intentionally share stage keys
+            # such as ``opening`` while using different fixed wording. Allow
+            # the administrator's exact-text preset to be reused without
+            # storing a room-specific copy of the prompt configuration.
+            if preset is None:
+                candidates = db.scalars(
+                    select(AudioCue)
+                    .where(
+                        AudioCue.is_active.is_(True),
+                        AudioCue.audio_url != "",
+                        AudioCue.text == cue,
+                    )
+                    .order_by(AudioCue.updated_at.desc())
+                ).all()
+                preset = candidates[0] if candidates else None
             preset_source = settings.media_path / "_cues" / f"{preset.id}.wav" if preset else None
             db.commit()
             try:
@@ -2612,11 +2702,30 @@ class MatchEngine:
                         logger.warning("unable to copy preset audio cue %s", item["key"], exc_info=True)
                     finally:
                         temporary.unlink(missing_ok=True)
+                if not audio_url and settings.host_cues_preset_only:
+                    db.expire_all()
+                    missing_room = load_room(db, room_code, lock=True)
+                    if missing_room.status not in allowed_statuses:
+                        db.rollback()
+                        return False
+                    append_event(
+                        db,
+                        missing_room,
+                        "audio.cue.missing_preset",
+                        {"stage_key": item["key"], "text": cue, "required": required},
+                        idempotency_key=f"{missing_room.id}:cue-missing:{item['key']}",
+                    )
+                    if required:
+                        missing_room.status = "paused"
+                        missing_room.failure_reason = "主持提示音尚未配置系统预设。请管理员上传统一女声后重试。"
+                    db.commit()
+                    await self._broadcast(db, missing_room, "audio.cue.missing_preset")
+                    return False
                 if not audio_url:
                     cue_deadline_monotonic = asyncio.get_running_loop().time() + settings.lighttts_job_timeout_seconds
 
                     def should_cancel_cue() -> bool:
-                        return self._cue_job_cancelled(room_code)
+                        return self._cue_job_cancelled(room_code, allowed_statuses)
 
                     async def synthesize_cue() -> str:
                         if cue_provider == "moss_tts_realtime":
@@ -2642,7 +2751,7 @@ class MatchEngine:
                     async def record_cue_retry(exc: ProviderError, attempt: int, delay: float) -> None:
                         db.expire_all()
                         retry_room = load_room(db, room_code, lock=True)
-                        if retry_room.status != "preparing":
+                        if retry_room.status not in allowed_statuses:
                             db.rollback()
                             raise ProviderCancelled("LightTTS 提示音过载重试已取消。")
                         append_event(
@@ -2668,7 +2777,7 @@ class MatchEngine:
                     )
                 db.expire_all()
                 room = load_room(db, room_code, lock=True)
-                if room.status != "preparing":
+                if room.status not in allowed_statuses:
                     db.rollback()
                     _remove_generated_audio(room_code, asset_id)
                     return False
@@ -2707,8 +2816,24 @@ class MatchEngine:
             except ProviderError as exc:
                 db.expire_all()
                 room = load_room(db, room_code, lock=True)
-                if room.status != "preparing":
+                if room.status not in allowed_statuses:
                     db.rollback()
+                    return False
+                if not required:
+                    append_event(
+                        db,
+                        room,
+                        "audio.cue.prefetch_failed",
+                        {
+                            "provider": cue_provider,
+                            "message": str(exc),
+                            "code": exc.code,
+                            "retryable": exc.retryable,
+                            "stage_key": item["key"],
+                        },
+                    )
+                    db.commit()
+                    await self._broadcast(db, room, "audio.cue.prefetch_failed")
                     return False
                 room.status = "paused"
                 room.failure_reason = str(exc)
@@ -2732,10 +2857,10 @@ class MatchEngine:
         return True
 
     @staticmethod
-    def _cue_job_cancelled(room_code: str) -> bool:
+    def _cue_job_cancelled(room_code: str, allowed_statuses: set[str] | None = None) -> bool:
         with SessionLocal() as check_db:
             status = check_db.scalar(select(Room.status).where(Room.code == room_code))
-            return status != "preparing"
+            return status not in (allowed_statuses or {"preparing"})
 
     async def _judge(self, db: Session, room: Room) -> None:
         match = db.scalar(select(Match).where(Match.room_id == room.id))
@@ -2959,25 +3084,13 @@ class MatchEngine:
                 disconnected_at = disconnected_at.replace(tzinfo=timezone.utc)
             elapsed = (now() - disconnected_at).total_seconds()
             expiry_reason = "account_disabled" if account_disabled else "presence_expired"
-            if (
-                room.status == "lobby"
-                and not account_disabled
-                and seat.user_id == room.owner_id
-                and elapsed >= 120
-            ):
-                # A lobby owner is the only participant who cannot voluntarily
-                # release their seat.  Presence expiry must therefore preserve
-                # the room and control identity so a browser/network interruption
-                # does not silently hand the room to another student.  Owners can
-                # explicitly transfer control; disabled accounts still use the
-                # repair path below.
-                continue
             if room.status == "lobby" and (account_disabled or elapsed >= 120):
                 self._transfer_disconnected_owner(
                     db,
                     room,
                     seat,
                     reason="owner_account_disabled" if account_disabled else "owner_presence_expired",
+                    require_connected=True,
                 )
                 old_name = seat.display_name
                 seat.occupant_type = "open"
@@ -3042,6 +3155,7 @@ class MatchEngine:
         expiring_seat: RoomSeat,
         *,
         reason: str,
+        require_connected: bool = False,
     ) -> bool:
         """Keep repair controls with a connected human when the owner leaves."""
 
@@ -3054,6 +3168,7 @@ class MatchEngine:
                 if seat.id != expiring_seat.id
                 and seat.occupant_type == "human"
                 and seat.user_id
+                and (seat.connected or not require_connected)
             ),
             # An online participant can repair the room immediately.  If all
             # remaining humans are temporarily offline, still bind ownership

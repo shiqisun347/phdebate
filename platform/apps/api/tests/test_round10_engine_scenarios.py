@@ -232,7 +232,7 @@ async def test_disabled_lobby_owner_loses_sessions_and_room_transfers_without_ti
 
 
 @pytest.mark.asyncio
-async def test_disabled_owner_falls_back_to_an_active_offline_human_for_future_recovery(client, register_user) -> None:
+async def test_disabled_owner_cancels_lobby_when_only_successor_is_offline(client, register_user) -> None:
     owner = register_user("round10_disabled_offline_owner")
     returning = register_user("round10_disabled_offline_successor")
     owner_identity = owner.get("/api/auth/session").json()["user"]
@@ -266,13 +266,9 @@ async def test_disabled_owner_falls_back_to_an_active_offline_human_for_future_r
 
     with SessionLocal() as db:
         room = load_room(db, code)
-        assert room.status == "lobby" and room.owner_id == returning_identity["id"]
-        successor_seat = next(seat for seat in room.seats if seat.user_id == returning_identity["id"])
-        assert successor_seat.occupant_type == "human" and successor_seat.connected is False
-        successor_seat.connected = True
-        successor_seat.disconnected_at = None
-        db.commit()
-    assert returning.post(f"/api/rooms/{code}/cancel", headers=csrf(returning), json={}).status_code == 200
+        assert room.status == "cancelled"
+        owner_seat = next(seat for seat in room.seats if seat.seat_key == "aff_1")
+        assert owner_seat.occupant_type == "open" and owner_seat.user_id is None
 
 
 @pytest.mark.asyncio

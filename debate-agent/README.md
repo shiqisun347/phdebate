@@ -6,7 +6,6 @@
 ## 能力
 
 - RESTful `POST /debate/api/debate`，请求字段兼容既有 Debate API，响应固定使用 SSE `delta.content` 与 `[DONE]` 格式。
-- RESTful `POST /debate/api/should-speak`，为自由辩论返回独立、幂等的 `should_speak` 判断；候选发言以不同 `task_id` 并发生成，否决后立即中断并丢弃。
 - 辩手 LLM 固定使用上游流式生成，并由服务端强制传递 `enable_thinking=false`；客户端不能重新开启 Thinking，也不会收到推理过程。
 - 延迟门通过的 OpenAI-compatible 辩手模型使用原始 SSE 快速路径，避免 LiteLLM 在首内容前的额外等待；裁判与非流式请求仍使用 LiteLLM。`DIRECT_OPENAI_STREAM_MODELS` 明确列出允许走快速路径的模型。
 - 服务启动时默认发送 3 个不创建任务/记忆的极短原始 SSE warm-up，在 readiness 前吸收外部模型冷波；可用 `STARTUP_MODEL_WARMUP_*` 调整或关闭。

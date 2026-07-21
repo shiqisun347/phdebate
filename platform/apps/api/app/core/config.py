@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     lighttts_global_gate_queue_timeout_seconds: float = Field(default=20, ge=1, le=900)
     # Covers queueing, every chunk, fallback prompt and all transport retries.
     lighttts_job_timeout_seconds: float = Field(default=300, ge=5, le=900)
+    # Host announcements are authored once by an administrator and reused by
+    # every room. Production enables this to prevent a room start from ever
+    # synthesizing a different voice or competing with a live debate turn.
+    host_cues_preset_only: bool = False
     lighttts_shutdown_drain_seconds: float = Field(default=10, ge=1, le=60)
     # Must outlive the maximum 300-second LightTTS read timeout so a transient
     # Redis outage cannot expire the active lease while the GPU call is alive.

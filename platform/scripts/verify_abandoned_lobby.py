@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an abandoned owner seat is released and the empty lobby is cancelled."""
+"""Verify abandoned lobby ownership is transferred or the empty lobby is cancelled."""
 
 from __future__ import annotations
 
@@ -88,24 +88,44 @@ def main() -> None:
             db.commit()
 
         deadline = time.monotonic() + 10
+        transferred = None
+        while time.monotonic() < deadline:
+            transferred = client.get(f"/api/rooms/{first['code']}").json()["room"]
+            if transferred["owner"]["id"] == user_ids[1]:
+                break
+            time.sleep(0.25)
+        assert transferred and transferred["status"] == "lobby"
+        assert transferred["owner"]["id"] == user_ids[1]
+        assert next(seat for seat in transferred["seats"] if seat["seat_key"] == "aff_1")["occupant_type"] == "open"
+        assert next(seat for seat in transferred["seats"] if seat["seat_key"] == "neg_1")["is_owner"] is True
+        assert guest.post(f"/api/rooms/{first['code']}/cancel", headers=csrf(guest), json={}).status_code == 200
+
+        second = create_room(client, "没有在线接任者时是否自动取消废弃房间？")
+        with SessionLocal() as db:
+            second_room = load_room(db, second["code"])
+            room_ids.append(second_room.id)
+            owner_seat = next(item for item in second_room.seats if item.user_id == user_ids[0])
+            owner_seat.connected = False
+            owner_seat.disconnected_at = now() - timedelta(seconds=121)
+            db.commit()
+
+        deadline = time.monotonic() + 10
         cancelled = None
         while time.monotonic() < deadline:
-            cancelled = client.get(f"/api/rooms/{first['code']}").json()["room"]
+            cancelled = client.get(f"/api/rooms/{second['code']}").json()["room"]
             if cancelled["status"] == "cancelled":
                 break
             time.sleep(0.25)
         assert cancelled and cancelled["status"] == "cancelled"
         assert next(seat for seat in cancelled["seats"] if seat["seat_key"] == "aff_1")["occupant_type"] == "open"
-        assert next(seat for seat in cancelled["seats"] if seat["seat_key"] == "neg_1")["occupant_type"] == "human"
-        assert client.post(f"/api/rooms/{first['code']}/control/terminate", headers=csrf(client), json={}).status_code == 409
+        assert client.post(f"/api/rooms/{second['code']}/control/terminate", headers=csrf(client), json={}).status_code == 409
 
-        second = create_room(guest, "房主离开导致取消后，在线参与者能否立即参加新比赛？")
+        third = create_room(guest, "废弃房间取消后是否能立即创建新比赛？")
         with SessionLocal() as db:
-            second_room = load_room(db, second["code"])
-            room_ids.append(second_room.id)
-        assert second["status"] == "lobby" and second["code"] != first["code"]
+            room_ids.append(load_room(db, third["code"]).id)
+        assert third["status"] == "lobby" and third["code"] not in {first["code"], second["code"]}
         print(
-            "abandoned_lobby_verified owner_released=120s online_guest_unblocked=1 room=cancelled new_room=created terminal_terminate=409"
+            "abandoned_lobby_verified owner_released=120s online_successor=transferred empty_room=cancelled new_room=created"
         )
     finally:
         client.close()

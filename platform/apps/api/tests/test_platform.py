@@ -2921,19 +2921,19 @@ async def test_presence_expiry_releases_lobby_seat_and_substitutes_running_human
         owner_seat.disconnected_at = now() - timedelta(seconds=121)
         guest_seat.connected = True
         guest_seat.disconnected_at = None
-        assert await match_engine._expire_presence(db, room) is False
+        successor_id = guest_seat.user_id
+        assert await match_engine._expire_presence(db, room) is True
         db.commit()
-        assert owner_seat.occupant_type == "human" and owner_seat.user_id == room.owner_id
-        assert owner_seat.connected is False
+        assert owner_seat.occupant_type == "open" and owner_seat.user_id is None
         assert guest_seat.occupant_type == "human" and guest_seat.connected is True
-        assert room.status == "lobby" and room.completed_at is None
+        assert room.status == "lobby" and room.completed_at is None and room.owner_id == successor_id
         transferred = db.scalar(
             select(MatchEvent).where(
                 MatchEvent.room_id == room.id,
                 MatchEvent.event_type == "room.owner_transferred",
             )
         )
-        assert transferred is None
+        assert transferred is not None
         assert not db.scalar(
             select(MatchEvent.id).where(
                 MatchEvent.room_id == room.id,
@@ -3439,6 +3439,66 @@ async def test_preset_audio_cue_with_stale_text_is_not_reused(client: TestClient
     stale_path.unlink(missing_ok=True)
 
 
+async def test_match_start_waits_only_for_opening_cue_and_starts_countdown_after_preparation(
+    client: TestClient,
+    register_user,
+    monkeypatch,
+) -> None:
+    owner = register_user("opening_cue_only")
+    code = create_training_room(owner, "开局只等待开场提示音")["code"]
+    assert owner.post(f"/api/rooms/{code}/ready", headers=csrf(owner), json={"ready": True}).status_code == 200
+    assert owner.post(f"/api/rooms/{code}/start", headers=csrf(owner), json={}).status_code == 200
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.template_snapshot = [
+            {"key": "opening_fast", "name": "开场", "kind": "announcement", "duration": 8, "cue": "开场提示"},
+            {
+                "key": "later_aff",
+                "name": "正方立论",
+                "kind": "speech",
+                "seat": "aff_1",
+                "duration": 150,
+                "cue": "后续正方提示",
+            },
+            {"key": "later_judge", "name": "裁判", "kind": "judging", "duration": 30, "cue": "后续裁判提示"},
+        ]
+        db.commit()
+
+    synthesized: list[str] = []
+    preparation_finished_at = None
+
+    async def synthesize_one(text: str, *, room_code: str, speech_id: str, **kwargs):
+        nonlocal preparation_finished_at
+        synthesized.append(text)
+        await asyncio.sleep(0.02)
+        target = settings.media_path / room_code / f"{speech_id}.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_wav_bytes(seconds=2.0))
+        preparation_finished_at = now()
+        return f"/media/{room_code}/{speech_id}.wav"
+
+    monkeypatch.setattr(lighttts, "synthesize", synthesize_one)
+    await match_engine.process_room(code)
+
+    assert synthesized == ["开场提示"]
+    assert preparation_finished_at is not None
+    with SessionLocal() as db:
+        room = load_room(db, code)
+        assert room.status == "running"
+        assert room.current_stage_index == 0
+        stage_started_at = room.stage_started_at
+        if stage_started_at.tzinfo is None:
+            stage_started_at = stage_started_at.replace(tzinfo=preparation_finished_at.tzinfo)
+        assert stage_started_at >= preparation_finished_at
+        assert room_service_service.remaining_seconds(room) in {2, 3}
+        assert not db.scalar(
+            select(AudioAsset.id).where(
+                AudioAsset.match_id == db.scalar(select(Match.id).where(Match.room_id == room.id)),
+                AudioAsset.kind.in_(["cue:later_aff", "cue:later_judge"]),
+            )
+        )
+
+
 def test_seeded_flows_include_host_transition_before_every_debate_stage(client: TestClient, register_user) -> None:
     owner = register_user("host_transitions")
     code = create_training_room(owner, "主持人换阶段播报测试")["code"]
@@ -3514,6 +3574,40 @@ async def test_host_cue_locks_target_stage_without_changing_its_index(client: Te
         assert room.current_stage_index == 0
         assert room.template_snapshot[0]["kind"] == "speech"
         assert "host_announcement_pending" not in room.template_snapshot[0]
+
+
+def test_host_cue_countdown_uses_announcement_deadline_not_target_stage_duration(
+    client: TestClient,
+    register_user,
+) -> None:
+    owner = register_user("host_countdown_deadline")
+    code = create_training_room(owner, "主持人口播倒计时测试")["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        deadline = now() + timedelta(seconds=3)
+        room.status = "running"
+        room.current_stage_index = 0
+        room.stage_deadline_at = deadline
+        room.template_snapshot = [
+            {
+                "key": "host_countdown",
+                "name": "正方立论",
+                "kind": "announcement",
+                "duration": 30,
+                "host_announcement_pending": True,
+                "host_target_kind": "speech",
+                "host_target_duration_seconds": 150,
+                "host_announcement_deadline_at": deadline.isoformat(),
+            }
+        ]
+        db.flush()
+        assert room_service_service.remaining_seconds(room) in {2, 3}
+
+        current = dict(room.template_snapshot[0])
+        current["host_announcement_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        room.template_snapshot = [current]
+        assert room_service_service.remaining_seconds(room) == 0
+        db.rollback()
 
 
 def test_admin_judge_profiles_are_single_active_versioned_and_frozen_per_match(client: TestClient, register_user) -> None:

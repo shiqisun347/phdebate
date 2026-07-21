@@ -22,7 +22,9 @@ export function StageAnnouncement({ room }: { room: Room }) {
     ? room.current_stage?.name
       ? `${room.current_stage.name}，等待恢复`
       : "比赛已安全暂停"
-    : room.current_stage?.name || "等待比赛开始";
+    : room.status === "preparing"
+      ? "正在准备比赛"
+      : room.current_stage?.name || "比赛即将开始";
 
   return (
     <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">

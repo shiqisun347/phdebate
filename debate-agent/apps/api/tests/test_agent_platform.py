@@ -215,55 +215,6 @@ def test_json_generation_is_idempotent_and_creates_reviewable_memory(client: Tes
         assert candidate and candidate.status == "pending_review"
 
 
-def test_should_speak_is_strict_idempotent_and_never_creates_memory(client: TestClient, monkeypatch) -> None:
-    enable_provider()
-    calls = 0
-
-    class Stream:
-        def __aiter__(self):
-            async def values():
-                yield SimpleNamespace(
-                    choices=[SimpleNamespace(delta=SimpleNamespace(content='{"should_speak":false,"reason":"论点已经充分"}'))],
-                    usage=None,
-                )
-
-            return values()
-
-    async def completion(**_kwargs):
-        nonlocal calls
-        calls += 1
-        return Stream()
-
-    monkeypatch.setattr("app.agent_engine.litellm.acompletion", completion)
-    monkeypatch.setattr(agent_engine, "_interrupted", _never_interrupted)
-    body = payload(task_id="decision-room-a-turn-3") | {
-        "task_type": "should_speak",
-        "max_token": 48,
-    }
-    headers = {"X-Debate-Agent-Key": "gateway-test-secret"}
-    first = client.post("/debate/api/should-speak", headers=headers, json=body)
-    replay = client.post("/debate/api/should-speak", headers=headers, json=body)
-    conflict = client.post(
-        "/debate/api/should-speak",
-        headers=headers,
-        json=body | {"room_code": "654321"},
-    )
-    assert first.status_code == 200, first.text
-    assert first.json() == {
-        "task_id": "decision-room-a-turn-3",
-        "should_speak": False,
-        "reason": "论点已经充分",
-        "replayed": False,
-    }
-    assert replay.status_code == 200 and replay.json()["replayed"] is True
-    assert conflict.status_code == 409
-    assert calls == 1
-    with SessionLocal() as db:
-        task = db.scalar(select(AgentTask).where(AgentTask.task_id == "decision-room-a-turn-3"))
-        assert task and task.room_code == "123456" and task.status == "completed"
-        assert db.scalar(select(func.count(MemoryItem.id))) == 0
-
-
 def test_debate_thinking_is_always_disabled_and_cannot_be_overridden(
     client: TestClient, monkeypatch
 ) -> None:

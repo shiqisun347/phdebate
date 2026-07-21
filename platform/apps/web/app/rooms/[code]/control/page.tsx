@@ -154,7 +154,7 @@ export default function ControlPage() {
   const canTerminate = ["preparing", "running", "paused", "judging"].includes(room.status);
 
   return (
-    <div className="page-shell">
+    <div className="page-shell room-control-page">
       <div className="section-head">
         <div>
           <span className="eyebrow">Automation Console</span>

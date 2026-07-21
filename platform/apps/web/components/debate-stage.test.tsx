@@ -206,6 +206,7 @@ async function renderAsrHarness(sampleRate = 16_000, roomOverrides: Partial<Room
   class FakeSocket {
     static OPEN = 1;
     static latest: FakeSocket | null = null;
+    static instances: FakeSocket[] = [];
     readyState = FakeSocket.OPEN;
     binaryType = "";
     onopen: (() => void) | null = null;
@@ -214,7 +215,7 @@ async function renderAsrHarness(sampleRate = 16_000, roomOverrides: Partial<Room
     onclose: ((event: CloseEvent) => void) | null = null;
     send = vi.fn();
     close = vi.fn();
-    constructor() { FakeSocket.latest = this; }
+    constructor() { FakeSocket.latest = this; FakeSocket.instances.push(this); }
   }
   class FakeContext {
     sampleRate = sampleRate;
@@ -264,6 +265,22 @@ describe("DebateStage", () => {
 
     rerender(<DebateStage room={room({ can_speak: true, speak_reason: "轮到你发言" })} connected mode="debate" />);
     await waitFor(() => expect(screen.getByRole("button", { name: /开始发言/ })).toBeEnabled());
+  });
+
+  it("labels the pre-match state and exposes the blocked reason on the control", async () => {
+    render(<DebateStage room={room({
+      status: "preparing",
+      current_stage: null,
+      remaining_seconds: null,
+      can_speak: false,
+      speak_reason: "等待所有辩手准备完成",
+    })} connected mode="debate" />);
+
+    expect(screen.getByRole("heading", { name: "正在准备比赛" })).toBeInTheDocument();
+    expect(screen.getByText("所有席位准备完成后将自动开赛")).toBeInTheDocument();
+    const control = await screen.findByRole("button", { name: /等待轮次/ });
+    expect(control).toHaveAttribute("data-state", "blocked");
+    expect(control).toHaveAttribute("title", "等待所有辩手准备完成");
   });
 
   it.each([
@@ -856,6 +873,54 @@ describe("DebateStage", () => {
       speech_id: "speech-asr-harness",
       content: "人工修正后的完整文字。",
     });
+  });
+
+  it("renders only the latest ASR segment on the live stage while retaining full text for submission", async () => {
+    const { FakeSocket, process, container } = await renderAsrHarness();
+    markAsrReady(FakeSocket.latest);
+    process(0.1, 4_096);
+    const subtitle = container.querySelector<HTMLElement>(".subtitle-stage p");
+    if (!subtitle) throw new Error("live subtitle was not rendered");
+    Object.defineProperty(subtitle, "scrollWidth", { configurable: true, value: 640 });
+    subtitle.scrollLeft = 0;
+
+    await act(async () => {
+      FakeSocket.latest?.onmessage?.({ data: JSON.stringify({ type: "asr", text: "第一句正在说", is_final: false }) } as MessageEvent);
+    });
+    expect(subtitle).toHaveTextContent("第一句正在说");
+    expect(subtitle.scrollLeft).toBe(640);
+
+    await act(async () => {
+      FakeSocket.latest?.onmessage?.({ data: JSON.stringify({ type: "asr", text: "第一句。", is_final: true }) } as MessageEvent);
+      FakeSocket.latest?.onmessage?.({ data: JSON.stringify({ type: "asr", text: "第二句正在说", is_final: false }) } as MessageEvent);
+    });
+    expect(subtitle).toHaveTextContent("第二句正在说");
+    expect(subtitle).not.toHaveTextContent("第一句。");
+  });
+
+  it("reconnects the duplex ASR stream during capture and ignores late frames from the old socket", async () => {
+    const { FakeSocket, container } = await renderAsrHarness();
+    const first = FakeSocket.latest!;
+    markAsrReady(first);
+    await act(async () => {
+      first.onerror?.();
+      first.onclose?.({ code: 1006 } as CloseEvent);
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+    });
+
+    const second = FakeSocket.latest!;
+    expect(second).not.toBe(first);
+    expect(FakeSocket.instances).toHaveLength(2);
+    act(() => second.onopen?.());
+    expect(second.send).toHaveBeenCalledWith(expect.stringContaining('"type":"authenticate"'));
+    markAsrReady(second);
+
+    await act(async () => {
+      first.onmessage?.({ data: JSON.stringify({ type: "asr", text: "旧连接迟到字幕", is_final: false }) } as MessageEvent);
+      second.onmessage?.({ data: JSON.stringify({ type: "asr", text: "重连后的实时字幕", is_final: false }) } as MessageEvent);
+    });
+    expect(container.querySelector(".subtitle-stage p")).toHaveTextContent("重连后的实时字幕");
+    expect(container.querySelector(".subtitle-stage p")).not.toHaveTextContent("旧连接迟到字幕");
   });
 
   it("reports unsupported fullscreen instead of throwing an unhandled rejection", async () => {
