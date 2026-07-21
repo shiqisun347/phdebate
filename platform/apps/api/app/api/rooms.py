@@ -338,8 +338,24 @@ def _synchronize_transcript_segments(db: Session, speech: Speech, content: str) 
     db.add(TranscriptSegment(speech_id=speech.id, text=content, is_final=True))
 
 
-async def _publish(room: Room, event_type: str) -> None:
-    await room_hub.publish(room.code, {"type": event_type, "room_code": room.code, "seq": room.seq})
+async def _publish(db: Session, room: Room, event_type: str) -> None:
+    """Release the synchronous SQLAlchemy connection before awaiting Redis.
+
+    These routes use a synchronous Session inside async handlers.  A read
+    performed after ``commit()`` opens a new transaction; awaiting Redis while
+    that transaction is still checked out lets a request burst exhaust the
+    whole connection pool and stall the event loop.  Every caller publishes
+    only after committing its mutation, so rolling back the trailing read
+    transaction is safe and keeps the Session reusable for response
+    serialization after the await.
+    """
+
+    code = room.code
+    seq = room.seq
+    if db.new or db.dirty or db.deleted:
+        raise RuntimeError("room publish requires a clean committed database session")
+    db.rollback()
+    await room_hub.publish(code, {"type": event_type, "room_code": code, "seq": seq})
 
 
 @router.post("")
@@ -437,7 +453,7 @@ async def create_room(
     )
     db.commit()
     room = load_room(db, room.code)
-    await _publish(room, "room.created")
+    await _publish(db, room, "room.created")
     return {"room": serialize_room(db, room, user, public=use_public_projection(db, room, user))}
 
 
@@ -549,7 +565,7 @@ async def rematch_room(
     )
     db.commit()
     room = load_room(db, room.code)
-    await _publish(room, "room.created")
+    await _publish(db, room, "room.created")
     return {"room": serialize_room(db, room, user), "replayed": False}
 
 
@@ -764,7 +780,7 @@ async def claim_seat(code: str, payload: SeatRequest, user: User = Depends(verif
         room.is_test_data = True
     append_event(db, room, "seat.claimed", {"seat_key": seat.seat_key, "real_name": user.real_name}, actor_user_id=user.id)
     db.commit()
-    await _publish(room, "seat.claimed")
+    await _publish(db, room, "seat.claimed")
     return {"room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -803,7 +819,7 @@ async def release_seat(
     seat.agent_profile_id = None
     append_event(db, room, "seat.released", {"seat_key": key}, actor_user_id=user.id, idempotency_key=operation_key)
     db.commit()
-    await _publish(room, "seat.released")
+    await _publish(db, room, "seat.released")
     return {"room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -858,7 +874,7 @@ async def remove_lobby_participant(
         idempotency_key=operation_key,
     )
     db.commit()
-    await _publish(room, "seat.removed_by_owner")
+    await _publish(db, room, "seat.removed_by_owner")
     return {"room": serialize_room(db, load_room(db, code), user), "replayed": False}
 
 
@@ -939,7 +955,7 @@ async def abandon_started_seat(
         idempotency_key=operation_key,
     )
     db.commit()
-    await _publish(room, "seat.abandoned")
+    await _publish(db, room, "seat.abandoned")
     return {"room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -955,7 +971,7 @@ async def request_seat_restore(
     db.commit()
     loaded = load_room(db, code)
     refreshed = db.get(SeatRestoreRequest, request.id)
-    await _publish(loaded, "seat.restore_requested")
+    await _publish(db, loaded, "seat.restore_requested")
     return {
         "request": serialize_restore_request(refreshed, loaded, refreshed.seat, user),
         "room": serialize_room(db, loaded, user),
@@ -977,7 +993,7 @@ async def cancel_seat_restore(
     replayed = cancel_restore_request(db, room, request, user)
     db.commit()
     loaded = load_room(db, code)
-    await _publish(loaded, "seat.restore_cancelled")
+    await _publish(db, loaded, "seat.restore_cancelled")
     return {"room": serialize_room(db, loaded, user), "replayed": replayed}
 
 
@@ -996,7 +1012,7 @@ async def approve_seat_restore(
     replayed = review_restore_request(db, room, request, user, approve=True, reason=payload.reason)
     db.commit()
     loaded = load_room(db, code)
-    await _publish(loaded, "seat.human_restored")
+    await _publish(db, loaded, "seat.human_restored")
     return {"room": serialize_room(db, loaded, user), "replayed": replayed}
 
 
@@ -1015,7 +1031,7 @@ async def reject_seat_restore(
     replayed = review_restore_request(db, room, request, user, approve=False, reason=payload.reason)
     db.commit()
     loaded = load_room(db, code)
-    await _publish(loaded, "seat.restore_rejected")
+    await _publish(db, loaded, "seat.restore_rejected")
     return {"room": serialize_room(db, loaded, user), "replayed": replayed}
 
 
@@ -1075,7 +1091,7 @@ async def request_speech_correction(
     )
     db.commit()
     if not replayed:
-        await _publish(room, "speech.correction_requested")
+        await _publish(db, room, "speech.correction_requested")
     return {
         "request": serialize_correction_request(request),
         "room": serialize_room(db, load_room(db, code), user),
@@ -1097,7 +1113,7 @@ async def cancel_speech_correction(
     replayed = cancel_correction_request(db, room, request, user)
     db.commit()
     if not replayed:
-        await _publish(room, "speech.correction_cancelled")
+        await _publish(db, room, "speech.correction_cancelled")
     return {"request": serialize_correction_request(request), "replayed": replayed}
 
 
@@ -1113,7 +1129,7 @@ async def create_free_turn_request(
     db.commit()
     if not replayed:
         await match_engine.invalidate_free_agent_speculation(code)
-        await _publish(room, "free.turn_requested")
+        await _publish(db, room, "free.turn_requested")
     return {"request_id": item.id, "status": item.status, "replayed": replayed, "room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -1131,7 +1147,7 @@ async def cancel_free_turn_request(
     replayed = cancel_free_turn(db, room, item, user)
     db.commit()
     if not replayed:
-        await _publish(room, "free.turn_request_cancelled")
+        await _publish(db, room, "free.turn_request_cancelled")
     return {"request_id": item.id, "status": item.status, "replayed": replayed, "room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -1157,7 +1173,7 @@ async def ready(
     seat.is_ready = payload.ready
     append_event(db, room, "seat.ready_changed", {"seat_key": seat.seat_key, "ready": seat.is_ready}, actor_user_id=user.id)
     db.commit()
-    await _publish(room, "seat.ready_changed")
+    await _publish(db, room, "seat.ready_changed")
     return {"room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -1211,7 +1227,7 @@ async def transfer_owner(
         idempotency_key=operation_key,
     )
     db.commit()
-    await _publish(room, "room.owner_transferred")
+    await _publish(db, room, "room.owner_transferred")
     return {"room": serialize_room(db, load_room(db, code), user), "replayed": False}
 
 
@@ -1237,7 +1253,7 @@ async def cancel_room(
     room.completed_at = now()
     append_event(db, room, "room.cancelled", {}, actor_user_id=user.id, idempotency_key=f"{room.id}:cancel")
     db.commit()
-    await _publish(room, "room.cancelled")
+    await _publish(db, room, "room.cancelled")
     return {"room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -1350,7 +1366,7 @@ async def start_room(
         idempotency_key=f"{room.id}:start",
     )
     db.commit()
-    await _publish(room, "room.locked")
+    await _publish(db, room, "room.locked")
     return {"room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -1413,7 +1429,7 @@ async def acquire_control_lease(
         actor_user_id=user.id,
     )
     db.commit()
-    await _publish(room, event_type)
+    await _publish(db, room, event_type)
     return {
         "ok": True,
         "lease_fingerprint": fingerprint,
@@ -1494,7 +1510,7 @@ async def start_speech(
         idempotency_key=operation_key,
     )
     db.commit()
-    await _publish(room, "speech.started")
+    await _publish(db, room, "speech.started")
     return {"speech_id": speech.id, "room": serialize_room(db, load_room(db, code), user)}
 
 
@@ -1584,7 +1600,7 @@ async def finish_speech(
             # recovered its locally retained final transcript. Rebuild that
             # exact match instead of discarding the student's evidence.
             enqueue_match_archive(archive_match_id)
-        await _publish(room, "speech.late_finalized")
+        await _publish(db, room, "speech.late_finalized")
         return {
             "room": serialize_room(db, load_room(db, code), user),
             "speech_id": speech.id,
@@ -1608,7 +1624,7 @@ async def finish_speech(
     db.commit()
     if current and current.get("kind") == "free":
         match_engine.schedule_free_agent_speculation(code)
-    await _publish(room, "speech.completed")
+    await _publish(db, room, "speech.completed")
     return {"room": serialize_room(db, load_room(db, code), user), "speech_id": speech.id}
 
 
@@ -1729,7 +1745,7 @@ async def upload_speech_audio(
         db.commit()
         if archive_match_id:
             enqueue_match_archive(archive_match_id)
-        await _publish(room, "speech.audio.ready")
+        await _publish(db, room, "speech.audio.ready")
         return {"audio_url": speech.audio_url}
     finally:
         temporary.unlink(missing_ok=True)
@@ -1981,5 +1997,5 @@ async def control(
         match_engine.schedule_free_agent_speculation(code)
     if archive_match_id:
         enqueue_match_archive(archive_match_id)
-    await _publish(room, f"control.{action}")
+    await _publish(db, room, f"control.{action}")
     return {"room": serialize_room(db, load_room(db, code), user)}
