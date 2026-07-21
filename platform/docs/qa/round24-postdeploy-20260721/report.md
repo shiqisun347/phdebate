@@ -9,7 +9,7 @@
 - API：`round24-final-20260721`
 - Web：`round24-room-search-hotfix-20260721`
 - 已部署平台源码：`56bf9abf4992d96dcecd863a0b60c43aef216eb0`
-- 完整备份分支头：`11e1750370cf744826ce4d4e0df6f0bbfb70a1a3`
+- 恢复集绑定代码：`11e1750370cf744826ce4d4e0df6f0bbfb70a1a3`
 - Transcript collaboration：`round24-recovery-node22-20260721`
 - MOSS、Engine 和 Worker 未因 Web/API 滚动发布而重启。
 
