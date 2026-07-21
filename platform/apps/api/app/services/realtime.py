@@ -146,6 +146,7 @@ class _LoopState:
     redis_checked: bool = False
     redis_retry_at: float = 0.0
     listeners: dict[str, asyncio.Task] = field(default_factory=dict)
+    listener_ready: dict[str, asyncio.Event] = field(default_factory=dict)
     client_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -624,6 +625,9 @@ class RoomHub:
             pubsub = client.pubsub()
             try:
                 await pubsub.subscribe(f"jixia:room:{room_code}")
+                ready = state.listener_ready.get(room_code)
+                if ready:
+                    ready.set()
                 while True:
                     item = await pubsub.get_message(ignore_subscribe_messages=True, timeout=5)
                     if item and item.get("data"):
@@ -658,11 +662,23 @@ class RoomHub:
         with self._states_lock:
             self._local[room_code].add(subscriber)
             if self._redis_enabled and room_code not in state.listeners:
+                state.listener_ready[room_code] = asyncio.Event()
                 state.listeners[room_code] = asyncio.create_task(
                     self._listen_redis(room_code, state),
                     name=f"jixia-room-events-{room_code}",
                 )
+            listener_ready = state.listener_ready.get(room_code)
         try:
+            # A Redis PUBLISH is not replayable. Wait briefly for the worker's
+            # subscription acknowledgement before declaring this stream ready,
+            # otherwise a cross-process event can fall between the initial
+            # database snapshot and SUBSCRIBE. Redis outages still degrade to
+            # the authoritative sync and heartbeat path after the timeout.
+            if listener_ready and not listener_ready.is_set():
+                try:
+                    await asyncio.wait_for(listener_ready.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    logger.warning("room Redis subscription readiness timed out: %s", room_code)
             # The room websocket sends its initial database snapshot before it
             # starts consuming this stream.  Register first, then ask the
             # websocket to take one more authoritative snapshot so an event
@@ -684,6 +700,7 @@ class RoomHub:
                     self._local.pop(room_code, None)
                 if not same_loop_remaining:
                     listener = state.listeners.pop(room_code, None)
+                    state.listener_ready.pop(room_code, None)
             if listener:
                 listener.cancel()
                 try:

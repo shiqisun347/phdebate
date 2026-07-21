@@ -2738,6 +2738,32 @@ async def test_room_hub_initial_sync_closes_snapshot_subscription_gap_and_keeps_
     assert await hub.local_subscriber_count("room-b") == 0
 
 
+async def test_room_hub_waits_for_redis_subscription_before_initial_sync(monkeypatch) -> None:
+    hub = RoomHub()
+    allow_subscription = asyncio.Event()
+
+    async def delayed_listener(room_code, state) -> None:
+        await allow_subscription.wait()
+        state.listener_ready[room_code].set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(hub, "_listen_redis", delayed_listener)
+    stream = hub.stream("room-ready", initial_sync=True)
+    first = asyncio.create_task(stream.__anext__())
+    for _ in range(20):
+        if await hub.local_subscriber_count("room-ready") == 1:
+            break
+        await asyncio.sleep(0)
+
+    await asyncio.sleep(0.01)
+    assert not first.done()
+    allow_subscription.set()
+    assert await asyncio.wait_for(first, timeout=1) == {"type": "_sync"}
+
+    await stream.aclose()
+    assert await hub.local_subscriber_count("room-ready") == 0
+
+
 def test_startup_presence_reset_marks_stale_humans_offline(register_user) -> None:
     owner = register_user("presence_reset")
     room_data = create_training_room(owner, "服务重启在线状态重置测试")
