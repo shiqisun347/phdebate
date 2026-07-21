@@ -8,7 +8,8 @@
 
 - API：`round24-final-20260721`
 - Web：`round24-room-search-hotfix-20260721`
-- 源码提交：`56bf9abf4992d96dcecd863a0b60c43aef216eb0`
+- 已部署平台源码：`56bf9abf4992d96dcecd863a0b60c43aef216eb0`
+- 完整备份分支头：`11e1750370cf744826ce4d4e0df6f0bbfb70a1a3`
 - Transcript collaboration：`round24-recovery-node22-20260721`
 - MOSS、Engine 和 Worker 未因 Web/API 滚动发布而重启。
 
@@ -73,16 +74,17 @@ audio_baseline_verified files=82 fingerprint=3219138b22878e766c94b9a1fa0e422211a
 恢复入口：
 
 ```text
-runtime/deploy-backups/recovery-set-20260721T-round24-final.manifest
-runtime/deploy-backups/recovery-set-20260721T-round24-final.manifest.sha256
+runtime/deploy-backups/recovery-set-20260721T-round24-final-current.manifest
+runtime/deploy-backups/recovery-set-20260721T-round24-final-current.manifest.sha256
 ```
 
 包含并验证：
 
 - 当前平台数据库 `auto-20260721T110122Z.dump`，已真实恢复到临时数据库并核对 30 张表与 Alembic `0031_caption_segments`。
-- 当前 Debate Agent 数据库 `agent-20260721T110129Z.dump`，checksum 与 pg_restore catalog 通过。
+- 当前 Debate Agent 数据库 `agent-20260721T111727Z.dump`，checksum 与 pg_restore catalog 通过。
 - 当前数据卷 `20260721T-round24-data-volumes.tar.gz`，468 个文件，完整解包/哈希验证通过。
 - 私密配置、可靠语音运行时和 11.8GB OpenMOSS 离线包沿用未变化的已验证不可变副本。
-- 六类 artifact 全量 SHA-256 复核通过，绑定代码提交 `56bf9abf...`。
+- 六类 artifact 全量 SHA-256 复核通过，绑定完整代码提交 `11e1750...` 与已部署平台提交 `56bf9ab...`。
+- Debate Agent 备份脚本固定把健康状态文件发布为 `root:ubuntu 0640`；再次实际备份后平台聚合健康检查保持全绿。
 
 最终磁盘使用 60%，约 31GB 可用；没有删除当前 MOSS、FunASR、比赛音频或完整恢复材料。
