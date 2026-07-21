@@ -462,9 +462,24 @@ class RoomHub:
             [self._spectator_key(room_code)],
             [now_ms, now_ms + lease_ms, connection_id, lease_ms * 2],
         )
-        if result is None and settings.app_env == "test":
+        # This socket was already admitted under the global room limit. A
+        # transient Redis timeout must not turn into a false 4429 eviction.
+        # Keep the local lease and retry on the next heartbeat.
+        if result is None:
             return True
-        return bool(result)
+        if result:
+            return True
+        # Redis may have restarted or the lease may have expired during an
+        # event-loop stall. Re-register the still-live socket atomically. Do
+        # not call spectator_join(): its local fast path would skip Redis.
+        rejoined = await self._presence_eval(
+            _SPECTATOR_JOIN_SCRIPT,
+            [self._spectator_key(room_code)],
+            [now_ms, now_ms + lease_ms, SPECTATOR_LIMIT, connection_id, lease_ms * 2],
+        )
+        # An unavailable Redis is tolerated only for this previously admitted
+        # socket. A definite zero means the global room limit is now occupied.
+        return True if rejoined is None else bool(rejoined)
 
     async def spectator_leave(self, room_code: str, *, connection_id: str) -> None:
         with self._states_lock:

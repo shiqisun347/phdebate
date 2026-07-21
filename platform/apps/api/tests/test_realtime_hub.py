@@ -249,9 +249,49 @@ async def test_spectator_lease_expiry_recovers_capacity(monkeypatch) -> None:
     assert await hub.spectator_join("654321", connection_id="next") is False
     clock["seconds"] += realtime_service.SPECTATOR_LEASE_SECONDS + 1
     assert await hub.spectator_join("654321", connection_id="next") is True
-    assert await hub.spectator_refresh("654321", connection_id="watcher-0") is False
+    # A still-open socket whose Redis lease expired during an event-loop stall
+    # may reclaim a free slot instead of being falsely evicted.
+    assert await hub.spectator_refresh("654321", connection_id="watcher-0") is True
 
     await hub.close()
+
+
+async def test_spectator_refresh_keeps_admitted_socket_on_transient_redis_timeout(monkeypatch) -> None:
+    hub = RoomHub()
+    hub._spectator_leases["123456"].add("watcher-1")
+
+    async def unavailable(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(hub, "_presence_eval", unavailable)
+    assert await hub.spectator_refresh("123456", connection_id="watcher-1") is True
+
+
+async def test_spectator_refresh_rejoins_after_expired_or_restarted_redis_lease(monkeypatch) -> None:
+    hub = RoomHub()
+    hub._spectator_leases["123456"].add("watcher-1")
+    results = iter([0, 1])
+    scripts: list[str] = []
+
+    async def evaluate(script, _keys, _args):
+        scripts.append(script)
+        return next(results)
+
+    monkeypatch.setattr(hub, "_presence_eval", evaluate)
+    assert await hub.spectator_refresh("123456", connection_id="watcher-1") is True
+    assert scripts == [realtime_service._SPECTATOR_REFRESH_SCRIPT, realtime_service._SPECTATOR_JOIN_SCRIPT]
+
+
+async def test_spectator_refresh_evicts_only_when_atomic_rejoin_hits_global_limit(monkeypatch) -> None:
+    hub = RoomHub()
+    hub._spectator_leases["123456"].add("watcher-1")
+    results = iter([0, 0])
+
+    async def evaluate(_script, _keys, _args):
+        return next(results)
+
+    monkeypatch.setattr(hub, "_presence_eval", evaluate)
+    assert await hub.spectator_refresh("123456", connection_id="watcher-1") is False
 
 
 async def test_audio_abort_registry_wakes_all_local_stream_senders() -> None:

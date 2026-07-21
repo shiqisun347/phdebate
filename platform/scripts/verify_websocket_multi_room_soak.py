@@ -27,7 +27,7 @@ import websockets
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.entities import MatchEvent, Room, RoomSeat, User, UserSession
-from app.services.realtime import SPECTATOR_KEY_PREFIX, room_hub
+from app.services.realtime import SPECTATOR_KEY_PREFIX, SPECTATOR_LEASE_SECONDS, room_hub
 from app.services.room_service import append_event, load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
@@ -161,7 +161,10 @@ async def expect_overflow_rejected(ws_base: str, code: str, ssl_context: ssl.SSL
     raise AssertionError("21st spectator was admitted")
 
 
-async def wait_for_lease_cleanup(codes: list[str], *, timeout_seconds: float = 15) -> dict[str, int]:
+async def wait_for_lease_cleanup(
+    codes: list[str], *, timeout_seconds: float = SPECTATOR_LEASE_SECONDS + 5
+) -> dict[str, int]:
+    """Wait through the authoritative Redis TTL for abruptly closed sockets."""
     client = redis.from_url(settings.redis_url, decode_responses=True)
     try:
         deadline = time.monotonic() + timeout_seconds

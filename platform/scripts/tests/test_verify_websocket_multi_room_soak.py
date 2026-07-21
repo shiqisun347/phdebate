@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -35,6 +36,11 @@ def args(**overrides) -> Namespace:
 def test_default_soak_matches_twenty_rooms_and_twenty_spectators() -> None:
     MODULE.validate_args(args())
     assert MODULE.MAX_SPECTATORS_PER_ROOM == 20
+
+
+def test_abrupt_disconnect_cleanup_waits_past_the_authoritative_redis_lease() -> None:
+    default_timeout = inspect.signature(MODULE.wait_for_lease_cleanup).parameters["timeout_seconds"].default
+    assert default_timeout > MODULE.SPECTATOR_LEASE_SECONDS
 
 
 @pytest.mark.parametrize(
