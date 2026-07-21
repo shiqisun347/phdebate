@@ -153,6 +153,7 @@ export type Room = {
   status: string;
   visibility: string;
   is_test_data?: boolean;
+  is_authenticated: boolean;
   seq: number;
   competition: Competition;
   season: Season | null;

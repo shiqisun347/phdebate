@@ -1,6 +1,7 @@
 "use client";
 
 import { FileText, LockKeyhole, X } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { selectCaptionProjection } from "@/components/stage-caption-projection";
@@ -93,14 +94,23 @@ export function TranscriptDrawer({ room, liveEvent }: { room: Room; liveEvent?: 
               {room.current_stage && !speeches.length && <div className="empty">当前阶段还没有已完成的发言记录</div>}
             </div>
           )}
-          <button
-            type="button"
-            className="button button-secondary stage-collaboration-toggle"
-            aria-expanded={collaborationOpen}
-            onClick={() => setCollaborationOpen((value) => !value)}
-          >
-            <LockKeyhole size={16} />{collaborationOpen ? "关闭协同编辑" : "协同编辑"}
-          </button>
+          {room.is_authenticated === false ? (
+            <Link
+              className="button button-secondary stage-collaboration-toggle"
+              href={`/login?next=${encodeURIComponent(`/rooms/${room.code}/watch`)}`}
+            >
+              <LockKeyhole size={16} />登录后协同
+            </Link>
+          ) : (
+            <button
+              type="button"
+              className="button button-secondary stage-collaboration-toggle"
+              aria-expanded={collaborationOpen}
+              onClick={() => setCollaborationOpen((value) => !value)}
+            >
+              <LockKeyhole size={16} />{collaborationOpen ? "关闭协同编辑" : "协同编辑"}
+            </button>
+          )}
         </div>
       )}
     </>

@@ -55,6 +55,7 @@ async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(r
         )
         assert [item.text for item in persisted] == ["第一句已经完整。", "第二句仍在继续。"]
         snapshot = serialize_room(db, room, None, public=True)
+        assert snapshot["is_authenticated"] is False
         assert [item["text"] for item in snapshot["caption_segments"]] == ["第一句已经完整。", "第二句仍在继续。"]
         assert {item["timing_basis"] for item in snapshot["caption_segments"]} == {"agent_text"}
     assert [item["text"] for item in published] == ["第一句已经完整。", "第二句仍在继续。"]

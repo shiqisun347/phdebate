@@ -104,4 +104,12 @@ describe("TranscriptDrawer", () => {
     fireEvent.click(screen.getByRole("button", { name: "文字记录" }));
     expect(screen.getByText("当前阶段还没有已完成的发言记录")).toBeInTheDocument();
   });
+
+  it("keeps anonymous spectators on a login path instead of starting a failing collaboration request", () => {
+    render(<TranscriptDrawer room={{ ...room, code: "123456", is_authenticated: false } as Room} />);
+    fireEvent.click(screen.getByRole("button", { name: "文字记录" }));
+    const login = screen.getByRole("link", { name: "登录后协同" });
+    expect(login).toHaveAttribute("href", "/login?next=%2Frooms%2F123456%2Fwatch");
+    expect(screen.queryByRole("button", { name: "协同编辑" })).not.toBeInTheDocument();
+  });
 });

@@ -481,6 +481,7 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
         "status": room.status,
         "visibility": room.visibility,
         "is_test_data": room.is_test_data,
+        "is_authenticated": user is not None,
         "seq": room.seq,
         "competition": serialize_competition(room.competition),
         "season": serialize_season(room.season) if room.season else None,
