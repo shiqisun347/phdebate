@@ -261,6 +261,29 @@ describe("public pages", () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: "auto" });
   });
 
+  it("renders competition rankings as an accessible table with mobile card labels", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({
+      competition: {
+        id: "daily", slug: "daily-4v4", name: "4v4 人机辩论日常赛", tagline: "", description: "赛事说明", rules: "赛事规则",
+        format: "4v4", seat_count: 8, ranked: true, allow_custom_topic: false, accent: "violet", live_count: 0, topics: [],
+      },
+      leaderboard: [{
+        rank: 1, user_id: "participant", real_name: "移动端测试辩手", points: 6,
+        wins: 2, draws: 0, losses: 1, average_score: 91.5, matches: 3,
+      }],
+      live_rooms: [],
+    })));
+    const { container } = render(<CompetitionDetailPage />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "排行榜" }));
+
+    expect(screen.getByRole("table", { name: "当前赛事的赛季个人排行榜" })).toHaveClass("ranking-table");
+    expect(screen.getByRole("cell", { name: "移动端测试辩手" })).toHaveAttribute("data-label", "辩手");
+    expect(screen.getByRole("cell", { name: "2 胜 · 0 平 · 1 负" })).toHaveAttribute("data-label", "战绩");
+    const result = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(result.violations).toEqual([]);
+  });
+
   it("explains why a cancelled room deep link returned to the lobby", async () => {
     window.history.replaceState({}, "", "/?room_closed=123456");
     vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
