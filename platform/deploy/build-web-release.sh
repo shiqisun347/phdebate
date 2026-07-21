@@ -43,11 +43,24 @@ cleanup() {
 trap cleanup EXIT
 
 run_as_service_user mkdir -m 750 "$BUILD_DIR"
-run_as_service_user rsync -a \
-  --exclude node_modules \
-  --exclude .next \
-  --exclude test-results \
-  "$ROOT/apps/web/" "$BUILD_DIR/"
+if [[ "$(id -u)" -eq 0 ]]; then
+  # A reviewed Git checkout can inherit a restrictive deployment-shell umask.
+  # Root copies the immutable source, then hands only the isolated build tree
+  # to the unprivileged service user. Source ownership and private runtime
+  # paths remain untouched.
+  rsync -a \
+    --exclude node_modules \
+    --exclude .next \
+    --exclude test-results \
+    "$ROOT/apps/web/" "$BUILD_DIR/"
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$BUILD_DIR"
+else
+  rsync -a \
+    --exclude node_modules \
+    --exclude .next \
+    --exclude test-results \
+    "$ROOT/apps/web/" "$BUILD_DIR/"
+fi
 # Turbopack rejects a project-level node_modules symlink that escapes the build
 # root. A hard-linked tree stays within the root without duplicating package
 # data on the same filesystem. Root performs this copy on deployments whose

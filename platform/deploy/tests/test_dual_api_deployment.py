@@ -93,6 +93,8 @@ def test_api_release_excludes_runtime_caches_and_validates_import() -> None:
 
 def test_web_release_is_marked_complete_only_after_runtime_assets_exist() -> None:
     script = read("build-web-release.sh")
+    assert 'chown -R "$SERVICE_USER:$SERVICE_GROUP" "$BUILD_DIR"' in script
+    assert '"$ROOT/apps/web/" "$BUILD_DIR/"' in script
     runtime_check = script.index('test -f "$RELEASE_DIR/public/worklets/livekit-interrupt-gate.js"')
     marker = script.index('>"$RELEASE_DIR/.release-complete"')
     assert runtime_check < marker
