@@ -132,18 +132,33 @@ def resolve_artifact(filename: str, roots: list[Path]) -> Path:
     return artifact
 
 
-def inspect_legacy_artifacts(records: list[tuple[str, str]], roots: list[Path]) -> dict[str, LegacyArtifact]:
+def inspect_legacy_artifacts(
+    records: list[tuple[str, str]],
+    roots: list[Path],
+    digest_cache: dict[tuple[Path, int, int], str] | None = None,
+) -> dict[str, LegacyArtifact]:
+    digest_cache = digest_cache if digest_cache is not None else {}
     artifacts: dict[str, LegacyArtifact] = {}
     for expected_sha, raw_path in records:
         role, filename = classify_legacy_path(raw_path)
         if role in artifacts:
             raise ValueError(f"duplicate legacy artifact role: {role}")
         artifact = resolve_artifact(filename, roots)
-        stat = artifact.stat()
-        actual_sha = digest(artifact)
+        stat_before = artifact.stat()
+        cache_key = (artifact, stat_before.st_size, stat_before.st_mtime_ns)
+        actual_sha = digest_cache.get(cache_key)
+        if actual_sha is None:
+            actual_sha = digest(artifact)
+            stat_after = artifact.stat()
+            if (stat_after.st_size, stat_after.st_mtime_ns) != (
+                stat_before.st_size,
+                stat_before.st_mtime_ns,
+            ):
+                raise ValueError(f"artifact changed while hashing: {filename}")
+            digest_cache[cache_key] = actual_sha
         if actual_sha != expected_sha:
             raise ValueError(f"SHA-256 mismatch for {role}: {filename}")
-        artifacts[role] = LegacyArtifact(role, filename, stat.st_size, actual_sha)
+        artifacts[role] = LegacyArtifact(role, filename, stat_before.st_size, actual_sha)
     missing = [role for role in ROLES if role not in artifacts]
     if missing:
         raise ValueError(f"missing legacy artifact roles: {','.join(missing)}")
@@ -187,6 +202,10 @@ def default_roots(backup_dir: Path) -> list[Path]:
 
 def plan_upgrades(backup_dir: Path, output_dir: Path, roots: list[Path]) -> list[Upgrade]:
     upgrades: list[Upgrade] = []
+    # Historical recovery sets intentionally reuse large immutable artifacts.
+    # Hash each unchanged path once per audit instead of repeatedly reading the
+    # same multi-gigabyte archive for every manifest that references it.
+    digest_cache: dict[tuple[Path, int, int], str] = {}
     for source in sorted(backup_dir.glob("recovery-set-*.manifest")):
         if source.is_symlink() or not source.is_file():
             raise ValueError(f"legacy manifest must be a regular file: {source.name}")
@@ -200,7 +219,7 @@ def plan_upgrades(backup_dir: Path, output_dir: Path, roots: list[Path]) -> list
         if first_values.get("schema_version") != "1":
             continue
         values, records = read_legacy_manifest(source, source_content)
-        artifacts = inspect_legacy_artifacts(records, roots)
+        artifacts = inspect_legacy_artifacts(records, roots, digest_cache)
         content = render_companion(source, source_content, values, artifacts)
         destination = output_dir / f"{source.name}.schema3"
         if destination.exists():

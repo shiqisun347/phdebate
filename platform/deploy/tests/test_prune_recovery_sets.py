@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -10,6 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "prune-recovery-sets.sh"
 QUARANTINE_SCRIPT = ROOT / "quarantine-recovery-manifests.py"
 UPGRADE_SCRIPT = ROOT / "upgrade-schema1-recovery-manifests.py"
+UPGRADE_SPEC = importlib.util.spec_from_file_location("upgrade_schema1_recovery_manifests", UPGRADE_SCRIPT)
+assert UPGRADE_SPEC and UPGRADE_SPEC.loader
+UPGRADE_MODULE = importlib.util.module_from_spec(UPGRADE_SPEC)
+sys.modules[UPGRADE_SPEC.name] = UPGRADE_MODULE
+UPGRADE_SPEC.loader.exec_module(UPGRADE_MODULE)
 
 
 def make_set(directory: Path, name: str, data_name: str, age_hours: int, schema: str = "3") -> tuple[Path, Path]:
@@ -242,6 +249,26 @@ def test_schema1_upgrade_audit_is_read_only_and_reports_required_companions(tmp_
     for path, before in original_stats.items():
         after = path.stat()
         assert (after.st_size, after.st_mtime_ns, after.st_ino) == (before.st_size, before.st_mtime_ns, before.st_ino)
+
+
+def test_schema1_upgrade_hashes_shared_large_artifacts_once_per_audit(tmp_path: Path, monkeypatch) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    first, artifacts = make_legacy_set(directory, "legacy-shared", 96)
+    second = directory / "recovery-set-legacy-shared-copy.manifest"
+    second.write_bytes(first.read_bytes())
+    digest_calls: list[Path] = []
+    real_digest = UPGRADE_MODULE.digest
+
+    def counting_digest(path: Path) -> str:
+        digest_calls.append(path)
+        return real_digest(path)
+
+    monkeypatch.setattr(UPGRADE_MODULE, "digest", counting_digest)
+    upgrades = UPGRADE_MODULE.plan_upgrades(directory, directory / "manifest-upgrades", [directory])
+
+    assert len(upgrades) == 2
+    assert len(digest_calls) == len(artifacts)
+    assert set(digest_calls) == set(artifacts.values())
 
 
 def test_schema1_upgrade_writes_only_new_verified_companion_and_report(tmp_path: Path) -> None:
