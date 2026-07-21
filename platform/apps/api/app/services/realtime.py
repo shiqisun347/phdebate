@@ -620,6 +620,12 @@ class RoomHub:
         while True:
             client = await self._client()
             if not client:
+                # There is no cross-process channel to become ready. Unblock
+                # local delivery immediately; the listener keeps retrying and
+                # upgrades to Redis when it becomes available.
+                ready = state.listener_ready.get(room_code)
+                if ready:
+                    ready.set()
                 await asyncio.sleep(1)
                 continue
             pubsub = client.pubsub()
