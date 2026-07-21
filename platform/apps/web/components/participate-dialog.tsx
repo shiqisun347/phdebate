@@ -32,7 +32,7 @@ export function ParticipateDialog({ competition, onClose }: { competition: Compe
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const joinInputRef = useRef<HTMLInputElement | null>(null);
-  const activeRoomCode = error.match(/房间 #(\d{6})/)?.[1];
+  const activeRoomCode = error.match(/你已在房间 #(\d{6})/)?.[1];
   const normalizedCustomTopic = customTopic.trim().replace(/\s+/g, " ");
   const customTopicInvalid = normalizedCustomTopic.length > 0 && normalizedCustomTopic.length < 4;
   const creationBlockedReason = roomCreationBlockedReason(detail);

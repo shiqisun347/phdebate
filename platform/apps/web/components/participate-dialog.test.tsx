@@ -227,6 +227,7 @@ describe("participation dialog", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("没有找到房间 #000000");
     expect(alert).toHaveTextContent("请核对房间号");
+    expect(screen.queryByRole("link", { name: "返回当前比赛" })).not.toBeInTheDocument();
     expect(navigation.push).not.toHaveBeenCalled();
   });
 
@@ -242,6 +243,7 @@ describe("participation dialog", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("没有找到房间 #123456");
     expect(alert).toHaveTextContent("向房主确认比赛是否已关闭");
+    expect(screen.queryByRole("link", { name: "返回当前比赛" })).not.toBeInTheDocument();
     expect(navigation.push).not.toHaveBeenCalled();
   });
 
