@@ -314,6 +314,34 @@ async def main_async(args: argparse.Namespace) -> dict:
         created = await asyncio.gather(*(setup_room(index, client) for index, client in enumerate(clients)))
         user_ids = [item[0] for item in created]
         codes = [item[1] for item in created]
+        capacity_client = httpx.AsyncClient(
+            base_url=args.base_url, verify=False, timeout=30, follow_redirects=True
+        )
+        clients.append(capacity_client)
+        capacity_registration = await capacity_client.post(
+            "/api/auth/register",
+            json={
+                "account": f"ws_soak_capacity_{suffix}",
+                "real_name": "房间容量边界验收",
+                "password": PASSWORD,
+                "confirm_password": PASSWORD,
+            },
+        )
+        capacity_registration.raise_for_status()
+        capacity_response = await capacity_client.post(
+            "/api/rooms",
+            headers=csrf(capacity_client) | {"X-Idempotency-Key": token_hex(16)},
+            json={
+                "competition_slug": "training-1v1",
+                "custom_topic": "第六个同时开放房间必须被服务端拒绝",
+                "seat_key": "aff_1",
+                "visibility": "public",
+            },
+        )
+        if capacity_response.status_code != 409 or "5 场上限" not in capacity_response.text:
+            raise AssertionError(
+                f"sixth active room was not rejected: status={capacity_response.status_code} body={capacity_response.text[:200]}"
+            )
         final_sequences: dict[str, int] = {}
         with SessionLocal() as db:
             for index, code in enumerate(codes):
@@ -343,6 +371,7 @@ async def main_async(args: argparse.Namespace) -> dict:
                     "rooms": codes,
                     "peak_connections": len(codes) * args.clients_per_room,
                     "cycles": args.cycles,
+                    "sixth_room_status": capacity_response.status_code,
                 },
                 ensure_ascii=False,
             ),
@@ -400,6 +429,7 @@ async def main_async(args: argparse.Namespace) -> dict:
             "event_catchup_ms": {"median": percentile(all_event, 0.5), "p95": percentile(all_event, 0.95), "max": percentile(all_event, 1)},
             "pong_ms": {"median": percentile(all_pong, 0.5), "p95": percentile(all_pong, 0.95), "max": percentile(all_pong, 1)},
             "cross_room_mismatches": sum("cross-room" in error for error in errors),
+            "sixth_room_rejected": capacity_response.status_code == 409,
             "lease_residue": residue,
             "errors": errors[:20],
             "wall_seconds": round(time.perf_counter() - started, 2),
