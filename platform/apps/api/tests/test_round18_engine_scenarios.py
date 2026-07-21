@@ -11,6 +11,7 @@ from app.core.database import SessionLocal
 from app.models.entities import Competition, CompetitionTopic, Match, MatchEvent
 from app.services.match_engine import match_engine
 from app.services.providers import lighttts
+from app.services.realtime import SPECTATOR_LIMIT
 from app.services.room_service import load_room, now
 from conftest import csrf
 from fastapi.testclient import TestClient
@@ -265,7 +266,7 @@ async def test_disconnect_grace_ai_substitution_and_real_websocket_restore(regis
         ) == 1
 
 
-def test_twenty_spectators_are_room_scoped_and_all_repair_roles_remain_exempt(
+def test_five_spectators_are_room_scoped_and_all_repair_roles_remain_exempt(
     client: TestClient,
     register_user,
 ) -> None:
@@ -275,7 +276,7 @@ def test_twenty_spectators_are_room_scoped_and_all_repair_roles_remain_exempt(
     participant = register_user("round18_spectator_participant")
     outsider = register_user("round18_spectator_outsider")
     other_owner = register_user("round18_other_room_owner")
-    code = create_training_room(owner, "Round18 20 人观战上限与角色豁免")['code']
+    code = create_training_room(owner, "Round18 5 人观战上限与角色豁免")['code']
     other_code = create_training_room(other_owner, "Round18 另一房间观战容量独立")['code']
     assert _claim(participant, code, "neg_1").status_code == 200
     with SessionLocal() as db:
@@ -290,7 +291,7 @@ def test_twenty_spectators_are_room_scoped_and_all_repair_roles_remain_exempt(
         login = admin.post("/api/auth/login", json={"account": "admin_test", "password": "Admin-test-1234"})
         assert login.status_code == 200, login.text
         with ExitStack() as stack:
-            spectators = [stack.enter_context(client.websocket_connect(f"/ws/rooms/{code}")) for _ in range(20)]
+            spectators = [stack.enter_context(client.websocket_connect(f"/ws/rooms/{code}")) for _ in range(SPECTATOR_LIMIT)]
             assert all(socket.receive_json()["room"]["code"] == code for socket in spectators)
 
             with owner.websocket_connect(f"/ws/rooms/{code}") as owner_socket:

@@ -11,7 +11,8 @@ import time
 import httpx
 import websockets
 
-MAX_SPECTATORS_PER_ROOM = 20
+MAX_ACTIVE_ROOMS = 5
+MAX_SPECTATORS_PER_ROOM = 5
 
 
 def validate_args(room_codes: list[str], connections_per_room: int, concurrency: int) -> None:
@@ -19,10 +20,12 @@ def validate_args(room_codes: list[str], connections_per_room: int, concurrency:
         raise SystemExit("--room-codes must contain at least one room code")
     if len(room_codes) != len(set(room_codes)):
         raise SystemExit("--room-codes must not contain duplicates")
+    if len(room_codes) > MAX_ACTIVE_ROOMS:
+        raise SystemExit(f"--room-codes cannot exceed {MAX_ACTIVE_ROOMS} simultaneous rooms")
     if not 1 <= connections_per_room <= MAX_SPECTATORS_PER_ROOM:
         raise SystemExit(
             f"--connections-per-room must be between 1 and {MAX_SPECTATORS_PER_ROOM}; "
-            "the product admits at most 20 spectators to one room"
+            "the product admits at most 5 spectators to one room"
         )
     if not 1 <= concurrency <= 100:
         raise SystemExit("--concurrency must be between 1 and 100")

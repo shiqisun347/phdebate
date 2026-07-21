@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 import websockets
 
-MAX_SPECTATORS_PER_ROOM = 20
+MAX_SPECTATORS_PER_ROOM = 5
 
 
 @dataclass
@@ -44,7 +44,7 @@ async def run(args: argparse.Namespace) -> int:
     if not 1 <= args.clients <= MAX_SPECTATORS_PER_ROOM:
         raise SystemExit(
             f"--clients must be between 1 and {MAX_SPECTATORS_PER_ROOM}; "
-            "the product admits at most 20 spectators to one room",
+            "the product admits at most 5 spectators to one room",
         )
     async with httpx.AsyncClient(base_url=args.base_url, verify=not args.insecure, timeout=15) as client:
         response = await client.get("/api/health")

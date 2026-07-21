@@ -116,6 +116,11 @@ DECODED_AUDIO_SAMPLE_RATE = 16_000
 MAX_DECODED_AUDIO_SECONDS = 600
 MEDIA_DECODE_TIMEOUT_SECONDS = 60
 ACTIVE_PARTICIPANT_STATUSES = {"lobby", "preparing", "running", "paused", "judging"}
+MAX_ACTIVE_ROOMS = 5
+# The test suite deliberately creates many historical fixtures in one shared
+# SQLite database. Individual capacity tests enable the production gate
+# explicitly; production can never disable it through configuration.
+ROOM_CAPACITY_ENFORCED = settings.app_env != "test"
 _AUDIO_VALIDATION_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio-validation")
 _RTC_DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -176,6 +181,23 @@ def _assert_available_for_room(db: Session, user_id: str, *, exclude_room_id: st
         raise HTTPException(
             status_code=409,
             detail=f"你已在房间 #{assignment.code} 参赛，请先返回该比赛或释放席位。",
+        )
+
+
+def _require_active_room_capacity(db: Session) -> None:
+    if not ROOM_CAPACITY_ENFORCED:
+        return
+    # Every room belongs to a competition, so the first competition row is a
+    # stable PostgreSQL mutex for the global admission count. SQLite already
+    # holds its process-wide writer lock through acquire_transaction_locks().
+    db.scalar(select(Competition.id).order_by(Competition.id).limit(1).with_for_update())
+    active_rooms = int(
+        db.scalar(select(func.count(Room.id)).where(Room.status.in_(ACTIVE_PARTICIPANT_STATUSES))) or 0
+    )
+    if active_rooms >= MAX_ACTIVE_ROOMS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前同时开放的比赛已达到 {MAX_ACTIVE_ROOMS} 场上限，请等待一场比赛结束或关闭后再创建。",
         )
 
 
@@ -365,7 +387,7 @@ async def create_room(
     user: User = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> dict:
-    acquire_transaction_locks(db, f"1:user:{user.id}")
+    acquire_transaction_locks(db, "0:active-room-capacity", f"1:user:{user.id}")
     creation_key, creation_fingerprint = _creation_identity(user, payload, idempotency_key)
     if creation_key:
         existing = db.scalar(select(Room).where(Room.creation_key == creation_key))
@@ -373,6 +395,7 @@ async def create_room(
             if existing.creation_fingerprint != creation_fingerprint:
                 raise HTTPException(status_code=409, detail="同一个幂等键不能用于不同的建房参数。")
             return {"room": serialize_room(db, load_room(db, existing.code), user), "replayed": True}
+    _require_active_room_capacity(db)
     _lock_participants(db, [user.id])
     _assert_available_for_room(db, user.id)
     competition = db.scalar(select(Competition).where(Competition.slug == payload.competition_slug, Competition.is_active.is_(True)))
@@ -479,7 +502,7 @@ async def rematch_room(
     if not source_seat or source_seat.occupant_type not in {"human", "ai_substitute"}:
         raise HTTPException(status_code=403, detail="只有本场真人参赛者可以发起再次比赛。")
 
-    acquire_transaction_locks(db, f"1:user:{user.id}")
+    acquire_transaction_locks(db, "0:active-room-capacity", f"1:user:{user.id}")
     creation_key, creation_fingerprint = _rematch_identity(user, source_room, idempotency_key)
     if creation_key:
         existing = db.scalar(select(Room).where(Room.creation_key == creation_key))
@@ -487,6 +510,8 @@ async def rematch_room(
             if existing.creation_fingerprint != creation_fingerprint:
                 raise HTTPException(status_code=409, detail="同一个幂等键不能用于不同的再次比赛请求。")
             return {"room": serialize_room(db, load_room(db, existing.code), user), "replayed": True}
+
+    _require_active_room_capacity(db)
 
     _lock_participants(db, [user.id])
     _assert_available_for_room(db, user.id)

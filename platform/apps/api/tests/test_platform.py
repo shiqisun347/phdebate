@@ -84,6 +84,59 @@ def create_training_room(client: TestClient, topic: str = "技术进步是否让
     return response.json()["room"]
 
 
+def test_system_allows_only_five_simultaneously_open_rooms_and_releases_capacity(
+    register_user, monkeypatch
+) -> None:
+    with SessionLocal() as db:
+        for room in db.scalars(select(Room).where(Room.status.in_(rooms_api.ACTIVE_PARTICIPANT_STATUSES))).all():
+            room.status = "terminated"
+            room.completed_at = now()
+        db.commit()
+    monkeypatch.setattr(rooms_api, "ROOM_CAPACITY_ENFORCED", True)
+    owners = [register_user(f"active_room_capacity_{index}") for index in range(6)]
+    barrier = Barrier(len(owners))
+
+    def create(index: int):
+        barrier.wait(timeout=5)
+        return owners[index].post(
+            "/api/rooms",
+            headers=csrf(owners[index]),
+            json={
+                "competition_slug": "training-1v1",
+                "custom_topic": f"并发比赛容量测试 {index + 1}",
+                "seat_key": "aff_1",
+                "visibility": "public",
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=len(owners)) as pool:
+        responses = list(pool.map(create, range(len(owners))))
+
+    accepted = [(index, response) for index, response in enumerate(responses) if response.status_code == 200]
+    rejected = [(index, response) for index, response in enumerate(responses) if response.status_code == 409]
+    assert len(accepted) == 5
+    assert len(rejected) == 1
+    blocked_index, blocked = rejected[0]
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == "当前同时开放的比赛已达到 5 场上限，请等待一场比赛结束或关闭后再创建。"
+
+    released_index, released_room = accepted[0]
+    released_code = released_room.json()["room"]["code"]
+    released = owners[released_index].post(
+        f"/api/rooms/{released_code}/cancel", headers=csrf(owners[released_index]), json={}
+    )
+    assert released.status_code == 200
+    replacement = create_training_room(owners[blocked_index], "容量释放后允许创建新比赛")
+    assert replacement["status"] == "lobby"
+
+    for owner_index, response in accepted:
+        room_code = response.json()["room"]["code"]
+        owners[owner_index].post(f"/api/rooms/{room_code}/cancel", headers=csrf(owners[owner_index]), json={})
+    owners[blocked_index].post(
+        f"/api/rooms/{replacement['code']}/cancel", headers=csrf(owners[blocked_index]), json={}
+    )
+
+
 def test_public_catalog_and_registration(client: TestClient, register_user) -> None:
     select_statements: list[str] = []
 
@@ -1683,7 +1736,7 @@ async def test_disconnect_during_initial_snapshot_releases_presence_without_serv
 
 
 @pytest.mark.asyncio
-async def test_room_websocket_rejects_twenty_first_spectator(register_user, monkeypatch) -> None:
+async def test_room_websocket_rejects_sixth_spectator(register_user, monkeypatch) -> None:
     owner = register_user("spectator_limit_owner")
     room_data = create_training_room(owner, "观战人数上限测试")
     code = room_data["code"]

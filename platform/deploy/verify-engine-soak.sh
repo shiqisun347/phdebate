@@ -15,8 +15,8 @@ if [[ ! "$CYCLES" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 tests=(
-  tests/test_multi_room_simulation.py::test_twenty_rooms_complete_concurrently_without_state_leakage
-  tests/test_multi_room_simulation.py::test_twenty_four_mixed_rooms_advance_only_their_authoritative_state
+  tests/test_multi_room_simulation.py::test_five_rooms_complete_concurrently_without_state_leakage
+  tests/test_multi_room_simulation.py::test_five_mixed_rooms_advance_only_their_authoritative_state
   tests/test_multi_room_simulation.py::test_concurrent_rooms_keep_distinct_frozen_judge_profiles
   tests/test_multi_room_simulation.py::test_concurrent_room_preparation_uses_distinct_frozen_speech_services
   tests/test_multi_room_simulation.py::test_tick_does_not_wait_for_slow_provider_room_before_scanning_again

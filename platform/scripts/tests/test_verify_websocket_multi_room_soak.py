@@ -20,8 +20,8 @@ SPEC.loader.exec_module(MODULE)
 
 def args(**overrides) -> Namespace:
     values = {
-        "rooms": 20,
-        "clients_per_room": 20,
+        "rooms": 5,
+        "clients_per_room": 5,
         "cycles": 3,
         "handshake_concurrency": 50,
         "slow_clients_per_room": 5,
@@ -33,9 +33,10 @@ def args(**overrides) -> Namespace:
     return Namespace(**values)
 
 
-def test_default_soak_matches_twenty_rooms_and_twenty_spectators() -> None:
+def test_default_soak_matches_five_rooms_and_five_spectators() -> None:
     MODULE.validate_args(args())
-    assert MODULE.MAX_SPECTATORS_PER_ROOM == 20
+    assert MODULE.MAX_ACTIVE_ROOMS == 5
+    assert MODULE.MAX_SPECTATORS_PER_ROOM == 5
 
 
 def test_abrupt_disconnect_cleanup_waits_past_the_authoritative_redis_lease() -> None:
@@ -47,14 +48,14 @@ def test_abrupt_disconnect_cleanup_waits_past_the_authoritative_redis_lease() ->
     ("field", "value", "message"),
     [
         ("rooms", 0, "--rooms"),
-        ("rooms", 21, "--rooms"),
+        ("rooms", 6, "--rooms"),
         ("clients_per_room", 0, "--clients-per-room"),
-        ("clients_per_room", 21, "--clients-per-room"),
+        ("clients_per_room", 6, "--clients-per-room"),
         ("cycles", 0, "--cycles"),
         ("cycles", 21, "--cycles"),
         ("handshake_concurrency", 0, "--handshake-concurrency"),
         ("handshake_concurrency", 101, "--handshake-concurrency"),
-        ("slow_clients_per_room", 21, "--slow-clients-per-room"),
+        ("slow_clients_per_room", 6, "--slow-clients-per-room"),
         ("hold_seconds", 301, "--hold-seconds"),
         ("between_cycle_seconds", 301, "--between-cycle-seconds"),
         ("abrupt_ratio", 1.1, "--abrupt-ratio"),

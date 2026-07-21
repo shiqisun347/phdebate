@@ -16,7 +16,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-@pytest.mark.parametrize("clients", [0, 21, 500])
+@pytest.mark.parametrize("clients", [0, 6, 500])
 def test_disconnect_storm_refuses_counts_above_one_room_product_limit(clients: int) -> None:
     args = Namespace(
         base_url="http://127.0.0.1:1",
@@ -26,7 +26,7 @@ def test_disconnect_storm_refuses_counts_above_one_room_product_limit(clients: i
         insecure=False,
     )
 
-    with pytest.raises(SystemExit, match="at most 20 spectators"):
+    with pytest.raises(SystemExit, match="at most 5 spectators"):
         asyncio.run(MODULE.run(args))
 
 
@@ -41,4 +41,4 @@ def test_disconnect_storm_default_matches_product_limit(monkeypatch: pytest.Monk
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--room", "123456"])
 
     assert MODULE.main() == 0
-    assert captured["clients"] == 20
+    assert captured["clients"] == 5

@@ -3,7 +3,7 @@
 
 The verifier creates short-lived public hold rooms without starting Agent,
 ASR, TTS, judging, or ranking work.  Every room stays within the product's
-20-spectator limit and all synthetic database rows are removed in ``finally``.
+5-spectator limit and all synthetic database rows are removed in ``finally``.
 Run it from the API release as the platform service account.
 """
 
@@ -33,7 +33,8 @@ from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
 from websockets.exceptions import ConnectionClosed
 
-MAX_SPECTATORS_PER_ROOM = 20
+MAX_ACTIVE_ROOMS = 5
+MAX_SPECTATORS_PER_ROOM = 5
 PASSWORD = "Websocket-soak-1234"
 
 
@@ -67,10 +68,10 @@ def percentile(values: list[float], fraction: float) -> float | None:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if not 1 <= args.rooms <= 20:
-        raise SystemExit("--rooms must be between 1 and 20")
+    if not 1 <= args.rooms <= MAX_ACTIVE_ROOMS:
+        raise SystemExit(f"--rooms must be between 1 and {MAX_ACTIVE_ROOMS}")
     if not 1 <= args.clients_per_room <= MAX_SPECTATORS_PER_ROOM:
-        raise SystemExit("--clients-per-room must be between 1 and 20")
+        raise SystemExit(f"--clients-per-room must be between 1 and {MAX_SPECTATORS_PER_ROOM}")
     if not 1 <= args.cycles <= 20:
         raise SystemExit("--cycles must be between 1 and 20")
     if not 1 <= args.handshake_concurrency <= 100:
@@ -436,8 +437,8 @@ def main() -> None:
         raise SystemExit("请使用平台服务账号运行 WebSocket 长连接验收。")
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
-    parser.add_argument("--rooms", type=int, default=20)
-    parser.add_argument("--clients-per-room", type=int, default=20)
+    parser.add_argument("--rooms", type=int, default=MAX_ACTIVE_ROOMS)
+    parser.add_argument("--clients-per-room", type=int, default=MAX_SPECTATORS_PER_ROOM)
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--handshake-concurrency", type=int, default=50)
     parser.add_argument("--slow-clients-per-room", type=int, default=5)

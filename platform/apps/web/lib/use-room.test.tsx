@@ -153,7 +153,7 @@ describe("useRoom", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("shows a terminal message instead of retrying when 20 spectator slots are occupied", () => {
+  it("shows a terminal message instead of retrying when 5 spectator slots are occupied", () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
     vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -164,7 +164,7 @@ describe("useRoom", () => {
       vi.advanceTimersByTime(20_000);
     });
     expect(FakeWebSocket.instances).toHaveLength(1);
-    expect(result.current.error).toBe("本场观战人数已达 20 人，请稍后重试。");
+    expect(result.current.error).toBe("本场观战人数已达 5 人，请稍后重试。");
   });
 
   it("closes a half-open connection when no server message arrives", () => {

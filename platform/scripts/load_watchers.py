@@ -15,7 +15,8 @@ from urllib.parse import urlparse
 import httpx
 import websockets
 
-MAX_SPECTATORS_PER_ROOM = 20
+MAX_ACTIVE_ROOMS = 5
+MAX_SPECTATORS_PER_ROOM = 5
 
 
 @dataclass
@@ -141,6 +142,8 @@ async def run(args: argparse.Namespace) -> int:
     room_codes = list(dict.fromkeys(room_codes))
     if not room_codes:
         raise SystemExit("--rooms must contain at least one room code")
+    if len(room_codes) > MAX_ACTIVE_ROOMS:
+        raise SystemExit(f"--rooms exceeds the product limit of {MAX_ACTIVE_ROOMS} simultaneous rooms")
     if args.clients > len(room_codes) * MAX_SPECTATORS_PER_ROOM:
         raise SystemExit(
             f"--clients exceeds the product limit of {MAX_SPECTATORS_PER_ROOM} spectators per room; "

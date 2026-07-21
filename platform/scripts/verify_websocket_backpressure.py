@@ -19,7 +19,7 @@ import httpx
 import websockets
 from app.core.database import SessionLocal
 from app.models.entities import MatchEvent, Room, RoomSeat, User, UserSession
-from app.services.realtime import room_hub
+from app.services.realtime import SPECTATOR_LIMIT, room_hub
 from app.services.room_service import append_event, load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
 from sqlalchemy import delete, select
@@ -206,7 +206,7 @@ async def main_async(args: argparse.Namespace) -> None:
         early_errors = [item for item in readiness if item]
         if early_errors:
             raise RuntimeError(f"WebSocket initial connection failures: {early_errors[:5]}")
-        overflow_verified = args.clients == 20
+        overflow_verified = args.clients == SPECTATOR_LIMIT
         if overflow_verified:
             await expect_spectator_limit(websocket_base(args.base_url), code)
         start.set()
@@ -249,12 +249,14 @@ def main() -> None:
         raise SystemExit("请使用 平台 服务账号运行 WebSocket 压力验收。")
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
-    parser.add_argument("--clients", type=int, default=20)
+    parser.add_argument("--clients", type=int, default=SPECTATOR_LIMIT)
     parser.add_argument("--slow-clients", type=int, default=5)
     parser.add_argument("--events", type=int, default=64)
     args = parser.parse_args()
-    if not 1 <= args.clients <= 20 or not 0 <= args.slow_clients <= args.clients or args.events < 1:
-        raise SystemExit("clients 必须位于 1..20，events 必须为正数，slow-clients 必须位于 0..clients。")
+    if not 1 <= args.clients <= SPECTATOR_LIMIT or not 0 <= args.slow_clients <= args.clients or args.events < 1:
+        raise SystemExit(
+            f"clients 必须位于 1..{SPECTATOR_LIMIT}，events 必须为正数，slow-clients 必须位于 0..clients。"
+        )
     asyncio.run(main_async(args))
 
 

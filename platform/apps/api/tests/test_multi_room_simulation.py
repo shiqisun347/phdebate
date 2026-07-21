@@ -53,8 +53,8 @@ def write_silence(room_code: str, speech_id: str, *, seconds: float = 3.0) -> st
     return f"/media/{room_code}/{speech_id}.wav"
 
 
-async def test_twenty_rooms_complete_concurrently_without_state_leakage(client, register_user, monkeypatch) -> None:
-    topics = [f"并发隔离辩题-{index}" for index in range(20)]
+async def test_five_rooms_complete_concurrently_without_state_leakage(client, register_user, monkeypatch) -> None:
+    topics = [f"并发隔离辩题-{index}" for index in range(5)]
     codes: list[str] = []
 
     for index, topic in enumerate(topics):
@@ -142,17 +142,16 @@ async def test_twenty_rooms_complete_concurrently_without_state_leakage(client, 
         assert len(room_ids) == len(codes)
 
 
-async def test_twenty_four_mixed_rooms_advance_only_their_authoritative_state(client, register_user, monkeypatch) -> None:
+async def test_five_mixed_rooms_advance_only_their_authoritative_state(client, register_user, monkeypatch) -> None:
     groups: dict[str, list[str]] = {
         "paused": [],
         "human_waiting": [],
         "human_expired": [],
         "playing": [],
         "judging": [],
-        "preparing": [],
     }
     for group in groups:
-        for index in range(4):
+        for index in range(1):
             owner = register_user(f"mixed_{group}_{index}")
             room_data = create_training_room(owner, f"混合并发-{group}-{index}")
             code = room_data["code"]
@@ -241,7 +240,7 @@ async def test_twenty_four_mixed_rooms_advance_only_their_authoritative_state(cl
     monkeypatch.setattr(debate_agent, "generate", forbidden_agent)
     monkeypatch.setattr(lighttts, "synthesize", synthesized)
     monkeypatch.setattr(judge_provider, "judge", judged)
-    # Exercise these 24 rooms concurrently without letting unrelated active
+    # Exercise the production maximum of five rooms concurrently without letting unrelated active
     # rooms created by earlier tests enter this test's mocked Provider scope.
     target_codes = [code for codes in groups.values() for code in codes]
     await asyncio.gather(*(match_engine._process_room_locked(code) for code in target_codes))
@@ -268,11 +267,7 @@ async def test_twenty_four_mixed_rooms_advance_only_their_authoritative_state(cl
             scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
             assert room.status == "completed" and match.status == "completed" and match.winner == "aff"
             assert scorecard and scorecard.reasoning == f"{room.topic} 的混合并发裁判结果"
-        for code in groups["preparing"]:
-            room = load_room(db, code)
-            assert room.status == "running" and room.current_stage_index == 0
-            assert db.scalar(select(MatchEvent.id).where(MatchEvent.room_id == room.id, MatchEvent.event_type == "audio.cue.ready"))
-        assert background_cues == set(groups["preparing"])
+        assert background_cues == set()
 
         for codes in groups.values():
             for code in codes:
@@ -285,7 +280,7 @@ async def test_twenty_four_mixed_rooms_advance_only_their_authoritative_state(cl
 @pytest.mark.parametrize("seed", [20260716, 20260717, 20260718])
 def test_seeded_random_multi_user_operations_preserve_room_invariants(client, register_user, seed: int) -> None:
     rng = random.Random(seed)
-    owners = [register_user(f"random_{seed}_owner_{index}") for index in range(6)]
+    owners = [register_user(f"random_{seed}_owner_{index}") for index in range(5)]
     participants = [register_user(f"random_{seed}_participant_{index}") for index in range(8)]
     all_clients = owners + participants
     client_by_user_id = {item.get("/api/auth/session").json()["user"]["id"]: item for item in all_clients}

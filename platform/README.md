@@ -76,14 +76,14 @@ PHDEBATE_SOAK_CYCLES=10 \
 .venv/bin/python scripts/load_watchers.py \
   --base-url https://117.50.192.216 \
   --rooms 123456 \
-  --clients 20 \
-  --handshake-concurrency 20 \
+  --clients 5 \
+  --handshake-concurrency 5 \
   --duration 10 \
   --allow-public-load
 ```
 
-远程压测必须显式传入 `--allow-public-load`；每个房间最多分配 20 个观战连接，测试更多连接时必须
-提供足够多的独立房间。脚本先只读校验全部房间，再分批完成握手并同时保持所有连接，因此结果中的
+远程压测必须显式传入 `--allow-public-load`；系统最多同时开放 5 个房间，每个房间最多分配 5 个观战连接。
+脚本先只读校验全部房间，再分批完成握手并同时保持所有连接，因此结果中的
 `peak_connected` 才能证明真实并发连接数。只有使用临时自签证书的隔离环境才允许追加 `--insecure`，
 生产证书测试不能关闭 TLS 校验。
 
@@ -93,10 +93,10 @@ PHDEBATE_SOAK_CYCLES=10 \
 .venv/bin/python scripts/verify_websocket_disconnect_storm.py \
   --base-url https://117.50.192.216 \
   --room 123456 \
-  --clients 20
+  --clients 5
 ```
 
-该脚本同样遵守单房最多 20 个观战连接的产品限制。生产证书测试不得使用 `--insecure`；该参数只用于
+该脚本同样遵守单房最多 5 个观战连接的产品限制。生产证书测试不得使用 `--insecure`；该参数只用于
 临时自签证书的隔离环境。
 
 生产前端使用 Node.js 24 LTS 独立运行时。房间计时和状态扫描彼此独立，不会因为单个外部服务调用变慢而停止其他房间；Agent 与裁判调用默认全局最多并发 8 个。真人录音在应用层限制为 50 MiB，Nginx API 入口限制为 52 MiB（包含 multipart 开销）。

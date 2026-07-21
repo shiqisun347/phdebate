@@ -106,17 +106,17 @@ async def test_paused_room_remains_scheduled_for_disconnect_substitution(registe
 
 
 @pytest.mark.asyncio
-async def test_twenty_room_mixed_format_long_soak_preserves_authority_and_recovers(
+async def test_five_room_mixed_format_long_soak_preserves_authority_and_recovers(
     client,
     register_user,
     monkeypatch,
 ) -> None:
-    """Run 20 mixed 1v1/4v4 rooms through 100+ speeches and judging.
+    """Run the production maximum of five mixed 1v1/4v4 rooms through judging.
 
     This is a deterministic logical-time soak rather than a wall-clock sleep:
-    it combines human turns, AI-filled seats, manual pause/resume, four paused
-    disconnect substitutions, four engine-restart recoveries and four
-    out-of-order judge retries while every room advances concurrently.
+    it combines human turns, AI-filled seats, manual pause/resume, a paused
+    disconnect substitution, engine-restart recovery and out-of-order judge
+    retry while every allowed room advances concurrently.
     """
 
     competition = client.get("/api/competitions/daily-4v4").json()["competition"]
@@ -126,7 +126,7 @@ async def test_twenty_room_mixed_format_long_soak_preserves_authority_and_recove
     restart_codes: set[str] = set()
     disconnected_codes: set[str] = set()
 
-    for index in range(20):
+    for index in range(5):
         owner = register_user(f"round15_soak_owner_{index}")
         if index % 2:
             code = _create_daily_room(owner, topic_id, index)
@@ -357,5 +357,5 @@ async def test_twenty_room_mixed_format_long_soak_preserves_authority_and_recove
                 assert len([item for item in events if item.event_type == "judge.started"]) == 2
                 assert len([item for item in events if item.event_type == "judge.interrupted"]) == 1
 
-        assert len(room_ids) == 20
-        assert total_speeches >= 100
+        assert len(room_ids) == 5
+        assert total_speeches >= 22

@@ -12,15 +12,15 @@ import websockets
 
 BASE_URL = os.getenv("VERIFY_BASE_URL", "https://117.50.192.216")
 ROOM_CODE = os.getenv("VERIFY_ROOM_CODE", "278571")
-CONNECTIONS = max(1, int(os.getenv("VERIFY_CONNECTIONS", "20")))
-# Product policy permits at most 20 concurrent spectators in one room.
-HANDSHAKE_CONCURRENCY = max(1, int(os.getenv("VERIFY_HANDSHAKE_CONCURRENCY", "20")))
+CONNECTIONS = max(1, int(os.getenv("VERIFY_CONNECTIONS", "5")))
+# Product policy permits at most 5 concurrent spectators in one room.
+HANDSHAKE_CONCURRENCY = max(1, int(os.getenv("VERIFY_HANDSHAKE_CONCURRENCY", "5")))
 HOLD_SECONDS = max(1.0, float(os.getenv("VERIFY_HOLD_SECONDS", "10")))
 
 
 async def run() -> dict:
-    if CONNECTIONS > 20:
-        raise RuntimeError("VERIFY_CONNECTIONS cannot exceed the 20-spectator per-room product limit")
+    if CONNECTIONS > 5:
+        raise RuntimeError("VERIFY_CONNECTIONS cannot exceed the 5-spectator per-room product limit")
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
