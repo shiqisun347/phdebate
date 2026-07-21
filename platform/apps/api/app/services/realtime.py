@@ -267,6 +267,15 @@ class RoomHub:
                 client.eval(script, len(keys), *keys, *args),
                 timeout=PRESENCE_REDIS_TIMEOUT_SECONDS,
             )
+        except asyncio.TimeoutError:
+            # A saturated Redis can miss this deliberately short realtime
+            # deadline while the shared client and its Pub/Sub connections are
+            # still healthy. Closing the whole client here disconnects every
+            # room subscription on this worker and turns a lease delay into a
+            # multi-room event stall. The caller applies its local failover and
+            # the next heartbeat retries normally.
+            logger.warning("room Redis presence operation timed out")
+            return None
         except Exception as exc:
             logger.warning("room Redis presence operation failed: %s", exc)
             if state.redis is client:

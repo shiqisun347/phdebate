@@ -294,6 +294,36 @@ async def test_spectator_refresh_evicts_only_when_atomic_rejoin_hits_global_limi
     assert await hub.spectator_refresh("123456", connection_id="watcher-1") is False
 
 
+async def test_presence_timeout_does_not_disconnect_healthy_room_subscriptions(monkeypatch) -> None:
+    class SlowRedis:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def ping(self) -> bool:
+            return True
+
+        async def eval(self, *_args) -> int:
+            await asyncio.sleep(1)
+            return 1
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    shared = SlowRedis()
+    monkeypatch.setattr(realtime_service.redis, "from_url", lambda *_args, **_kwargs: shared)
+    monkeypatch.setattr(realtime_service, "PRESENCE_REDIS_TIMEOUT_SECONDS", 0.001)
+    hub = RoomHub()
+
+    result = await hub._presence_eval("return 1", ["lease"], [])
+
+    state = hub._state()
+    assert result is None
+    assert state.redis is shared
+    assert state.redis_retry_at == 0
+    assert shared.closed is False
+    await hub.close()
+
+
 async def test_audio_abort_registry_wakes_all_local_stream_senders() -> None:
     registry = AudioStreamAbortRegistry()
     first = registry.register("123456", "speech-1", "generation-1")
