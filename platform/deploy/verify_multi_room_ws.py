@@ -11,8 +11,25 @@ import time
 import httpx
 import websockets
 
+MAX_SPECTATORS_PER_ROOM = 20
+
+
+def validate_args(room_codes: list[str], connections_per_room: int, concurrency: int) -> None:
+    if not room_codes:
+        raise SystemExit("--room-codes must contain at least one room code")
+    if len(room_codes) != len(set(room_codes)):
+        raise SystemExit("--room-codes must not contain duplicates")
+    if not 1 <= connections_per_room <= MAX_SPECTATORS_PER_ROOM:
+        raise SystemExit(
+            f"--connections-per-room must be between 1 and {MAX_SPECTATORS_PER_ROOM}; "
+            "the product admits at most 20 spectators to one room"
+        )
+    if not 1 <= concurrency <= 100:
+        raise SystemExit("--concurrency must be between 1 and 100")
+
 
 async def run(base_url: str, room_codes: list[str], connections_per_room: int, concurrency: int) -> dict:
+    validate_args(room_codes, connections_per_room, concurrency)
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
@@ -77,7 +94,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     parser.add_argument("--room-codes", default="551958,214317,596306,287138,192885")
-    parser.add_argument("--connections-per-room", type=int, default=40)
+    parser.add_argument(
+        "--connections-per-room",
+        type=int,
+        default=MAX_SPECTATORS_PER_ROOM,
+        help=f"simultaneous spectators per room (1-{MAX_SPECTATORS_PER_ROOM})",
+    )
     parser.add_argument("--concurrency", type=int, default=20)
     args = parser.parse_args()
     print(

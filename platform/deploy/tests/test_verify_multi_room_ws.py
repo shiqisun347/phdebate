@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "verify_multi_room_ws.py"
+SPEC = importlib.util.spec_from_file_location("verify_multi_room_ws", SCRIPT)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
+
+
+@pytest.mark.parametrize("connections", [0, 21, 40])
+def test_connections_per_room_cannot_exceed_product_limit(connections: int) -> None:
+    with pytest.raises(SystemExit, match="at most 20 spectators"):
+        MODULE.validate_args(["123456"], connections, 20)
+
+
+def test_default_product_limit_is_twenty() -> None:
+    assert MODULE.MAX_SPECTATORS_PER_ROOM == 20
+    MODULE.validate_args(["123456"], MODULE.MAX_SPECTATORS_PER_ROOM, 20)
+
+
+def test_duplicate_room_codes_are_rejected() -> None:
+    with pytest.raises(SystemExit, match="duplicates"):
+        MODULE.validate_args(["123456", "123456"], 1, 1)
+
+
+@pytest.mark.parametrize("concurrency", [0, 101])
+def test_handshake_concurrency_is_bounded(concurrency: int) -> None:
+    with pytest.raises(SystemExit, match="--concurrency"):
+        MODULE.validate_args(["123456"], 1, concurrency)
