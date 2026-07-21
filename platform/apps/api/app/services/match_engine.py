@@ -2116,6 +2116,8 @@ class MatchEngine:
 
         async def synthesize_once() -> str:
             if prefetched_audio_url:
+                if not free_turn:
+                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
                 if livekit_audio_enabled():
                     await lighttts.publish_wav_to_livekit(
                         room_code=room_code,
@@ -2141,6 +2143,10 @@ class MatchEngine:
                     speech_id,
                     settings.moss_tts_playback_speed,
                 )
+                if not free_turn:
+                    # MOSS is now free. Generate the following turn while this
+                    # immutable WAV is being clocked through LiveKit.
+                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
                 if livekit_audio_enabled():
                     await lighttts.publish_wav_to_livekit(
                         room_code=room_code,

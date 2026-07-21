@@ -6511,10 +6511,15 @@ async def test_moss_formal_speech_waits_for_complete_wav_then_publishes_stable_1
     monkeypatch.setattr(debate_agent, "generate", generated_content)
     monkeypatch.setattr(moss_tts_realtime, "synthesize", complete_moss_wav)
     monkeypatch.setattr(lighttts, "publish_wav_to_livekit", publish_wav)
+    monkeypatch.setattr(
+        match_engine,
+        "_schedule_next_agent_prefetch",
+        lambda _room_code, _stage_index: order.append("next-prefetch"),
+    )
 
     await match_engine.process_room(code)
 
-    assert order == ["agent-final", "moss-wav", "livekit-publish"]
+    assert order == ["agent-final", "moss-wav", "next-prefetch", "livekit-publish"]
     with SessionLocal() as db:
         target_room = load_room(db, code)
         speech = db.scalar(select(Speech).where(Speech.room_id == target_room.id, Speech.stage_key == "neg_1_case"))
