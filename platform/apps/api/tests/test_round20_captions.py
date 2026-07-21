@@ -43,6 +43,11 @@ async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(r
 
     with SessionLocal() as db:
         room = load_room(db, code)
+        stored_speech = db.get(Speech, speech_id)
+        assert stored_speech is not None
+        stored_speech.content = "观众不可回溯的完整文字稿"
+        stored_speech.audio_url = "/api/media/speech.wav"
+        db.commit()
         # AI display timing is persisted only in the presentation table. It
         # must never masquerade as audio-aligned research transcript data.
         assert list(db.scalars(select(TranscriptSegment).where(TranscriptSegment.speech_id == speech_id))) == []
@@ -55,7 +60,8 @@ async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(r
         )
         assert [item.text for item in persisted] == ["第一句已经完整。", "第二句仍在继续。"]
         snapshot = serialize_room(db, room, None, public=True)
-        assert snapshot["is_authenticated"] is False
+        assert snapshot["speeches"][0]["content"] == ""
+        assert snapshot["speeches"][0]["audio_url"] == "/api/media/speech.wav"
         assert [item["text"] for item in snapshot["caption_segments"]] == ["第一句已经完整。", "第二句仍在继续。"]
         assert {item["timing_basis"] for item in snapshot["caption_segments"]} == {"agent_text"}
     assert [item["text"] for item in published] == ["第一句已经完整。", "第二句仍在继续。"]

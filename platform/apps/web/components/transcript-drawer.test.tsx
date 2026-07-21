@@ -26,6 +26,8 @@ function speech(id: string, stageKey: string, content: string): RoomSpeech {
 }
 
 const room = {
+  my_seat: "aff_1",
+  can_control: false,
   current_stage: { key: "aff_case", name: "正方立论", kind: "speech", duration: 120, seat: "aff_1" },
   seats: [{ seat_key: "aff_1", display_name: "张同学" }],
   speeches: [
@@ -105,11 +107,9 @@ describe("TranscriptDrawer", () => {
     expect(screen.getByText("当前阶段还没有已完成的发言记录")).toBeInTheDocument();
   });
 
-  it("keeps anonymous spectators on a login path instead of starting a failing collaboration request", () => {
-    render(<TranscriptDrawer room={{ ...room, code: "123456", is_authenticated: false } as Room} />);
-    fireEvent.click(screen.getByRole("button", { name: "文字记录" }));
-    const login = screen.getByRole("link", { name: "登录后协同" });
-    expect(login).toHaveAttribute("href", "/login?next=%2Frooms%2F123456%2Fwatch");
-    expect(screen.queryByRole("button", { name: "协同编辑" })).not.toBeInTheDocument();
+  it("does not expose transcript history or collaboration controls to any spectator", () => {
+    const { container } = render(<TranscriptDrawer room={{ ...room, code: "123456", my_seat: null, can_control: false } as Room} />);
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByRole("button", { name: "文字记录" })).not.toBeInTheDocument();
   });
 });

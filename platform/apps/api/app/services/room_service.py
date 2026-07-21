@@ -481,7 +481,6 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
         "status": room.status,
         "visibility": room.visibility,
         "is_test_data": room.is_test_data,
-        "is_authenticated": user is not None,
         "seq": room.seq,
         "competition": serialize_competition(room.competition),
         "season": serialize_season(room.season) if room.season else None,
@@ -557,7 +556,10 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
                 "seat_key": item.seat_key,
                 "speaker": f"上一段发言 · {seat_label(item.seat_key)}",
                 "stage_key": item.stage_key,
-                "content": item.content,
+                # Spectators need the audio fallback metadata but must not
+                # receive a replayable written transcript. Live captions use
+                # the separate, bounded caption projection above.
+                "content": "" if public else item.content,
                 "audio_url": item.audio_url,
                 "duration_seconds": item.duration_seconds,
                 "playback_started_at": item.playback_started_at.isoformat() if item.playback_started_at else None,
