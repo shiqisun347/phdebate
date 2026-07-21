@@ -653,7 +653,7 @@ def room_result(
                 "stage_name": stage_names.get(item.stage_key, item.stage_key),
                 "speaker_type": item.speaker_type,
                 "status": item.status,
-                "content": item.content,
+                "content": "" if public_projection else item.content,
                 "audio_url": item.audio_url,
                 "duration_seconds": item.duration_seconds,
                 "created_at": item.created_at.isoformat(),
@@ -1014,6 +1014,14 @@ def transcript_collab_token(
     room = load_room(db, code)
     if not can_view_room(db, room, user):
         raise HTTPException(status_code=403, detail="无权查看该房间。")
+    is_match_participant = db.scalar(
+        select(MatchParticipant.id).where(
+            MatchParticipant.room_id == room.id,
+            MatchParticipant.user_id == user.id,
+        )
+    )
+    if not can_control(db, room, user) and user_seat(room, user) is None and not is_match_participant:
+        raise HTTPException(status_code=403, detail="观众不可查看文字稿。")
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Pragma"] = "no-cache"
     return create_transcript_collab_token(db, room, user)

@@ -45,7 +45,7 @@ export function TranscriptDrawer({ room, liveEvent }: { room: Room; liveEvent?: 
   // A transcript is a participant/admin recovery tool, not a spectator
   // surface. The backend independently redacts speech content in public room
   // projections so hiding this control is never the only permission check.
-  if (!room.my_seat && !room.can_control) return null;
+  if (!(room.can_view_transcript ?? Boolean(room.my_seat || room.can_control))) return null;
 
   function close() {
     setOpen(false);

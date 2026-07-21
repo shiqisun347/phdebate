@@ -55,6 +55,7 @@ function result(mySeat: string | null): Result {
       can_speak: false,
       speak_reason: "比赛已结束",
       can_control: false,
+      can_view_transcript: Boolean(mySeat),
       recent_events: [],
       speeches: [],
     },
@@ -124,6 +125,8 @@ describe("result archive download", () => {
     expect(screen.queryByRole("link", { name: "下载完整归档" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "同题再来一场" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "返回个人中心" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "比赛录音回放" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "完整辩论记录" })).not.toBeInTheDocument();
   });
 
   it("offers correction controls only on the participant's own eligible human speech", async () => {
@@ -202,7 +205,8 @@ describe("result archive download", () => {
       headers: { "Content-Type": "application/json" },
     })));
     const { container } = render(<ResultPage />);
-    await screen.findByText("有效发言");
+    expect(await screen.findByRole("list", { name: "比赛录音回放" })).toBeInTheDocument();
+    expect(screen.queryByText("有效发言")).not.toBeInTheDocument();
     const audio = container.querySelector("audio");
     expect(audio).toHaveAttribute("preload", "none");
     expect(audio).toHaveAttribute("src", expect.stringContaining("/media/381526/speech-1.wav"));
@@ -220,7 +224,8 @@ describe("result archive download", () => {
       headers: { "Content-Type": "application/json" },
     })));
     const { container } = render(<ResultPage />);
-    await screen.findByText("第 11 条发言");
+    await screen.findByRole("list", { name: "比赛录音回放" });
+    expect(screen.queryByText("第 11 条发言")).not.toBeInTheDocument();
 
     const audioElements = Array.from(container.querySelectorAll("audio"));
     expect(audioElements).toHaveLength(11);
@@ -229,7 +234,7 @@ describe("result archive download", () => {
   });
 
   it("pauses every other recording when a result audio starts playing", async () => {
-    const withAudio = result(null);
+    const withAudio = result("aff_1");
     withAudio.speeches = [
       audioSpeech("speech-1", "正方发言"),
       audioSpeech("speech-2", "反方发言", "neg"),
@@ -251,7 +256,7 @@ describe("result archive download", () => {
   });
 
   it("stops and rewinds every result audio when leaving the page", async () => {
-    const withAudio = result(null);
+    const withAudio = result("aff_1");
     withAudio.speeches = [
       audioSpeech("speech-1", "正方发言"),
       audioSpeech("speech-2", "反方发言", "neg"),
@@ -388,12 +393,12 @@ describe("result archive download", () => {
   });
 
   it("uses the authoritative speech total and loads earlier speeches in stable chronological order", async () => {
-    const first = result(null);
+    const first = result("aff_1");
     const speech3 = { ...audioSpeech("speech-3", "第三段发言"), audio_url: "", created_at: "2026-07-16T01:02:00Z" };
     const speech4 = { ...audioSpeech("speech-4", "第四段发言", "neg"), audio_url: "", created_at: "2026-07-16T01:03:00Z" };
     first.speeches = [speech3, speech4];
     first.speech_pagination = { page: 1, page_size: 2, total: 4, pages: 2, next_cursor: "signed-cursor", has_more: true };
-    const older = result(null);
+    const older = result("aff_1");
     older.speeches = [
       { ...audioSpeech("speech-1", "第一段发言"), audio_url: "", created_at: "2026-07-16T01:00:00Z" },
       { ...audioSpeech("speech-2", "第二段发言", "neg"), audio_url: "", created_at: "2026-07-16T01:01:00Z" },
@@ -431,19 +436,19 @@ describe("result archive download", () => {
       audio_url: "",
       created_at: `2026-07-16T01:0${id}:00Z`,
     });
-    const first = result(null);
+    const first = result("aff_1");
     first.speeches = [speech(3), speech(4)];
     first.speech_pagination = { page: 1, page_size: 2, total: 4, pages: 2, next_cursor: "cursor-initial", has_more: true };
-    const older = result(null);
+    const older = result("aff_1");
     older.speeches = [speech(1), speech(2)];
     older.speech_pagination = { page: 2, page_size: 2, total: 4, pages: 2, next_cursor: null, has_more: false };
-    const refreshed = result(null);
+    const refreshed = result("aff_1");
     refreshed.speeches = [speech(4), speech(5)];
     refreshed.speech_pagination = { page: 1, page_size: 2, total: 5, pages: 3, next_cursor: "cursor-refresh-1", has_more: true };
-    const refreshedMiddle = result(null);
+    const refreshedMiddle = result("aff_1");
     refreshedMiddle.speeches = [speech(2), speech(3)];
     refreshedMiddle.speech_pagination = { page: 2, page_size: 2, total: 5, pages: 3, next_cursor: "cursor-refresh-2", has_more: true };
-    const refreshedOldest = result(null);
+    const refreshedOldest = result("aff_1");
     refreshedOldest.speeches = [speech(1)];
     refreshedOldest.speech_pagination = { page: 3, page_size: 2, total: 5, pages: 3, next_cursor: null, has_more: false };
     const fetchMock = vi.fn()

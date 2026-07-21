@@ -167,6 +167,7 @@ export type Room = {
   can_speak: boolean;
   speak_reason: string;
   can_control: boolean;
+  can_view_transcript?: boolean;
   /** @deprecated Not emitted by the competition-only backend. */
   recording_consent?: RecordingConsent;
   seat_restore_requests?: SeatRestoreRequest[];

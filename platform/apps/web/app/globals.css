@@ -144,6 +144,7 @@ main:has(.dialog-overlay) { z-index: 120; }
 .match-history-action { min-height:40px; display:inline-flex; align-items:center; justify-content:center; gap:6px; border-radius:10px; color:#d9d1ff; font-size:13px; font-weight:700; }
 .match-history-action:hover { background:rgba(140,108,255,.1); color:white; }
 .field small { display:block; margin-top:7px; font-size:12px; }
+.field-hint { color:var(--muted); line-height:1.45; }
 .field-error { color:#ff9aaa; }
 .admin-filter-row { display:grid; grid-template-columns:minmax(220px,1fr) minmax(150px,220px) auto; gap:10px; align-items:center; margin-bottom:16px; }
 .admin-filter-row.admin-room-filter-row { grid-template-columns:minmax(220px,1fr) repeat(2,minmax(140px,200px)) auto auto; }

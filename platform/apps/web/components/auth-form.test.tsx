@@ -81,6 +81,12 @@ describe("AuthForm", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("shows the password requirement before registration submission", () => {
+    render(<AuthForm mode="register" />);
+    expect(screen.getByText(/至少 8 个字符/)).toBeInTheDocument();
+    expect(screen.getByLabelText("密码")).toHaveAttribute("aria-describedby", "auth-password-requirement");
+  });
+
   it("renders FastAPI validation errors as readable text", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       detail: [{ type: "missing", loc: ["body", "password"], msg: "Field required" }],

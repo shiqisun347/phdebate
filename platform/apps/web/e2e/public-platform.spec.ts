@@ -115,7 +115,7 @@ test("退役的教师和课堂路由不再构成产品入口", async ({ page }) 
   for (const path of ["teacher", "teacher/consents", "admin/classrooms"]) {
     const response = await page.goto(path, { waitUntil: "domcontentloaded" });
     expect(response?.status()).toBe(404);
-    await expect(page.getByRole("heading", { name: "404" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "没有找到这个页面" })).toBeVisible();
     await expect(page.getByText(/教师工作台|教学活动|学校与课堂/)).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
   }

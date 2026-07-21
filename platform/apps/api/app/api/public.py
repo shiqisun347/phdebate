@@ -424,6 +424,7 @@ def match_history(
     room = db.get(Room, match.room_id)
     if not can_view_room(db, room, user):
         raise HTTPException(status_code=403, detail="无权查看该比赛。")
+    public_projection = use_public_projection(db, room, user)
     try:
         speech_result = paginate_match_speeches(
             db,
@@ -441,7 +442,7 @@ def match_history(
             {
                 "seat_key": item.seat_key,
                 "stage_key": item.stage_key,
-                "content": item.content,
+                "content": "" if public_projection else item.content,
                 "audio_url": item.audio_url,
                 "can_request_correction": can_request_correction(db, room, item, user),
             }

@@ -252,7 +252,7 @@ def test_room_projection_labels_completed_caption_as_previous_speech(client: Tes
     projection = client.get(f"/api/rooms/{code}/public")
     assert projection.status_code == 200
     speech = projection.json()["room"]["speeches"][-1]
-    assert speech["content"] == "这是已经完成的上一段发言。"
+    assert speech["content"] == ""
     assert speech["speaker"] == "上一段发言 · 正方1辩"
     projected_event_types = {item["type"] for item in projection.json()["room"]["recent_events"]}
     assert "stage.started" in projected_event_types
@@ -5959,7 +5959,7 @@ def test_public_projection_redacts_internal_failures(client: TestClient, registe
         "seat_key": "neg_1",
         "speaker_type": "ai",
         "status": "playing",
-        "content": "匿名观战仍能看到实时字幕。",
+            "content": "",
         "playback_started_at": playback_started_at.replace(tzinfo=None).isoformat(),
         "stream_generation": "a" * 32,
         "stream_sample_rate": 24_000,

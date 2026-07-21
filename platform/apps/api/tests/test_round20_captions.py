@@ -5,7 +5,7 @@ from app.api.realtime import persist_asr_final
 from app.core.database import SessionLocal
 from app.models.entities import CaptionSegment, Match, Speech, TranscriptSegment
 from app.services.captions import StreamingCaptionWriter, _persist_agent_caption
-from app.services.room_service import anonymous_realtime_event, load_room, serialize_room
+from app.services.room_service import anonymous_event_payload, anonymous_realtime_event, load_room, serialize_room
 from sqlalchemy import select
 from test_platform import create_training_room
 
@@ -60,6 +60,7 @@ async def test_ai_caption_writer_publishes_clauses_without_mutating_transcript(r
         )
         assert [item.text for item in persisted] == ["第一句已经完整。", "第二句仍在继续。"]
         snapshot = serialize_room(db, room, None, public=True)
+        assert snapshot["active_speech"]["content"] == ""
         assert snapshot["speeches"][0]["content"] == ""
         assert snapshot["speeches"][0]["audio_url"] == "/api/media/speech.wav"
         assert [item["text"] for item in snapshot["caption_segments"]] == ["第一句已经完整。", "第二句仍在继续。"]
@@ -127,6 +128,25 @@ def test_public_caption_event_keeps_only_presentation_fields() -> None:
         "start_ms": 120,
         "end_ms": 840,
         "timing_basis": "agent_text",
+    }
+
+
+def test_public_match_event_never_exposes_authoritative_transcript_content() -> None:
+    projected = anonymous_event_payload(
+        "speech.completed",
+        {
+            "speech_id": "speech-1",
+            "seat_key": "aff_1",
+            "speaker_type": "human",
+            "content": "不可向观众回放的完整文字稿。",
+            "audio_url": "/media/room/speech-1.wav",
+        },
+    )
+    assert projected == {
+        "speech_id": "speech-1",
+        "seat_key": "aff_1",
+        "speaker_type": "human",
+        "audio_url": "/media/room/speech-1.wav",
     }
 
 

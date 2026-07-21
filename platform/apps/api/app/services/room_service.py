@@ -510,7 +510,11 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
                 "seat_key": active.seat_key,
                 "speaker_type": active.speaker_type,
                 "status": active.status,
-                "content": active.content,
+                # Public watchers may receive bounded, ephemeral caption
+                # segments while a speech is playing, but never the
+                # authoritative/replayable transcript. AI generation can
+                # populate this field before all of the text has been spoken.
+                "content": "" if public else active.content,
                 "playback_started_at": active.playback_started_at.isoformat() if active.playback_started_at else None,
                 "stream_generation": active.stream_generation,
                 "stream_sample_rate": active.stream_sample_rate,
@@ -544,6 +548,7 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
         "can_speak": allowed,
         "speak_reason": reason,
         "can_control": bool(user and can_control(db, room, user)),
+        "can_view_transcript": not public,
         "seat_restore_requests": restore_requests,
         "free_turn_queue": free_turn_queue,
         "failure_reason": (
@@ -653,7 +658,6 @@ ANONYMOUS_EVENT_FIELDS = frozenset(
         "deadline_at",
         "speech_id",
         "speaker_type",
-        "content",
         "audio_url",
         "duration_seconds",
         "side",

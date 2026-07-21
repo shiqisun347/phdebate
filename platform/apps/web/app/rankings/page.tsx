@@ -164,16 +164,20 @@ export default function RankingsPage() {
                   <tr key={item.user_id}>
                     <td data-label="排名">
                       {item.rank <= 3 ? (
-                        <Medal
-                          size={20}
-                          color={
-                            item.rank === 1
-                              ? "#ffcc6d"
-                              : item.rank === 2
-                                ? "#c9d1e4"
-                                : "#cf8d62"
-                          }
-                        />
+                        <>
+                          <Medal
+                            aria-hidden="true"
+                            size={20}
+                            color={
+                              item.rank === 1
+                                ? "#ffcc6d"
+                                : item.rank === 2
+                                  ? "#c9d1e4"
+                                  : "#cf8d62"
+                            }
+                          />
+                          <span>#{item.rank}</span>
+                        </>
                       ) : (
                         `#${item.rank}`
                       )}

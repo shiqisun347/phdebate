@@ -144,3 +144,35 @@ def test_collab_token_requires_csrf_room_access_and_short_expiry(register_user, 
         verify_transcript_collab_token(payload["token"], "room:another-room")
     with pytest.raises(ValueError):
         verify_transcript_collab_token(payload["token"], payload["document_name"], now_seconds=claims["exp"])
+
+
+def test_logged_in_public_spectator_cannot_obtain_transcript_collaboration_token(
+    register_user,
+    monkeypatch,
+) -> None:
+    owner = register_user("round20_collab_public_owner")
+    spectator = register_user("round20_collab_public_spectator")
+    created = owner.post(
+        "/api/rooms",
+        headers=csrf(owner),
+        json={
+            "competition_slug": "training-1v1",
+            "custom_topic": "观众不可查看协同文字稿",
+            "seat_key": "aff_1",
+            "visibility": "public",
+        },
+    )
+    assert created.status_code == 200
+    code = created.json()["room"]["code"]
+    assert owner.post(f"/api/rooms/{code}/ready", headers=csrf(owner), json={"ready": True}).status_code == 200
+    assert owner.post(f"/api/rooms/{code}/start", headers=csrf(owner), json={}).status_code == 200
+    monkeypatch.setenv("TRANSCRIPT_COLLAB_HMAC_SECRET", "round20-collab-public-secret-at-least-32")
+
+    public_room = spectator.get(f"/api/rooms/{code}")
+    assert public_room.status_code == 200
+    assert public_room.json()["room"]["my_seat"] is None
+    assert public_room.json()["room"]["can_control"] is False
+
+    denied = spectator.post(f"/api/rooms/{code}/transcript-collab-token", headers=csrf(spectator))
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "观众不可查看文字稿。"

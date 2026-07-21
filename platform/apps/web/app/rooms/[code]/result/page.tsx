@@ -352,6 +352,7 @@ export default function ResultPage() {
     data.match.status,
   );
   const hasParticipantAccess = Boolean(data.room.my_seat || data.room.can_control);
+  const canViewTranscript = data.room.can_view_transcript ?? hasParticipantAccess;
   const liveRoomHref = `/rooms/${code}/${hasParticipantAccess ? "debate" : "watch"}`;
   const winner =
     data.match.status === "terminated"
@@ -401,7 +402,9 @@ export default function ResultPage() {
           ? "发言已经结束，裁判正在整理评分。页面会在赛果生成后自动同步。"
           : ["running", "preparing", "lobby"].includes(data.room.status)
             ? "这是比赛过程记录，不是最终成绩。返回现场可继续当前比赛。"
-            : "赛果已经确认，逐字稿、评分和积分变化均可在下方回溯。";
+            : canViewTranscript
+              ? "赛果已经确认，逐字稿、评分和积分变化均可在下方回溯。"
+              : "赛果已经确认，评分、比赛录音和积分变化均可在下方回溯。";
   const liveRecordSummary = data.room.status === "paused"
     ? `当前停在“${data.room.current_stage?.name || "比赛阶段"}”，已有发言和事件均已保存；恢复后将从这里继续。`
     : `当前阶段为“${data.room.current_stage?.name || roomStatusLabel[data.room.status] || data.room.status}”，本页只记录过程，不代表最终成绩。`;
@@ -621,13 +624,13 @@ export default function ResultPage() {
 
       <section className="panel" style={{ marginTop: 18 }}>
         <div className="panel-title">
-          <h2>完整辩论记录</h2>
+          <h2>{canViewTranscript ? "完整辩论记录" : "比赛录音回放"}</h2>
           <span className="badge">
             已加载 {data.speeches.length} / {data.speech_pagination.total}
           </span>
         </div>
         {speechCorrectionError && <div className="error-box" role="alert">{speechCorrectionError}</div>}
-        <div className="transcript-list" role={data.speeches.length ? "list" : undefined} aria-label={data.speeches.length ? "完整辩论记录" : undefined}>
+        <div className="transcript-list" role={data.speeches.length ? "list" : undefined} aria-label={data.speeches.length ? (canViewTranscript ? "完整辩论记录" : "比赛录音回放") : undefined}>
           {data.speeches.map((speech) => (
             <article className="transcript-item" role="listitem" key={speech.id}>
               <header>
@@ -664,12 +667,14 @@ export default function ResultPage() {
                   </span>
                 )}
               </header>
-              <p>
-                {speech.content ||
-                  (["failed", "failed_retried"].includes(speech.status)
-                    ? "（服务失败，未生成可用发言）"
-                    : "（该发言仅保存了音频）")}
-              </p>
+              {canViewTranscript && (
+                <p>
+                  {speech.content ||
+                    (["failed", "failed_retried"].includes(speech.status)
+                      ? "（服务失败，未生成可用发言）"
+                      : "（该发言仅保存了音频）")}
+                </p>
+              )}
               {speech.can_request_correction && (
                 <SpeechCorrectionControl
                   roomCode={code}

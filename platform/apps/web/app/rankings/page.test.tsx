@@ -34,6 +34,21 @@ function ranking(name: string, userId: string) {
 describe("rankings", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("exposes a textual rank alongside podium medals", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/competitions")) return Promise.resolve(response({ items: [competition] }));
+      if (url.includes("/api/seasons")) return Promise.resolve(response({ items: seasons }));
+      if (url.includes("/api/rankings")) return Promise.resolve(response({ items: [ranking("榜首", "first")] }));
+      return Promise.reject(new Error(`unexpected request: ${url}`));
+    }));
+
+    render(<RankingsPage />);
+
+    expect(await screen.findByText("#1")).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: /#1/ })).toBeInTheDocument();
+  });
+
   it("keeps the latest selected season when an older request finishes late", async () => {
     let resolveSeasonB!: (value: Response) => void;
     let resolveSeasonC!: (value: Response) => void;

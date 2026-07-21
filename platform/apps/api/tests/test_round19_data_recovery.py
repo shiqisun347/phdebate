@@ -86,6 +86,7 @@ def _admin(client: TestClient) -> TestClient:
 def test_human_correction_is_idempotent_admin_reviewed_and_archive_auditable(client, register_user) -> None:
     owner = register_user("round19_correction_owner")
     outsider = register_user("round19_correction_outsider")
+    spectator = register_user("round19_correction_spectator")
     code, match_id, speech_id = _completed_human_match(owner, "Round19 真人误提交纠正闭环")
     outsider_id = outsider.get("/api/auth/session").json()["user"]["id"]
     # Current seat state is mutable repair state and must not redefine who
@@ -252,10 +253,18 @@ def test_human_correction_is_idempotent_admin_reviewed_and_archive_auditable(cli
     assert owner_speech["content"] == payload["proposed_content"]
     assert owner_speech["can_request_correction"] is True
     outsider_result = outsider.get(f"/api/rooms/{code}/result").json()
-    assert next(item for item in outsider_result["speeches"] if item["id"] == speech_id)["can_request_correction"] is False
+    outsider_speech = next(item for item in outsider_result["speeches"] if item["id"] == speech_id)
+    assert outsider_speech["content"] == payload["proposed_content"]
+    assert outsider_speech["can_request_correction"] is False
+    spectator_result = spectator.get(f"/api/rooms/{code}/result").json()
+    assert next(item for item in spectator_result["speeches"] if item["id"] == speech_id)["content"] == ""
+    anonymous_result = client.get(f"/api/rooms/{code}/result").json()
+    assert next(item for item in anonymous_result["speeches"] if item["id"] == speech_id)["content"] == ""
     history = owner.get(f"/api/matches/{match_id}/history").json()
     original_history = next(item for item in history["speeches"] if item["content"] == payload["proposed_content"])
     assert original_history["can_request_correction"] is True
+    spectator_history = spectator.get(f"/api/matches/{match_id}/history").json()
+    assert all(item["content"] == "" for item in spectator_history["speeches"])
     personal = owner.get("/api/me").json()
     assert any(item["match_id"] == match_id for item in personal["history"])
     participant_archive = owner.get(f"/api/matches/{match_id}/archive").json()

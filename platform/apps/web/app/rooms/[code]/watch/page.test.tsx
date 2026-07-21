@@ -47,7 +47,7 @@ describe("watch result redirect", () => {
     mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
     render(<WatchPage />);
     expect(mocks.push).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "文字记录" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "文字记录" })).not.toBeInTheDocument();
   });
 
   it("tells a redirected non-owner why the control console became read-only", async () => {
