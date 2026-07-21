@@ -25,6 +25,8 @@ def test_source_sync_preserves_all_server_owned_paths() -> None:
         "/.api-primary",
         "/.api-secondary",
         "/.web-current",
+        "/.transcript-collab-current",
+        "/.transcript-collab-releases/",
         "/apps/web/node_modules/",
         "/apps/web/.next/",
         "/assets/moss-prompts/audio/",
@@ -59,6 +61,10 @@ def test_source_sync_replaces_code_but_preserves_server_runtime(tmp_path: Path) 
     (destination / "services" / "voice" / ".venv-cu128" / "python").write_text("keep\n")
     (destination / ".env").write_text("secret\n")
     (destination / ".web-current").symlink_to(destination / "runtime" / "web-release")
+    collab_release = destination / ".transcript-collab-releases" / "current"
+    collab_release.mkdir(parents=True)
+    (collab_release / "server.js").write_text("keep\n")
+    (destination / ".transcript-collab-current").symlink_to(collab_release)
     (destination / "obsolete.py").write_text("delete\n")
 
     subprocess.run(["git", "init", "-q", str(source)], check=True)
@@ -74,6 +80,8 @@ def test_source_sync_replaces_code_but_preserves_server_runtime(tmp_path: Path) 
     assert not (destination / "obsolete.py").exists()
     assert (destination / ".env").read_text() == "secret\n"
     assert (destination / ".web-current").is_symlink()
+    assert (destination / ".transcript-collab-current").is_symlink()
+    assert (collab_release / "server.js").read_text() == "keep\n"
     assert (destination / "runtime" / "state.json").read_text() == "keep\n"
     assert (destination / "services" / "voice" / ".venv-cu128" / "python").read_text() == "keep\n"
     assert (destination / "runtime" / "source-commit").read_text().strip()
