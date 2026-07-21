@@ -1725,6 +1725,63 @@ async def test_room_websocket_rejects_twenty_first_spectator(register_user, monk
 
 
 @pytest.mark.asyncio
+async def test_anonymous_spectator_releases_database_session_before_redis_reservation(
+    register_user, monkeypatch
+) -> None:
+    owner = register_user("spectator_database_lease")
+    room_data = create_training_room(owner, "匿名观众连接不能占用数据库事务")
+    code = room_data["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.status = "running"
+        db.commit()
+    session_depth = 0
+    original_session_factory = realtime_api.SessionLocal
+
+    class TrackingSession:
+        def __init__(self) -> None:
+            self.session = original_session_factory()
+
+        def __enter__(self):
+            nonlocal session_depth
+            session_depth += 1
+            return self.session
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            nonlocal session_depth
+            try:
+                self.session.close()
+            finally:
+                session_depth -= 1
+
+    async def reject_spectator(*_args, **_kwargs) -> bool:
+        assert session_depth == 0
+        return False
+
+    monkeypatch.setattr(realtime_api, "SessionLocal", TrackingSession)
+    monkeypatch.setattr(realtime_api.room_hub, "spectator_join", reject_spectator)
+
+    class SpectatorWebSocket:
+        headers = {"origin": "http://localhost:3200"}
+        cookies: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.close_codes: list[int] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.close_codes.append(code)
+
+    websocket = SpectatorWebSocket()
+    await realtime_api.room_websocket(websocket, code)
+
+    assert session_depth == 0
+    assert websocket.close_codes == [4429]
+
+
+@pytest.mark.asyncio
 async def test_room_owner_websocket_never_consumes_a_spectator_slot(register_user, monkeypatch) -> None:
     owner = register_user("spectator_limit_exempt_owner")
     room_data = create_training_room(owner, "辩手和房主不占观战名额")

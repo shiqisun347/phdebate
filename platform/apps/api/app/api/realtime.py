@@ -355,10 +355,13 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 if not can_view_room(db, room, None):
                     await close_socket(4401)
                     return
-                if not await reserve_spectator():
-                    return
         except HTTPException:
             await close_socket(4404)
+            return
+        # Do not await Redis while the synchronous SQLAlchemy session is open.
+        # A burst of anonymous spectators would otherwise retain one read
+        # transaction per handshake and exhaust the worker's connection pool.
+        if not await reserve_spectator():
             return
         try:
             public_initial_message = await public_snapshot_cache.initial_message(code)
