@@ -11,7 +11,7 @@ PYTHON_BIN="${MOSS_GATEWAY_PYTHON:-$ROOT/services/moss-realtime-gateway/.venv-cu
 NVIDIA_SMI="${NVIDIA_SMI:-nvidia-smi}"
 EXPECTED_NAME="NVIDIA GeForce RTX 3090"
 EXPECTED_MEMORY_MIB="24576"
-EXPECTED_VBIOS="94.02.26.88.08"
+EXPECTED_VBIOS="94.02.42.00.02"
 
 mapfile -t gpu_rows < <(
   "$NVIDIA_SMI" --query-gpu=uuid,name,memory.total,vbios_version --format=csv,noheader,nounits \

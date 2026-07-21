@@ -65,7 +65,7 @@ def test_production_moss_gateway_recovers_after_a_host_reboot() -> None:
     launcher = read("run-moss-production.sh")
     assert 'EXPECTED_NAME="NVIDIA GeForce RTX 3090"' in launcher
     assert 'EXPECTED_MEMORY_MIB="24576"' in launcher
-    assert 'EXPECTED_VBIOS="94.02.26.88.08"' in launcher
+    assert 'EXPECTED_VBIOS="94.02.42.00.02"' in launcher
     assert "gpu_fingerprint.py" in launcher
 
 
