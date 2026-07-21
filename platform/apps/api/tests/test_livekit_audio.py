@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import jwt
 import pytest
 from app.core.config import Settings, settings
+from app.core.database import SessionLocal
 from app.services import livekit_audio as livekit_audio_module
 from app.services import match_engine as match_engine_module
 from app.services.livekit_audio import (
@@ -19,6 +20,7 @@ from app.services.livekit_audio import (
     StreamingPcm16Resampler,
     livekit_audio_registry,
 )
+from app.services.room_service import load_room
 from conftest import csrf
 from fastapi.testclient import TestClient
 
@@ -503,9 +505,13 @@ def create_public_room(client: TestClient) -> dict:
     return response.json()["room"]
 
 
-def test_rtc_token_is_short_lived_subscribe_only_and_checks_room_visibility(register_user, monkeypatch) -> None:
+def test_rtc_token_is_short_lived_subscribe_only_and_checks_room_visibility(client, register_user, monkeypatch) -> None:
     owner = register_user("rtc_token")
     room = create_public_room(owner)
+    with SessionLocal() as db:
+        stored = load_room(db, room["code"], lock=True)
+        stored.status = "running"
+        db.commit()
     ensure_room = AsyncMock(side_effect=AssertionError("API process must not create the Agent publisher"))
     monkeypatch.setattr(livekit_audio_registry, "ensure_room", ensure_room)
     monkeypatch.setattr(settings, "webrtc_audio_enabled", True)
@@ -532,6 +538,10 @@ def test_rtc_token_is_short_lived_subscribe_only_and_checks_room_visibility(regi
     assert claims["exp"] - claims["nbf"] == 300
     assert claims["sub"].endswith(":device:chrome-qa")
     ensure_room.assert_not_awaited()
+
+    anonymous = client.post(f"/api/rooms/{room['code']}/rtc-token")
+    assert anonymous.status_code == 403
+    assert anonymous.json()["detail"] == "请先进入观战页面并建立实时连接。"
 
     with pytest.raises(ValueError, match="URL、API key"):
         Settings(

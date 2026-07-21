@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import app.services.realtime as realtime_service
+import pytest
 from app.services.realtime import AudioStreamAbortRegistry, RoomHub
 
 
@@ -301,6 +302,31 @@ async def test_spectator_refresh_evicts_only_when_atomic_rejoin_hits_global_limi
 
     monkeypatch.setattr(hub, "_presence_eval", evaluate)
     assert await hub.spectator_refresh("123456", connection_id="watcher-1") is False
+
+
+async def test_new_spectator_redis_failure_is_not_reported_as_capacity_full(monkeypatch) -> None:
+    hub = RoomHub()
+    monkeypatch.setattr(realtime_service.settings, "app_env", "production")
+
+    async def unavailable(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(hub, "_presence_eval", unavailable)
+    with pytest.raises(realtime_service.SpectatorAdmissionUnavailable):
+        await hub.spectator_join("123456", connection_id="watcher-new")
+
+
+async def test_auxiliary_audio_requires_an_existing_spectator_lease(monkeypatch) -> None:
+    hub = RoomHub()
+    results = iter([0, 1])
+
+    async def evaluate(script, _keys, _args):
+        assert script == realtime_service._SPECTATOR_REFRESH_SCRIPT
+        return next(results)
+
+    monkeypatch.setattr(hub, "_presence_eval", evaluate)
+    assert await hub.spectator_authorized("123456", connection_id="not-admitted") is False
+    assert await hub.spectator_authorized("123456", connection_id="admitted") is True
 
 
 async def test_presence_timeout_does_not_disconnect_healthy_room_subscriptions(monkeypatch) -> None:

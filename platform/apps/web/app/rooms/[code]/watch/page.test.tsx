@@ -4,14 +4,28 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import WatchPage from "@/app/rooms/[code]/watch/page";
 import type { Room } from "@/lib/types";
 
-const mocks = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), room: null as Room | null }));
+const mocks = vi.hoisted(() => ({
+  push: vi.fn(),
+  replace: vi.fn(),
+  reconnect: vi.fn(),
+  room: null as Room | null,
+  error: "",
+  connectionBlockedReason: null as "capacity_full" | null,
+}));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ code: "123456" }),
   useRouter: () => ({ push: mocks.push, replace: mocks.replace }),
 }));
 vi.mock("@/lib/use-room", () => ({
-  useRoom: () => ({ room: mocks.room, connected: true, error: "", reconnect: vi.fn(), liveEvent: null }),
+  useRoom: () => ({
+    room: mocks.room,
+    connected: true,
+    error: mocks.error,
+    reconnect: mocks.reconnect,
+    connectionBlockedReason: mocks.connectionBlockedReason,
+    liveEvent: null,
+  }),
 }));
 vi.mock("@/components/debate-stage", () => ({ DebateStage: () => (
   <div className="stage-page">
@@ -19,7 +33,7 @@ vi.mock("@/components/debate-stage", () => ({ DebateStage: () => (
       <div className="team-title">正方</div>
       <div className="stage-seat active"><span className="sr-only">当前发言席位</span></div>
     </aside>
-    <div className="subtitle-stage"><p>观战舞台</p></div>
+    <div className="watch-stage-focus">观战舞台</div>
   </div>
 ) }));
 
@@ -27,7 +41,22 @@ describe("watch result redirect", () => {
   beforeEach(() => {
     mocks.push.mockReset();
     mocks.replace.mockReset();
+    mocks.reconnect.mockReset();
+    mocks.error = "";
+    mocks.connectionBlockedReason = null;
     window.history.replaceState({}, "", "/rooms/123456/watch");
+  });
+
+  it("does not offer an immediate retry when the global spectator capacity is full", () => {
+    mocks.room = null;
+    mocks.error = "系统观战总人数已达 5 人，请稍后重试。";
+    mocks.connectionBlockedReason = "capacity_full";
+
+    render(<WatchPage />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("系统观战总人数已达 5 人");
+    expect(screen.queryByRole("button", { name: "重新尝试" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回赛事大厅" })).toHaveAttribute("href", "/");
   });
 
   it("redirects a published match to its result", async () => {

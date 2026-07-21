@@ -306,10 +306,67 @@ describe("DebateStage", () => {
   });
 
   it("keeps anonymous watch mode read-only", () => {
-    const { container } = render(<DebateStage room={room({ my_seat: null, can_speak: false, can_control: false })} connected mode="watch" />);
+    const privateTranscript = "这段文字只能供辩手核对，绝不能出现在观战页";
+    const { container } = render(<DebateStage room={room({
+      my_seat: null,
+      can_speak: false,
+      can_control: false,
+      active_speech: { id: "private-speech", seat_key: "aff_1", speaker_type: "human", status: "speaking", content: privateTranscript },
+      speeches: [{
+        id: "private-speech",
+        seat_key: "aff_1",
+        speaker: "张三",
+        stage_key: "aff_case",
+        content: privateTranscript,
+        audio_url: "",
+        duration_seconds: 0,
+        playback_started_at: null,
+        playback_ends_at: null,
+        status: "speaking",
+        created_at: new Date().toISOString(),
+      }],
+    })} connected mode="watch" />);
     expect(screen.queryByRole("button", { name: /开始发言|等待轮次|结束发言/ })).not.toBeInTheDocument();
     expect(screen.getByText("公开只读画面")).toBeInTheDocument();
+    expect(screen.getByLabelText("当前赛况")).toHaveTextContent("张三");
+    expect(screen.getByLabelText("当前赛况")).toHaveTextContent("正在发言");
+    expect(screen.queryByText(privateTranscript)).not.toBeInTheDocument();
+    expect(screen.queryByText("比赛发言将在这里实时呈现")).not.toBeInTheDocument();
+    expect(container.querySelector(".subtitle-stage")).not.toBeInTheDocument();
     expect(container.firstElementChild).toHaveClass("watch-mode");
+  });
+
+  it("presents a service failure as one consistent paused state", () => {
+    render(<DebateStage room={room({
+      status: "paused",
+      current_stage: null,
+      failure_reason: "private provider stack trace",
+      my_seat: null,
+      can_control: false,
+    })} connected mode="watch" />);
+
+    expect(screen.getByText("服务异常暂停")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "比赛已安全暂停" })).toBeInTheDocument();
+    expect(screen.queryByText("等待比赛开始")).not.toBeInTheDocument();
+    expect(screen.queryByText("比赛已暂停")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("比赛因临时服务异常暂停");
+  });
+
+  it("does not offer reconnect controls after spectator capacity rejection", () => {
+    const onReconnect = vi.fn();
+    render(<DebateStage
+      room={room({ my_seat: null, can_control: false })}
+      connected={false}
+      connectionError="系统观战总人数已达 5 人，请稍后重试。"
+      connectionBlockedReason="capacity_full"
+      onReconnect={onReconnect}
+      mode="watch"
+    />);
+
+    expect(screen.getByText("观战已满")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("当前连接不会自动重试");
+    expect(screen.queryByRole("button", { name: "立即重连" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回赛事大厅" })).toHaveAttribute("href", "/");
   });
 
   it("freezes and resumes the fixed-stage clock around AI preparation", () => {
@@ -472,7 +529,7 @@ describe("DebateStage", () => {
       onRoomChanged={onRoomChanged}
     />);
 
-    expect(screen.getByText("比赛遇到临时服务异常，已自动安全暂停。")).toBeInTheDocument();
+    expect(screen.getByText("比赛因临时服务异常暂停。")).toBeInTheDocument();
     expect(screen.getByText("比赛进度已保存，确认后可重试当前步骤。")).toBeInTheDocument();
     expect(screen.queryByText(/RedisConnectionError|secret-host|internal\/provider/)).not.toBeInTheDocument();
     const notices = screen.getAllByRole("alert");
@@ -534,7 +591,7 @@ describe("DebateStage", () => {
     expect(await screen.findByText("暂时无法重试，请稍后再试；比赛进度已安全保留。")).toBeInTheDocument();
 
     rerender(<DebateStage room={recoveredRoom} connected mode="debate" onRoomChanged={onRoomChanged} />);
-    expect(screen.queryByText("比赛遇到临时服务异常，已自动安全暂停。")).not.toBeInTheDocument();
+    expect(screen.queryByText("比赛因临时服务异常暂停。")).not.toBeInTheDocument();
     rerender(<DebateStage room={room({
       status: "paused",
       seq: 9,
@@ -560,7 +617,7 @@ describe("DebateStage", () => {
     })} connected mode="watch" />);
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("比赛遇到临时服务异常，已自动安全暂停。");
+    expect(alert).toHaveTextContent("比赛因临时服务异常暂停。");
     expect(alert).toHaveTextContent("请等待房主在比赛控制页处理；恢复后页面会自动同步");
     expect(alert).not.toHaveTextContent("stack trace");
     expect(screen.queryByRole("button", { name: /重试异常步骤/ })).not.toBeInTheDocument();

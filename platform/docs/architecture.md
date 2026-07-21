@@ -1,4 +1,6 @@
-# 稷下辩论平台架构
+# 稷下辩论平台架构（历史摘要）
+
+> 本文件不再作为规范性架构文档。唯一官方系统说明见 [`official/system.html`](official/system.html)，用户流程见 [`official/user.html`](official/user.html)。本页只保留供旧链接引用的历史摘要。
 
 - PostgreSQL 保存用户、赛事、房间、追加式事件、发言、比赛结果和排行榜等权威业务数据。
 - Redis 承载房间级实时消息、在线状态、控制租约、分布式锁和 Dramatiq 任务。

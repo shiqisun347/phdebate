@@ -1442,42 +1442,68 @@ def test_audio_websocket_streams_fixed_pcm_frames_with_generation_seq_and_pts(cl
     ]
     assert all(len(pcm) == samples * 2 for _seq, _pts, samples, pcm in frames)
 
-    with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}) as public_socket:
-        public_socket.send_json(
-            {
-                "type": "subscribe",
-                "protocol_version": 1,
-                "speech_id": speech_id,
-                "generation": generation,
-                "after_seq": 1,
-            }
-        )
-        assert public_socket.receive_json()["start_seq"] == 2
+    ticket = realtime_service.new_spectator_ticket()
+    client.cookies.set(realtime_service.SPECTATOR_TICKET_COOKIE, ticket)
+    connection_id = realtime_service.spectator_connection_id(code, ticket)
+    realtime_api.room_hub._spectator_leases[code].add(connection_id)
+    original_spectator_authorized = realtime_api.room_hub.spectator_authorized
+    realtime_api.room_hub.spectator_authorized = AsyncMock(return_value=True)
 
-    with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}) as future_socket:
-        future_socket.send_json(
-            {
-                "type": "subscribe",
-                "protocol_version": 1,
-                "speech_id": speech_id,
-                "generation": generation,
-                "after_seq": 999,
-            }
-        )
-        future_start = future_socket.receive_json()
-        assert future_start["start_seq"] == 0
-        first_packet = future_socket.receive()
-        assert first_packet.get("bytes") is not None
-        _magic, _version, _flags, _generation_id, seq, pts, samples = realtime_api.AUDIO_STREAM_BINARY_HEADER.unpack(
-            first_packet["bytes"][: realtime_api.AUDIO_STREAM_BINARY_HEADER.size]
-        )
-        assert (seq, pts, samples) == (0, 0, 960)
+    try:
+        with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}) as public_socket:
+            public_socket.send_json(
+                {
+                    "type": "subscribe",
+                    "protocol_version": 1,
+                    "speech_id": speech_id,
+                    "generation": generation,
+                    "after_seq": 1,
+                }
+            )
+            assert public_socket.receive_json()["start_seq"] == 2
+
+        with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}) as future_socket:
+            future_socket.send_json(
+                {
+                    "type": "subscribe",
+                    "protocol_version": 1,
+                    "speech_id": speech_id,
+                    "generation": generation,
+                    "after_seq": 999,
+                }
+            )
+            future_start = future_socket.receive_json()
+            assert future_start["start_seq"] == 0
+            first_packet = future_socket.receive()
+            assert first_packet.get("bytes") is not None
+            _magic, _version, _flags, _generation_id, seq, pts, samples = realtime_api.AUDIO_STREAM_BINARY_HEADER.unpack(
+                first_packet["bytes"][: realtime_api.AUDIO_STREAM_BINARY_HEADER.size]
+            )
+            assert (seq, pts, samples) == (0, 0, 960)
+    finally:
+        realtime_api.room_hub.spectator_authorized = original_spectator_authorized
+        realtime_api.room_hub._spectator_leases[code].discard(connection_id)
     with SessionLocal() as db:
         stored_room = load_room(db, code, lock=True)
         stored_speech = db.get(Speech, speech_id)
         stored_room.status = "terminated"
         stored_speech.status = "completed"
         db.commit()
+
+
+def test_anonymous_audio_websocket_cannot_bypass_spectator_admission(client: TestClient, register_user) -> None:
+    owner = register_user("audio_spectator_admission_owner")
+    code = create_training_room(owner, "匿名音频必须先占用观战名额")["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.status = "running"
+        db.commit()
+
+    client.cookies.pop(realtime_service.SPECTATOR_TICKET_COOKIE, None)
+    with pytest.raises(WebSocketDisconnect) as rejected:
+        with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}):
+            pass
+    assert rejected.value.code == 4401
 
 
 def test_audio_websocket_flow_control_bounds_initial_burst(client: TestClient, register_user) -> None:
@@ -1673,24 +1699,33 @@ def test_anonymous_audio_stream_is_revoked_when_a_public_room_becomes_private(cl
         audio.setframerate(24_000)
         audio.writeframes(b"")
 
-    with pytest.raises(WebSocketDisconnect) as revoked:
-        with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}) as socket:
-            socket.send_json(
-                {
-                    "type": "subscribe",
-                    "protocol_version": 1,
-                    "speech_id": speech_id,
-                    "generation": generation,
-                    "after_seq": -1,
-                }
-            )
-            assert socket.receive_json()["type"] == "audio.start"
-            with SessionLocal() as db:
-                room = load_room(db, code, lock=True)
-                room.visibility = "private"
-                db.commit()
-            socket.receive_json()
-    assert revoked.value.code == 4403
+    ticket = realtime_service.new_spectator_ticket()
+    client.cookies.set(realtime_service.SPECTATOR_TICKET_COOKIE, ticket)
+    connection_id = realtime_service.spectator_connection_id(code, ticket)
+    original_spectator_authorized = realtime_api.room_hub.spectator_authorized
+    realtime_api.room_hub.spectator_authorized = AsyncMock(return_value=True)
+    try:
+        with pytest.raises(WebSocketDisconnect) as revoked:
+            with client.websocket_connect(f"/ws/rooms/{code}/audio", headers={"Origin": "http://localhost:3200"}) as socket:
+                socket.send_json(
+                    {
+                        "type": "subscribe",
+                        "protocol_version": 1,
+                        "speech_id": speech_id,
+                        "generation": generation,
+                        "after_seq": -1,
+                    }
+                )
+                assert socket.receive_json()["type"] == "audio.start"
+                with SessionLocal() as db:
+                    room = load_room(db, code, lock=True)
+                    room.visibility = "private"
+                    db.commit()
+                socket.receive_json()
+        assert revoked.value.code == 4403
+    finally:
+        realtime_api.room_hub.spectator_authorized = original_spectator_authorized
+        realtime_api.room_hub._spectator_leases[code].discard(connection_id)
     with SessionLocal() as db:
         stored_room = load_room(db, code, lock=True)
         stored_speech = db.get(Speech, speech_id)
@@ -1775,6 +1810,39 @@ async def test_room_websocket_rejects_sixth_spectator(register_user, monkeypatch
     join.assert_awaited_once()
     leave.assert_not_awaited()
     assert websocket.close_codes == [4429]
+
+
+@pytest.mark.asyncio
+async def test_room_websocket_uses_retryable_close_when_spectator_authority_is_down(register_user, monkeypatch) -> None:
+    owner = register_user("spectator_authority_down_owner")
+    room_data = create_training_room(owner, "观战容量服务故障不能误报满员")
+    code = room_data["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.status = "running"
+        db.commit()
+
+    async def unavailable(*_args, **_kwargs):
+        raise realtime_service.SpectatorAdmissionUnavailable
+
+    monkeypatch.setattr(realtime_api.room_hub, "spectator_join", unavailable)
+
+    class SpectatorWebSocket:
+        headers = {"origin": "http://localhost:3200"}
+        cookies: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.close_codes: list[int] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.close_codes.append(code)
+
+    websocket = SpectatorWebSocket()
+    await realtime_api.room_websocket(websocket, code)
+    assert websocket.close_codes == [1013]
 
 
 @pytest.mark.asyncio
@@ -6519,7 +6587,7 @@ async def test_moss_formal_speech_waits_for_complete_wav_then_publishes_stable_1
 
     await match_engine.process_room(code)
 
-    assert order == ["agent-final", "moss-wav", "next-prefetch", "livekit-publish"]
+    assert order == ["agent-final", "next-prefetch", "moss-wav", "livekit-publish"]
     with SessionLocal() as db:
         target_room = load_room(db, code)
         speech = db.scalar(select(Speech).where(Speech.room_id == target_room.id, Speech.stage_key == "neg_1_case"))

@@ -590,6 +590,10 @@ th { color: #838faa; font-weight: 600; }
 .subtitle-stage p { margin:0; line-height:1.85; font-size:clamp(14px,1.4vw,20px); max-height:110px; overflow:auto; }
 .subtitle-stage p:focus-visible { outline:2px solid var(--cyan); outline-offset:6px; border-radius:8px; }
 .subtitle-stage small { color:#8b96b1; margin-top:10px; }
+.watch-stage-focus { width:min(620px,92%); min-height:104px; display:grid; place-content:center; gap:7px; padding:18px 28px; border-block:1px solid rgba(151,172,224,.15); text-align:center; }
+.watch-stage-focus span { color:#8fe9ff; font-size:11px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
+.watch-stage-focus strong { color:#eef4ff; font-size:clamp(17px,2vw,24px); line-height:1.35; }
+.watch-stage-focus small { color:#77849e; font-size:11px; line-height:1.5; }
 .stage-progress { display:flex; align-items:center; gap:7px; margin-top:22px; }
 .stage-progress i { width:24px; height:3px; border-radius:3px; background:#27314a; }
 .stage-progress i.done { background:#5f52b9; }
@@ -624,6 +628,9 @@ th { color: #838faa; font-weight: 600; }
 .stage-failure-warning button:disabled { cursor:wait; opacity:.65; }
 .stage-connection-warning { justify-self:center; width:min(560px,100%); display:flex; align-items:center; justify-content:center; gap:8px; padding:10px 14px; border:1px solid rgba(255,184,91,.5); border-radius:11px; background:rgba(91,56,19,.94); color:#ffe2ad; font-size:12px; text-align:center; box-shadow:0 14px 40px rgba(0,0,0,.32); }
 .stage-connection-warning button { flex:0 0 auto; border:0; background:transparent; color:#fff2d6; font-weight:800; text-decoration:underline; cursor:pointer; }
+.stage-connection-warning a { flex:0 0 auto; color:#fff2d6; font-weight:800; text-decoration:underline; }
+.stage-connection-warning.blocked { border-color:rgba(126,151,214,.5); background:rgba(31,43,76,.96); color:#dce6ff; }
+.connection.blocked { color:#aab8d9; border-color:rgba(132,151,202,.28); background:rgba(52,65,105,.28); }
 .stage-transcript-review { position:fixed; z-index:101; left:50%; bottom:112px; width:min(560px,calc(100% - 32px)); transform:translateX(-50%); padding:16px; box-shadow:0 24px 70px rgba(0,0,0,.48); }
 .stage-transcript-trigger { position:fixed; z-index:102; top:96px; right:20px; min-height:42px; padding:0 14px; border:1px solid rgba(117,145,226,.42); border-radius:999px; background:rgba(10,17,36,.88); color:#e7ecfb; display:inline-flex; align-items:center; gap:8px; box-shadow:0 12px 32px rgba(0,0,0,.28); backdrop-filter:blur(14px); cursor:pointer; }
 .stage-transcript-trigger:hover { border-color:rgba(126,97,255,.78); background:rgba(21,25,55,.94); }
@@ -737,6 +744,9 @@ th { color: #838faa; font-weight: 600; }
   .timer-orb strong { font-size:31px; }
   .subtitle-stage { min-height:95px; padding:14px 20px; }
   .subtitle-stage p { font-size:13px; max-height:65px; }
+  .watch-stage-focus { width:100%; min-height:72px; padding:10px 12px; gap:4px; }
+  .watch-stage-focus strong { font-size:15px; }
+  .watch-stage-focus small { font-size:9px; }
   .stage-progress { display:none; }
   .team-column { grid-row:2; display:grid; gap:5px; align-content:start; }
   .team-title span { font-size:14px; }

@@ -165,6 +165,10 @@ describe("useRoom", () => {
     });
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(result.current.error).toBe("系统观战总人数已达 5 人，请稍后重试。");
+    expect(result.current.connectionBlockedReason).toBe("capacity_full");
+    act(() => result.current.reconnect());
+    act(() => { vi.advanceTimersByTime(60_000); });
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
   it("closes a half-open connection when no server message arrives", () => {

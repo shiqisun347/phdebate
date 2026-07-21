@@ -280,3 +280,56 @@ def test_stale_human_speech_cannot_bypass_pause_or_stage_authority(register_user
         speech = db.get(Speech, started.json()["speech_id"])
         assert room.current_stage_index == 1 and room.status == "running"
         assert speech and speech.status == "speaking" and speech.stage_key == "human_case"
+
+
+def test_owner_can_safely_pause_and_restart_a_stuck_human_speech(register_user) -> None:
+    owner = register_user("round8_emergency_human_pause")
+    code = _start(owner, "Round8 真人发言卡死安全恢复")
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.template_snapshot = [
+            {"key": "human_case", "name": "正方发言", "kind": "speech", "seat": "aff_1", "duration": 60}
+        ]
+        room.current_stage_index = 0
+        room.status = "running"
+        room.stage_started_at = now()
+        room.stage_deadline_at = now() + timedelta(seconds=60)
+        db.commit()
+
+    lease_headers = csrf(owner) | {"X-Control-Lease": "round8-emergency-device"}
+    assert owner.post(f"/api/rooms/{code}/control-lease", headers=lease_headers, json={}).status_code == 200
+    started = owner.post(f"/api/rooms/{code}/speech/start", headers=lease_headers, json={})
+    assert started.status_code == 200
+
+    regular_pause = owner.post(
+        f"/api/rooms/{code}/control/pause",
+        headers=csrf(owner),
+        json={"reason": "普通暂停不得截断真人发言"},
+    )
+    assert regular_pause.status_code == 409
+    emergency_pause = owner.post(
+        f"/api/rooms/{code}/control/safe-pause",
+        headers=csrf(owner) | {"X-Idempotency-Key": "round8-safe-pause"},
+        json={"reason": "浏览器异常导致发言无法结束"},
+    )
+    assert emergency_pause.status_code == 200
+
+    with SessionLocal() as db:
+        room = load_room(db, code)
+        speech = db.get(Speech, started.json()["speech_id"])
+        events = list(db.scalars(select(MatchEvent).where(MatchEvent.room_id == room.id)).all())
+        assert room.status == "paused" and room.paused_remaining_seconds is not None
+        assert speech and speech.status == "interrupted"
+        interrupted = next(item for item in events if item.event_type == "speech.interrupted")
+        assert interrupted.payload["reason"] == "emergency_human_pause"
+        assert any(item.event_type == "control.safe-pause" for item in events)
+
+    resumed = owner.post(
+        f"/api/rooms/{code}/control/resume",
+        headers=csrf(owner),
+        json={"reason": "确认设备恢复"},
+    )
+    assert resumed.status_code == 200
+    restarted = owner.post(f"/api/rooms/{code}/speech/start", headers=lease_headers, json={})
+    assert restarted.status_code == 200
+    assert restarted.json()["speech_id"] != started.json()["speech_id"]

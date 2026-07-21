@@ -5,7 +5,6 @@ import { useEffect, useState } from "react";
 import { DebateStage } from "@/components/debate-stage";
 import { FreeTurnQueue, FreeTurnSeatQueueAdapter } from "@/components/free-turn-queue";
 import { LoadError } from "@/components/load-error";
-import { StageScrollAccessibility } from "@/components/stage-scroll-accessibility";
 import { SeatRestorePanel } from "@/components/seat-restore-panel";
 import { StageAnnouncement } from "@/components/stage-announcement";
 import { StageSeatAccessibility } from "@/components/stage-seat-accessibility";
@@ -14,7 +13,7 @@ import { useRoom } from "@/lib/use-room";
 export default function WatchPage() {
   const { code } = useParams<{ code: string }>();
   const router = useRouter();
-  const { room, setRoom, connected, error, reconnect, liveEvent } = useRoom(code);
+  const { room, setRoom, connected, error, reconnect, connectionBlockedReason, liveEvent } = useRoom(code);
   const [accessNotice, setAccessNotice] = useState(false);
 
   useEffect(() => {
@@ -34,7 +33,7 @@ export default function WatchPage() {
     }
   }, [room, code, router]);
 
-  if (!room && error) return <LoadError message={error} retry={reconnect} />;
+  if (!room && error) return <LoadError message={error} retry={connectionBlockedReason ? undefined : reconnect} />;
   if (!room) return <div className="loading-screen">正在连接公开观战…</div>;
   if (
     room.status === "cancelled"
@@ -49,6 +48,7 @@ export default function WatchPage() {
         room={room}
         connected={connected}
         connectionError={error}
+        connectionBlockedReason={connectionBlockedReason}
         onReconnect={reconnect}
         onRoomChanged={(updatedRoom) => setRoom((current) => !current || updatedRoom.seq >= current.seq ? updatedRoom : current)}
         mode="watch"
@@ -58,7 +58,6 @@ export default function WatchPage() {
       <FreeTurnQueue room={room} interactive={false} />
       <StageAnnouncement room={room} />
       <StageSeatAccessibility room={room} />
-      <StageScrollAccessibility />
       <SeatRestorePanel
         room={room}
         onRoomChanged={(updatedRoom) => setRoom((current) => !current || updatedRoom.seq >= current.seq ? updatedRoom : current)}

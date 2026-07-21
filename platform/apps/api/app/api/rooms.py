@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -63,7 +63,13 @@ from app.services.match_archive import enqueue_match_archive
 from app.services.match_engine import match_engine
 from app.services.provider_config import build_service_snapshot
 from app.services.providers import moss_tts_realtime
-from app.services.realtime import room_hub
+from app.services.realtime import (
+    SPECTATOR_TICKET_COOKIE,
+    SpectatorAdmissionUnavailable,
+    room_hub,
+    spectator_connection_id,
+    valid_spectator_ticket,
+)
 from app.services.room_service import (
     PUBLIC_MATCH_TIMELINE_EVENT_TYPES,
     active_speech,
@@ -605,6 +611,7 @@ def get_room(code: str, user: User | None = Depends(optional_user), db: Session 
 @router.post("/{code}/rtc-token")
 async def rtc_token(
     code: str,
+    request: Request,
     device_id: str | None = Header(default=None, alias="X-Device-ID"),
     user: User | None = Depends(optional_user),
     db: Session = Depends(get_db),
@@ -612,6 +619,19 @@ async def rtc_token(
     room = load_room(db, code)
     if not can_view_room(db, room, user):
         raise HTTPException(status_code=401 if not user else 403, detail="无权查看该房间。")
+    if not user:
+        ticket = request.cookies.get(SPECTATOR_TICKET_COOKIE)
+        if not valid_spectator_ticket(ticket):
+            raise HTTPException(status_code=403, detail="请先进入观战页面并建立实时连接。")
+        try:
+            authorized = await room_hub.spectator_authorized(
+                code,
+                connection_id=spectator_connection_id(code, ticket),
+            )
+        except SpectatorAdmissionUnavailable as exc:
+            raise HTTPException(status_code=503, detail="观战容量服务暂不可用，请稍后重试。") from exc
+        if not authorized:
+            raise HTTPException(status_code=403, detail="观战连接已失效，请重新进入观战页面。")
     if not livekit_audio_enabled():
         return {
             "enabled": False,
@@ -1796,18 +1816,20 @@ async def control(
                 raise HTTPException(status_code=409, detail="同一个幂等键不能用于不同的控制参数。")
             return {"room": serialize_room(db, room, user), "replayed": True}
     archive_match_id: str | None = None
-    if action == "pause":
+    if action in {"pause", "safe-pause"}:
         if room.status not in {"running", "judging"}:
             raise HTTPException(status_code=409, detail="当前状态不能暂停。")
         speaking_human = db.scalar(
-            select(Speech.id).where(
+            select(Speech).where(
                 Speech.room_id == room.id,
                 Speech.speaker_type == "human",
                 Speech.status == "speaking",
             )
         )
-        if speaking_human:
+        if speaking_human and action == "pause":
             raise HTTPException(status_code=409, detail="真人正在发言，请先结束发言再暂停比赛。")
+        if action == "safe-pause" and not speaking_human:
+            raise HTTPException(status_code=409, detail="当前没有需要紧急处置的真人发言。")
         current = stage(room)
         stage_remaining = remaining_seconds(room)
         host_announcement_ms = None
@@ -1821,6 +1843,8 @@ async def control(
                 host_announcement_ms = 0
         turn_remaining = free_turn_remaining_seconds(room, current) if current and current.get("kind") == "free" else None
         intermission_ms = intermission_remaining_ms(room, current) if current and current.get("kind") == "free" else None
+        if speaking_human:
+            match_engine.close_active_speeches(db, room, status="interrupted", reason="emergency_human_pause")
         match_engine.interrupt_inflight_ai_speeches(db, room, reason="manual_pause")
         match_engine.interrupt_inflight_judging(db, room, reason="manual_pause")
         room.paused_remaining_seconds = 1 if stage_remaining is None else stage_remaining
@@ -2016,7 +2040,7 @@ async def control(
         idempotency_key=operation_key,
     )
     db.commit()
-    if action in {"pause", "skip", "terminate"}:
+    if action in {"pause", "safe-pause", "skip", "terminate"}:
         await match_engine.invalidate_free_agent_speculation(code)
     elif action == "resume":
         match_engine.schedule_free_agent_speculation(code)

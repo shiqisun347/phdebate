@@ -24,11 +24,19 @@ export function useRoom(code: string) {
   const [snapshotError, setSnapshotError] = useState("");
   const [liveEvent, setLiveEvent] = useState<Record<string, unknown> | null>(null);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const [connectionBlockedReason, setConnectionBlockedReason] = useState<"capacity_full" | null>(null);
   const retry = useRef(0);
+  const blockedReason = useRef<"capacity_full" | null>(null);
   const mounted = useRef(false);
   const currentCode = useRef(code);
   currentCode.current = code;
-  const reconnect = useCallback(() => setConnectionAttempt((value) => value + 1), []);
+  const reconnect = useCallback(() => {
+    // A capacity rejection is an authoritative admission decision, not a
+    // transient network failure. Repeated clicks cannot make room and would
+    // only create a reconnect storm at the busiest moment.
+    if (blockedReason.current) return;
+    setConnectionAttempt((value) => value + 1);
+  }, []);
   const refresh = useCallback(async () => {
     const data = await apiFetch<{ room: Room }>(`/api/rooms/${code}`);
     if (mounted.current && currentCode.current === code) {
@@ -59,6 +67,8 @@ export function useRoom(code: string) {
     setConnected(false);
     setConnectionError("");
     setSnapshotError("");
+    blockedReason.current = null;
+    setConnectionBlockedReason(null);
   }, [code]);
 
   useEffect(() => {
@@ -160,6 +170,10 @@ export function useRoom(code: string) {
         };
         if (terminalMessage[event.code]) {
           terminalClosed = true;
+          if (event.code === 4429) {
+            blockedReason.current = "capacity_full";
+            setConnectionBlockedReason("capacity_full");
+          }
           setConnectionError(terminalMessage[event.code]);
           return;
         }
@@ -221,6 +235,7 @@ export function useRoom(code: string) {
     snapshotError,
     refresh,
     reconnect,
+    connectionBlockedReason,
     liveEvent,
   };
 }

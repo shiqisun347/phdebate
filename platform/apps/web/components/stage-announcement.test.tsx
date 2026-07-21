@@ -33,4 +33,19 @@ describe("StageAnnouncement", () => {
     expect(status).toHaveTextContent("比赛进行中。当前环节：自由辩论。自由辩论当前轮到正方。");
     expect((await axe.run(container, { rules: { "color-contrast": { enabled: false } } })).violations).toEqual([]);
   });
+
+  it("announces one consistent state when a service failure pauses before the first stage", () => {
+    render(<StageAnnouncement room={{
+      ...room,
+      status: "paused",
+      current_stage: null,
+      active_speech: null,
+      failure_reason: "private provider detail",
+    } as Room} />);
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("服务异常暂停。当前环节：比赛已安全暂停。");
+    expect(status).not.toHaveTextContent("等待比赛开始");
+    expect(status).not.toHaveTextContent("private provider detail");
+  });
 });

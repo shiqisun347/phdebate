@@ -727,9 +727,11 @@ class MatchEngine:
         if task and not task.done():
             task.cancel()
 
-    def _preempt_agent_prefetch_tasks(self) -> None:
+    def _preempt_agent_prefetch_tasks(self, *, preserve_room_code: str = "") -> None:
         """Formal speech always has priority over speculative fixed-turn work."""
         for room_code, task in list(self._agent_prefetch_tasks.items()):
+            if room_code == preserve_room_code:
+                continue
             self._agent_prefetch_tasks.pop(room_code, None)
             self._agent_prefetch_attempted.pop(room_code, None)
             if not task.done():
@@ -764,12 +766,25 @@ class MatchEngine:
         duration = max(1, int(target.get("duration", 120)))
         max_token = min(1_000, max(160, int(duration * 2.1)))
         agent_config = runtime_provider_config(match.service_snapshot, "agent")
+        stable_target = {
+            key: value
+            for key, value in target.items()
+            if key
+            not in {
+                "ai_preparing",
+                "preparing_stage_remaining_seconds",
+                "preparing_turn_remaining_seconds",
+            }
+        }
         fingerprint_input = {
             "room_id": room.id,
             "match_id": match.id,
             "topic": room.topic,
             "stage_index": stage_index,
-            "stage": target,
+            # Runtime preparation markers are deliberately excluded. The
+            # target remains the same debate turn while the engine freezes its
+            # timer to wait for an already-running full-audio prefetch.
+            "stage": stable_target,
             "seat": {
                 "seat_key": seat.seat_key,
                 "occupant_type": seat.occupant_type,
@@ -1697,7 +1712,32 @@ class MatchEngine:
         free_turn: bool = False,
         speculative_content: str = "",
     ) -> None:
-        self._preempt_agent_prefetch_tasks()
+        pending_prefetch = self._agent_prefetch_tasks.get(room.code)
+        self._preempt_agent_prefetch_tasks(preserve_room_code=room.code)
+        if pending_prefetch and not pending_prefetch.done() and not free_turn and not speculative_content:
+            stage_remaining = max(
+                1,
+                int(remaining_seconds(room) or current.get("duration", 30)),
+            )
+            self._mark_ai_preparation(
+                room,
+                current,
+                stage_remaining=stage_remaining,
+                turn_remaining=None,
+            )
+            db.commit()
+            await self._broadcast(db, room, "speech.prefetch_waiting")
+            await asyncio.gather(pending_prefetch, return_exceptions=True)
+            db.expire_all()
+            room = load_room(db, room.code, lock=True)
+            refreshed = stage(room)
+            if (
+                room.status != "running"
+                or not refreshed
+                or str(refreshed.get("key")) != str(current.get("key"))
+            ):
+                return
+            current = refreshed
         match = db.scalar(select(Match).where(Match.room_id == room.id))
         if not match:
             return
@@ -2129,6 +2169,13 @@ class MatchEngine:
             if audio_url:
                 return audio_url
             if stable_moss_playback:
+                if not free_turn:
+                    # The current transcript is fixed. Start the next Agent
+                    # immediately; its TTS job will queue behind this formal
+                    # speech, then can run while the prepared WAV is playing.
+                    # The current call reaches MOSS admission first, so
+                    # speculative work cannot overtake the live turn.
+                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
                 synthesized_url = await moss_tts_realtime.synthesize(
                     content,
                     room_code=room_code,
@@ -2143,10 +2190,6 @@ class MatchEngine:
                     speech_id,
                     settings.moss_tts_playback_speed,
                 )
-                if not free_turn:
-                    # MOSS is now free. Generate the following turn while this
-                    # immutable WAV is being clocked through LiveKit.
-                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
                 if livekit_audio_enabled():
                     await lighttts.publish_wav_to_livekit(
                         room_code=room_code,

@@ -16,8 +16,13 @@ function currentSpeakerLabel(room: Room) {
 }
 
 export function StageAnnouncement({ room }: { room: Room }) {
-  const status = roomStatusLabel[room.status] || room.status;
-  const stage = room.current_stage?.name || "等待比赛开始";
+  const serviceFailurePaused = Boolean(room.failure_reason);
+  const status = serviceFailurePaused ? "服务异常暂停" : roomStatusLabel[room.status] || room.status;
+  const stage = serviceFailurePaused
+    ? room.current_stage?.name
+      ? `${room.current_stage.name}，等待恢复`
+      : "比赛已安全暂停"
+    : room.current_stage?.name || "等待比赛开始";
 
   return (
     <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">

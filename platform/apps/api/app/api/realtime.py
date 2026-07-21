@@ -8,6 +8,7 @@ import struct
 import threading
 import uuid
 from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 from time import monotonic
 
 import websockets
@@ -22,7 +23,15 @@ from app.core.security import as_utc, token_hash
 from app.models.entities import CaptionSegment, Match, Room, RoomSeat, Speech, TranscriptSegment, User, UserSession
 from app.services.provider_config import runtime_provider_config
 from app.services.public_snapshot import public_snapshot_cache
-from app.services.realtime import audio_stream_aborts, room_hub
+from app.services.realtime import (
+    SPECTATOR_TICKET_COOKIE,
+    SpectatorAdmissionUnavailable,
+    audio_stream_aborts,
+    new_spectator_ticket,
+    room_hub,
+    spectator_connection_id,
+    valid_spectator_ticket,
+)
 from app.services.room_service import (
     anonymous_realtime_event,
     append_event,
@@ -246,10 +255,35 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
     user = _websocket_user(websocket)
     joined_presence: tuple[str, str] | None = None
     joined_as_spectator = False
-    presence_connection_id = uuid.uuid4().hex
+    # Every public room-state socket represents one capacity-consuming
+    # spectator connection. Rotate the signed ticket on each handshake so
+    # multiple tabs cannot collapse into one lease and bypass the global cap.
+    spectator_ticket = new_spectator_ticket() if not user else None
+    set_spectator_cookie = not user
+    presence_connection_id = (
+        spectator_connection_id(code, spectator_ticket)
+        if not user and spectator_ticket
+        else uuid.uuid4().hex
+    )
     presence_connected_seq: int | None = None
     public_initial_message: str | None = None
-    await websocket.accept()
+    accept_headers: list[tuple[bytes, bytes]] | None = None
+    if set_spectator_cookie and spectator_ticket:
+        cookie = SimpleCookie()
+        cookie[SPECTATOR_TICKET_COOKIE] = spectator_ticket
+        cookie[SPECTATOR_TICKET_COOKIE]["httponly"] = True
+        cookie[SPECTATOR_TICKET_COOKIE]["path"] = "/"
+        cookie[SPECTATOR_TICKET_COOKIE]["samesite"] = "strict"
+        cookie[SPECTATOR_TICKET_COOKIE]["max-age"] = 86400
+        if settings.cookie_secure:
+            cookie[SPECTATOR_TICKET_COOKIE]["secure"] = True
+        accept_headers = [(b"set-cookie", cookie.output(header="").strip().encode("latin-1"))]
+    try:
+        await websocket.accept(headers=accept_headers)
+    except TypeError:
+        # Lightweight unit-test doubles may implement the pre-Starlette
+        # signature. Production WebSockets always receive the signed cookie.
+        await websocket.accept()
     send_lock = asyncio.Lock()
 
     async def send_json(payload: dict) -> None:
@@ -339,7 +373,11 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
 
     async def reserve_spectator() -> bool:
         nonlocal joined_as_spectator
-        joined_as_spectator = await room_hub.spectator_join(code, connection_id=presence_connection_id)
+        try:
+            joined_as_spectator = await room_hub.spectator_join(code, connection_id=presence_connection_id)
+        except SpectatorAdmissionUnavailable:
+            await close_socket(1013)
+            return False
         if not joined_as_spectator:
             await close_socket(4429)
         return joined_as_spectator
@@ -751,6 +789,22 @@ async def room_audio_websocket(websocket: WebSocket, code: str) -> None:
             return
         if not can_view_room(db, room, user):
             await websocket.close(code=4401 if not user else 4403)
+            return
+    if not user:
+        ticket = websocket.cookies.get(SPECTATOR_TICKET_COOKIE)
+        if not valid_spectator_ticket(ticket):
+            await websocket.close(code=4401)
+            return
+        try:
+            authorized = await room_hub.spectator_authorized(
+                code,
+                connection_id=spectator_connection_id(code, ticket),
+            )
+        except SpectatorAdmissionUnavailable:
+            await websocket.close(code=1013)
+            return
+        if not authorized:
+            await websocket.close(code=4401)
             return
     await websocket.accept()
     send_lock = asyncio.Lock()

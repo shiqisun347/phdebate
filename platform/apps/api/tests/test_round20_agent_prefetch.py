@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models.entities import RoomSeat
+from app.models.entities import MatchEvent, RoomSeat, Speech
 from app.services.match_engine import MatchEngine, _adopt_prefetched_audio
 from app.services.providers import ProviderError, debate_agent, moss_tts_realtime
 from app.services.room_service import load_room, now
@@ -199,3 +199,81 @@ async def test_prefetch_prepares_complete_stable_wav_and_atomically_adopts_it(
     assert adopted == f"/media/{code}/formal-speech-id.wav"
     assert (settings.media_path / code / "formal-speech-id.wav").is_file()
     assert (settings.media_path / code / "formal-speech-id.source.wav").is_file()
+
+
+@pytest.mark.asyncio
+async def test_formal_turn_waits_for_same_room_audio_prefetch_instead_of_restarting(
+    register_user, monkeypatch
+) -> None:
+    owner = register_user("prefetch_formal_handoff_owner")
+    code = _running_announcement_room(owner, "预生成任务必须无缝交给正式轮次")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def generate(payload, *, provider_config=None):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return "这段完整发言只生成一次，并在正式阶段直接采用已经准备好的语音。"
+
+    async def synthesize(
+        _text: str,
+        *,
+        room_code: str,
+        speech_id: str,
+        publish_live: bool,
+        **_kwargs,
+    ) -> str:
+        assert publish_live is False
+        target = settings.media_path / room_code / f"{speech_id}.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_wav_bytes(1.1))
+        return f"/media/{room_code}/{speech_id}.wav"
+
+    monkeypatch.setattr(settings, "realtime_voice_backend", "moss_realtime")
+    monkeypatch.setattr(settings, "moss_tts_realtime_enabled", True)
+    monkeypatch.setattr(settings, "moss_tts_stable_playback_enabled", True)
+    monkeypatch.setattr(settings, "moss_tts_playback_speed", 1.1)
+    monkeypatch.setattr(debate_agent, "generate", generate)
+    monkeypatch.setattr(moss_tts_realtime, "synthesize", synthesize)
+    monkeypatch.setattr("app.services.match_engine.livekit_audio_enabled", lambda: False)
+
+    engine = MatchEngine()
+    engine._ensure_runtime()
+    engine._schedule_next_agent_prefetch(code, 0)
+    await entered.wait()
+
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.current_stage_index = 1
+        room.stage_started_at = now()
+        room.stage_deadline_at = now() + timedelta(seconds=60)
+        db.commit()
+        seat = next(item for item in room.seats if item.seat_key == "neg_1")
+        formal = asyncio.create_task(
+            engine._ai_speech(db, room, seat, room.template_snapshot[1])
+        )
+        await asyncio.sleep(0)
+        assert not formal.done()
+        release.set()
+        await formal
+
+    assert calls == 1
+    with SessionLocal() as db:
+        speech = db.scalar(
+            select(Speech).where(Speech.room_id == load_room(db, code).id).order_by(Speech.created_at.desc())
+        )
+        assert speech is not None
+        assert speech.status == "playing"
+        assert speech.audio_url
+        events = db.scalars(
+            select(MatchEvent).where(MatchEvent.room_id == speech.room_id).order_by(MatchEvent.seq)
+        ).all()
+        assert any(event.event_type == "speech.content.prefetched" for event in events)
+        # This focused handoff test does not run the engine clock until the
+        # synthetic WAV ends. Do not leave an engine-owned in-flight row that
+        # could contaminate later restart-recovery tests in the shared suite.
+        speech.status = "completed"
+        db.commit()

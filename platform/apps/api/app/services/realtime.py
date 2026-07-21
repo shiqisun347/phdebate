@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -36,6 +39,31 @@ SPECTATOR_LIMIT = 5
 SPECTATOR_LEASE_SECONDS = PRESENCE_LEASE_SECONDS
 SPECTATOR_KEY_PREFIX = "jixia:spectators:leases:"
 SPECTATOR_GLOBAL_KEY = f"{SPECTATOR_KEY_PREFIX}global"
+SPECTATOR_TICKET_COOKIE = "jixia_spectator"
+
+
+class SpectatorAdmissionUnavailable(RuntimeError):
+    """The global spectator authority is temporarily unavailable."""
+
+
+def new_spectator_ticket() -> str:
+    value = secrets.token_urlsafe(24)
+    signature = hmac.new(settings.app_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
+    return f"{value}.{signature}"
+
+
+def valid_spectator_ticket(value: str | None) -> bool:
+    if not value or "." not in value:
+        return False
+    payload, signature = value.rsplit(".", 1)
+    if not payload or len(signature) != 64:
+        return False
+    expected = hmac.new(settings.app_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def spectator_connection_id(room_code: str, ticket: str) -> str:
+    return hashlib.sha256(f"{room_code}:{ticket}".encode()).hexdigest()
 
 _PRESENCE_JOIN_SCRIPT = """
 local now_ms = tonumber(ARGV[1])
@@ -465,11 +493,34 @@ class RoomHub:
                     return False
                 local.add(connection_id)
             return True
+        if result is None:
+            raise SpectatorAdmissionUnavailable("spectator admission authority unavailable")
         if not result:
             return False
         with self._states_lock:
             self._spectator_leases[room_code].add(connection_id)
         return True
+
+    async def spectator_authorized(self, room_code: str, *, connection_id: str) -> bool:
+        """Validate and refresh an already admitted spectator lease.
+
+        Auxiliary audio transports must never create a spectator slot. They
+        may only attach to the signed browser ticket admitted by the room
+        state WebSocket.
+        """
+        if not self._redis_enabled:
+            with self._states_lock:
+                return connection_id in self._spectator_leases.get(room_code, set())
+        now_ms = int(time.time() * 1000)
+        lease_ms = SPECTATOR_LEASE_SECONDS * 1000
+        result = await self._presence_eval(
+            _SPECTATOR_REFRESH_SCRIPT,
+            [self._spectator_key(room_code)],
+            [now_ms, now_ms + lease_ms, connection_id, lease_ms * 2],
+        )
+        if result is None:
+            raise SpectatorAdmissionUnavailable("spectator admission authority unavailable")
+        return bool(result)
 
     async def spectator_refresh(self, room_code: str, *, connection_id: str) -> bool:
         with self._states_lock:

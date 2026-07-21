@@ -2,6 +2,13 @@
 
 全新实现的自动化人机辩论平台。产品只围绕赛事、房间、比赛、参赛者、观众和比赛历史展开，提供赛事大厅、账号体系、房间席位、自动比赛引擎、公开观战、排行榜、个人历史和系统管理后台。
 
+## 唯一官方文档
+
+- [`docs/official/system.html`](docs/official/system.html)：系统架构、模块、接口、部署维护和单场故障处置。
+- [`docs/official/user.html`](docs/official/user.html)：注册、建房、参赛、观战、结果和异常恢复。
+
+这两份 HTML 是唯一规范性文档。`docs/qa`、`docs/incidents` 及其他 Markdown 文件仅作为测试证据、事故记录或历史方案；若实现发生变化，必须在同一变更中更新对应官方文档。
+
 ## 目录
 
 ```text
