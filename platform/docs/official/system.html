@@ -142,6 +142,7 @@
             <div class="flow-step"><small>PLAY</small><strong>浏览器单一<br>连续音轨</strong></div>
           </div>
           <p>完整源 WAV 保留用于回溯，播放文件以原子方式生成。全段完成后再连续发布，避免生成速度低于播放速度造成 underrun、杂音、撕裂或中途结束。变速使用整段保调时伸缩，不逐片段改变音色。</p>
+          <div class="callout warning"><strong>发布门禁</strong>正式低延迟目标是 Agent 正文固定后首声不超过 3 秒。当前本机 MOSS 在长文本上的生成 RTF 可能高于 1，完整 WAV 路径只能作为“无卡顿安全模式”，不能伪称满足 3 秒目标；在云端真双向 TTS 接入前，控制台应明确显示准备状态。</div>
           <div class="callout danger"><strong>P0 判断</strong>“赛后录音正常、比赛现场卡顿”通常说明实时供给或播放缓冲不足，而不是模型音色坏。不得通过逐段 <code>audio.play()</code>、更小零缓冲或重复建连掩盖问题。</div>
           <h3>真人辩手</h3>
           <p>浏览器通过 AudioWorklet 采集 PCM，经鉴权的 <code>/ws/rooms/:code/asr</code> 桥接到 FunASR；识别结果写入字幕/文字稿。真人录音上传限制 50 MiB，Nginx 请求上限 52 MiB。浏览器不能直接假设标准 FunASR JSON 协议。</p>
