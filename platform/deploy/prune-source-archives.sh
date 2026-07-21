@@ -29,12 +29,15 @@ fi
 }
 
 referenced_by_manifest() {
-  local filename="$1" manifest
-  for manifest in "$BACKUP_DIR"/recovery-set-*.manifest; do
-    [[ -f "$manifest" ]] || continue
-    if awk -F= -v filename="$filename" '$1 ~ /^artifact\..*\.filename$/ && $2 == filename {found=1} END {exit !found}' "$manifest"; then
-      return 0
-    fi
+  local filename="$1" directory manifest
+  for directory in "$BACKUP_DIR" "$BACKUP_DIR/quarantine"; do
+    [[ -d "$directory" ]] || continue
+    for manifest in "$directory"/recovery-set-*.manifest; do
+      [[ -f "$manifest" ]] || continue
+      if awk -F= -v filename="$filename" '$1 ~ /^artifact\..*\.filename$/ && $2 == filename {found=1} END {exit !found}' "$manifest"; then
+        return 0
+      fi
+    done
   done
   return 1
 }

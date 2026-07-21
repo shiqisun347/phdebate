@@ -45,6 +45,10 @@ def run() -> dict:
     owner_client = httpx.Client(base_url=BASE_URL, verify=False, timeout=20, follow_redirects=True)
     admin_client = httpx.Client(base_url=BASE_URL, verify=False, timeout=20, follow_redirects=True)
     user_id = room_id = match_id = speech_id = code = None
+    admin_account = os.getenv("PHDEBATE_ADMIN_ACCOUNT") or settings.v2_admin_account
+    admin_password = os.getenv("PHDEBATE_ADMIN_PASSWORD") or settings.v2_admin_password
+    if not admin_account or not admin_password:
+        raise RuntimeError("production administrator credentials are not configured")
 
     def check(response: httpx.Response, expected: int = 200) -> dict:
         if response.status_code != expected:
@@ -152,7 +156,7 @@ def run() -> dict:
         check(
             admin_client.post(
                 "/api/auth/login",
-                json={"account": settings.v2_admin_account, "password": settings.v2_admin_password},
+                json={"account": admin_account, "password": admin_password},
             )
         )
         offline_restore = admin_post(f"/api/admin/rooms/{code}/seats/aff_1/restore")

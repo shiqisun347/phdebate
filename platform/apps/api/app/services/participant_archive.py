@@ -17,6 +17,7 @@ PARTICIPANT_EVENT_TYPES = frozenset(
         "speech.interrupted",
         "speech.timed_out",
         "speech.late_finalized",
+        "speech.corrected",
         "free.side_changed",
         "free.turn_timed_out",
         "control.pause",
@@ -87,6 +88,7 @@ def _scorecard_projection(scorecard: Any, seat_keys: set[str]) -> dict[str, Any]
     if not isinstance(scorecard, dict):
         return None
     individual = scorecard.get("individual_scores")
+    provenance = scorecard.get("transcript_provenance")
     return {
         "status": scorecard.get("status"),
         "winner": scorecard.get("winner"),
@@ -100,10 +102,23 @@ def _scorecard_projection(scorecard: Any, seat_keys: set[str]) -> dict[str, Any]
         "reasoning": scorecard.get("reasoning", ""),
         "created_at": scorecard.get("created_at"),
         "updated_at": scorecard.get("updated_at"),
+        "transcript_provenance": (
+            {
+                key: provenance.get(key)
+                for key in (
+                    "basis",
+                    "judged_transcript_sha256",
+                    "current_transcript_sha256",
+                    "correction_after_judging_count",
+                )
+            }
+            if isinstance(provenance, dict)
+            else None
+        ),
     }
 
 
-def participant_archive_document(document: dict[str, Any]) -> dict[str, Any]:
+def participant_archive_document(document: dict[str, Any], *, viewer_user_id: str | None = None) -> dict[str, Any]:
     """Create the deterministic student-readable projection of a research archive."""
 
     data = document.get("data") if isinstance(document.get("data"), dict) else {}
@@ -112,12 +127,14 @@ def participant_archive_document(document: dict[str, Any]) -> dict[str, Any]:
     competition = data.get("competition") if isinstance(data.get("competition"), dict) else None
     season = data.get("season") if isinstance(data.get("season"), dict) else None
     seats = data.get("seats") if isinstance(data.get("seats"), list) else []
+    participant_snapshots = data.get("participant_snapshots") if isinstance(data.get("participant_snapshots"), list) else []
     seat_keys = {
         item.get("seat_key")
         for item in seats
         if isinstance(item, dict) and isinstance(item.get("seat_key"), str)
     }
     speeches = data.get("speeches") if isinstance(data.get("speeches"), list) else []
+    corrections = data.get("speech_corrections") if isinstance(data.get("speech_corrections"), list) else []
     events = data.get("events") if isinstance(data.get("events"), list) else []
     ratings = data.get("rating_changes") if isinstance(data.get("rating_changes"), list) else []
 
@@ -176,6 +193,15 @@ def participant_archive_document(document: dict[str, Any]) -> dict[str, Any]:
                 for item in seats
                 if isinstance(item, dict)
             ],
+            "participant_snapshots": [
+                {
+                    "seat_key": item.get("seat_key"),
+                    "display_name": item.get("display_name", "参赛选手"),
+                    "created_at": item.get("created_at"),
+                }
+                for item in participant_snapshots
+                if isinstance(item, dict)
+            ],
             "speeches": [
                 {
                     "seat_key": item.get("seat_key"),
@@ -199,6 +225,22 @@ def participant_archive_document(document: dict[str, Any]) -> dict[str, Any]:
                 }
                 for item in speeches
                 if isinstance(item, dict)
+            ],
+            "speech_corrections": [
+                {
+                    "speech_id": item.get("speech_id"),
+                    "original_content": item.get("original_content", ""),
+                    "proposed_content": item.get("proposed_content", ""),
+                    "reason": item.get("reason", ""),
+                    "status": item.get("status"),
+                    "review_reason": item.get("review_reason", ""),
+                    "resolved_at": item.get("resolved_at"),
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "after_judging": bool(item.get("after_judging", False)),
+                }
+                for item in corrections
+                if isinstance(item, dict) and viewer_user_id is not None and item.get("requester_user_id") == viewer_user_id
             ],
             "timeline": [
                 {
@@ -227,10 +269,10 @@ def participant_archive_document(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def serialize_participant_archive(document: dict[str, Any]) -> tuple[bytes, str]:
+def serialize_participant_archive(document: dict[str, Any], *, viewer_user_id: str | None = None) -> tuple[bytes, str]:
     content = (
         json.dumps(
-            participant_archive_document(document),
+            participant_archive_document(document, viewer_user_id=viewer_user_id),
             ensure_ascii=False,
             sort_keys=True,
             indent=2,

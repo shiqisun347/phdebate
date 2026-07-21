@@ -184,6 +184,7 @@ def test_public_catalog_aggregates_live_room_counts_and_room_metadata(client: Te
         for room in rooms:
             room.current_stage_index = 0
         by_code[first_room["code"]].status = "running"
+        append_event(db, by_code[first_room["code"]], "control.pause", {"reason": "already resumed"})
         by_code[second_room["code"]].status = "paused"
         append_event(db, by_code[second_room["code"]], "control.pause", {"reason": "recent pause"})
         by_code[third_room["code"]].status = "paused"
@@ -203,14 +204,17 @@ def test_public_catalog_aggregates_live_room_counts_and_room_metadata(client: Te
     indexed = {item["code"]: item for item in live.json()["items"]}
     assert indexed[first_room["code"]]["competition_name"] == "1v1 辩论训练赛"
     assert indexed[first_room["code"]]["stage"]
+    assert indexed[first_room["code"]]["paused_at"] is None
     assert indexed[second_room["code"]]["paused_at"]
     assert third_room["code"] not in indexed
     assert fourth_room["code"] not in indexed
 
     detail = client.get("/api/competitions/training-1v1")
     assert detail.status_code == 200
-    detail_codes = {item["code"] for item in detail.json()["live_rooms"]}
+    detail_items = {item["code"]: item for item in detail.json()["live_rooms"]}
+    detail_codes = set(detail_items)
     assert first_room["code"] in detail_codes
+    assert detail_items[first_room["code"]]["paused_at"] is None
     assert second_room["code"] in detail_codes
     assert third_room["code"] not in detail_codes
     assert fourth_room["code"] not in detail_codes
@@ -2520,7 +2524,50 @@ def test_anonymous_room_websocket_strips_hub_diagnostics(register_user, client: 
         initial = socket.receive_json()
         assert initial["room"]["code"] == room["code"]
         update = socket.receive_json()
-        assert update["event"] == {"type": "asr", "text": "观众可见字幕", "is_final": False}
+        assert update["event"] == {
+            "type": "asr",
+            "text": "观众可见字幕",
+            "is_final": False,
+            "speech_id": "private-speech-id",
+        }
+
+
+def test_authenticated_nonparticipant_websocket_uses_public_event_redaction(register_user, monkeypatch) -> None:
+    owner = register_user("authenticated_spectator_owner")
+    spectator = register_user("authenticated_spectator")
+    room = create_training_room(owner, "登录观众不能读取内部实时诊断")
+    with SessionLocal() as db:
+        stored = load_room(db, room["code"], lock=True)
+        stored.status = "running"
+        db.commit()
+
+    async def diagnostic_stream(_code: str, **_kwargs):
+        yield {
+            "type": "asr",
+            "text": "观众可见字幕",
+            "is_final": True,
+            "room_code": room["code"],
+            "speech_id": "private-speech-id",
+            "transport": "livekit",
+            "track_sid": "TR_private",
+            "tts_session_id": "tts-private",
+            "voice_id": "private-voice",
+            "agent_diagnostics": {"endpoint": "https://llm.internal.example/v1"},
+        }
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(realtime_api.room_hub, "stream", diagnostic_stream)
+    with spectator.websocket_connect(f"/ws/rooms/{room['code']}") as socket:
+        initial = socket.receive_json()
+        assert initial["room"]["my_seat"] is None
+        assert initial["room"]["can_control"] is False
+        update = socket.receive_json()
+        assert update["event"] == {
+            "type": "asr",
+            "text": "观众可见字幕",
+            "is_final": True,
+            "speech_id": "private-speech-id",
+        }
 
 
 async def test_redis_client_initialization_is_single_flight(monkeypatch) -> None:
@@ -3131,6 +3178,148 @@ async def test_admin_audio_cue_is_reused_by_new_rooms_and_can_fall_back_to_light
         db.delete(cue)
         db.commit()
         cue_path.unlink(missing_ok=True)
+
+
+async def test_preset_audio_cue_with_stale_text_is_not_reused(client: TestClient, register_user, monkeypatch) -> None:
+    owner = register_user("audio_cue_dynamic_text")
+    code = create_training_room(owner, "动态主持文本不能复用旧音频")["code"]
+    owner.post(f"/api/rooms/{code}/ready", headers=csrf(owner), json={"ready": True})
+    owner.post(f"/api/rooms/{code}/start", headers=csrf(owner), json={})
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.template_snapshot = [
+            {
+                "key": "dynamic_host_transition",
+                "name": "动态开场",
+                "kind": "announcement",
+                "duration": 10,
+                "cue": "接下来由陈思远进行正方一辩立论。",
+            }
+        ]
+        preset = AudioCue(
+            key="dynamic_host_transition",
+            name="旧动态主持播报",
+            text="接下来由另一位选手发言。",
+            audio_url="/media/_cues/stale-dynamic-host.wav",
+            is_active=True,
+        )
+        db.add(preset)
+        db.flush()
+        stale_path = settings.media_path / "_cues" / f"{preset.id}.wav"
+        stale_path.parent.mkdir(parents=True, exist_ok=True)
+        stale_path.write_bytes(_wav_bytes())
+        db.commit()
+        preset_id = preset.id
+
+    synthesized = 0
+
+    async def synthesize_dynamic(text: str, *, room_code: str, speech_id: str, **kwargs):
+        nonlocal synthesized
+        assert text == "接下来由陈思远进行正方一辩立论。"
+        synthesized += 1
+        target = settings.media_path / room_code / f"{speech_id}.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_wav_bytes())
+        return f"/media/{room_code}/{speech_id}.wav"
+
+    monkeypatch.setattr(lighttts, "synthesize", synthesize_dynamic)
+    await match_engine.process_room(code)
+    assert synthesized == 1
+    with SessionLocal() as db:
+        room = load_room(db, code)
+        event = db.scalar(
+            select(MatchEvent).where(
+                MatchEvent.room_id == room.id,
+                MatchEvent.event_type == "audio.cue.ready",
+            )
+        )
+        assert event and event.payload["source"] != "preset"
+        room.status = "terminated"
+        match = db.scalar(select(Match).where(Match.room_id == room.id))
+        if match:
+            match.status = "terminated"
+        stale = db.get(AudioCue, preset_id)
+        if stale:
+            db.delete(stale)
+        db.commit()
+    stale_path.unlink(missing_ok=True)
+
+
+def test_seeded_flows_include_host_transition_before_every_debate_stage(client: TestClient, register_user) -> None:
+    owner = register_user("host_transitions")
+    code = create_training_room(owner, "主持人换阶段播报测试")["code"]
+
+    with SessionLocal() as db:
+        room = load_room(db, code)
+        stages = room.template_snapshot
+        assert stages[0]["kind"] == "announcement" and stages[0]["key"] == "opening"
+        for item in stages[1:]:
+            if item["kind"] not in {"speech", "free", "judging"}:
+                continue
+            if item["kind"] == "free":
+                assert item["turn_duration"] <= 30
+            assert item["cue"].strip()
+
+
+def test_announcement_deadline_uses_prepared_audio_length(client: TestClient, register_user) -> None:
+    owner = register_user("host_audio_duration")
+    code = create_training_room(owner, "主持人口播时长测试")["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.template_snapshot = [
+            {
+                "key": "host_length_test",
+                "name": "主持人口播",
+                "kind": "announcement",
+                "duration": 30,
+                "cue": "下面进入下一环节。",
+            }
+        ]
+        asset_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:{room.id}:cue:host_length_test"))
+        path = settings.media_path / code / f"{asset_id}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_wav_bytes(seconds=2.0))
+        started = now()
+        match_engine._enter_stage(db, room, 0)
+        assert room.stage_deadline_at is not None
+        assert 2.5 <= (room.stage_deadline_at - started).total_seconds() <= 4.0
+        db.rollback()
+
+
+async def test_host_cue_locks_target_stage_without_changing_its_index(client: TestClient, register_user) -> None:
+    owner = register_user("host_target_gate")
+    code = create_training_room(owner, "主持人口播门控测试")["code"]
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        room.template_snapshot = [
+            {
+                "key": "aff_gate",
+                "name": "正方立论",
+                "kind": "speech",
+                "seat": "aff_1",
+                "duration": 30,
+                "cue": "接下来进入正方立论。",
+            }
+        ]
+        asset_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:{room.id}:cue:aff_gate"))
+        path = settings.media_path / code / f"{asset_id}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_wav_bytes(seconds=1.0))
+        match_engine._enter_stage(db, room, 0)
+        current = dict(room.template_snapshot[0])
+        assert room.current_stage_index == 0
+        assert current["kind"] == "announcement"
+        assert current["host_target_kind"] == "speech"
+        current["host_announcement_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        room.template_snapshot = [current]
+        room.stage_deadline_at = now() - timedelta(milliseconds=1)
+        db.commit()
+
+        assert await match_engine._open_hosted_stage(db, room, current) is True
+        db.refresh(room)
+        assert room.current_stage_index == 0
+        assert room.template_snapshot[0]["kind"] == "speech"
+        assert "host_announcement_pending" not in room.template_snapshot[0]
 
 
 def test_admin_judge_profiles_are_single_active_versioned_and_frozen_per_match(client: TestClient, register_user) -> None:
@@ -5218,6 +5407,15 @@ async def test_free_debate_human_turn_timeout_advances_and_accepts_late_recordin
         db.commit()
     await match_engine.process_room(code)
     after_timeout = owner.get(f"/api/rooms/{code}").json()["room"]
+    assert after_timeout["current_stage"]["intermission_side"] == "neg"
+    with SessionLocal() as db:
+        stored = load_room(db, code, lock=True)
+        current = dict(stored.template_snapshot[0])
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        stored.template_snapshot = [current]
+        db.commit()
+    await match_engine.process_room(code)
+    after_timeout = owner.get(f"/api/rooms/{code}").json()["room"]
     assert after_timeout["current_stage"]["side"] == "neg"
     assert after_timeout["active_speech"] is None and after_timeout["turn_remaining_seconds"] in {4, 5}
     with SessionLocal() as db:
@@ -5294,6 +5492,14 @@ async def test_free_debate_idle_side_yields_after_turn_window(client: TestClient
         stored.current_stage_index = 0
         stored.stage_started_at = now() - timedelta(seconds=6)
         stored.stage_deadline_at = now() + timedelta(seconds=294)
+        db.commit()
+    await match_engine.process_room(code)
+    with SessionLocal() as db:
+        stored = load_room(db, code, lock=True)
+        current = dict(stored.template_snapshot[0])
+        assert current["intermission_side"] == "neg"
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        stored.template_snapshot = [current]
         db.commit()
     await match_engine.process_room(code)
     with SessionLocal() as db:
@@ -5526,6 +5732,10 @@ def test_four_human_free_debate_rotates_sides_and_allows_only_one_speaker(client
         stored.current_stage_index = 0
         stored.stage_started_at = now()
         stored.stage_deadline_at = now() + timedelta(seconds=300)
+        for seat in stored.seats:
+            if seat.occupant_type == "human":
+                seat.connected = True
+                seat.disconnected_at = None
         db.commit()
     participants = [(owner, "lease-aff1"), (aff_two, "lease-aff2"), (neg_one, "lease-neg1"), (neg_two, "lease-neg2")]
     for participant, lease in participants:
@@ -5548,6 +5758,12 @@ def test_four_human_free_debate_rotates_sides_and_allows_only_one_speaker(client
         json={},
     )
     assert aff_started.status_code == 200 and competing_aff.status_code == 409
+    requested = neg_two.post(
+        f"/api/rooms/{code}/free-turn-requests",
+        headers=csrf(neg_two),
+        json={},
+    )
+    assert requested.status_code == 200
     assert (
         owner.post(
             f"/api/rooms/{code}/speech/finish",
@@ -5556,12 +5772,25 @@ def test_four_human_free_debate_rotates_sides_and_allows_only_one_speaker(client
         ).status_code
         == 200
     )
+    with SessionLocal() as db:
+        stored = load_room(db, code, lock=True)
+        current = dict(stored.template_snapshot[0])
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        stored.template_snapshot = [current]
+        db.commit()
+    asyncio.run(match_engine.process_room(code))
     neg_started = neg_two.post(
         f"/api/rooms/{code}/speech/start",
         headers=csrf(neg_two) | {"X-Control-Lease": "lease-neg2"},
         json={},
     )
     assert neg_started.status_code == 200
+    aff_requested = aff_two.post(
+        f"/api/rooms/{code}/free-turn-requests",
+        headers=csrf(aff_two),
+        json={},
+    )
+    assert aff_requested.status_code == 200
     assert (
         neg_two.post(
             f"/api/rooms/{code}/speech/finish",
@@ -5570,6 +5799,13 @@ def test_four_human_free_debate_rotates_sides_and_allows_only_one_speaker(client
         ).status_code
         == 200
     )
+    with SessionLocal() as db:
+        stored = load_room(db, code, lock=True)
+        current = dict(stored.template_snapshot[0])
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        stored.template_snapshot = [current]
+        db.commit()
+    asyncio.run(match_engine.process_room(code))
     aff_two_view = aff_two.get(f"/api/rooms/{code}").json()["room"]
     assert aff_two_view["current_stage"]["side"] == "aff" and aff_two_view["can_speak"] is True
     with SessionLocal() as db:
@@ -5773,7 +6009,13 @@ def test_anonymous_realtime_event_allows_captions_and_flush_identity_only() -> N
             "agent_latency_ms": 812,
         }
     )
-    assert caption == {"type": "asr", "seq": 42, "text": "观众需要看到的实时字幕", "is_final": False}
+    assert caption == {
+        "type": "asr",
+        "seq": 42,
+        "text": "观众需要看到的实时字幕",
+        "is_final": False,
+        "speech_id": "internal-speech-id",
+    }
 
     interrupted = room_service_service.anonymous_realtime_event(
         {

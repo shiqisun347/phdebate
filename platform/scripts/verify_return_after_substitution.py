@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import ssl
 import time
 from datetime import timedelta
@@ -18,6 +17,7 @@ from app.models.entities import AdminAuditLog, Match, MatchEvent, Room, RoomSeat
 from app.services.match_engine import match_engine
 from app.services.room_service import load_room, now
 from app.services.verification_cleanup import release_verification_room_codes
+from operator_credentials import admin_credentials
 from sqlalchemy import delete
 from websockets.sync.client import ClientConnection, connect
 
@@ -70,10 +70,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     args = parser.parse_args()
-    admin_account = os.environ.get("PHDEBATE_ADMIN_ACCOUNT") or os.environ.get("V2_ADMIN_ACCOUNT", "")
-    admin_password = os.environ.get("PHDEBATE_ADMIN_PASSWORD") or os.environ.get("V2_ADMIN_PASSWORD", "")
-    if not admin_account or not admin_password:
-        raise RuntimeError("production administrator credentials are not configured")
+    admin_account, admin_password = admin_credentials()
 
     suffix = f"{int(time.time())}_{token_hex(3)}"
     owner = httpx.Client(base_url=args.base_url, verify=False, timeout=20, follow_redirects=True)

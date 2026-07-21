@@ -70,6 +70,25 @@ def test_apply_keeps_newest_and_manifest_referenced_archives(tmp_path: Path) -> 
     assert "reason=recovery-manifest-reference" in result.stdout
 
 
+def test_quarantined_manifest_still_protects_a_referenced_source_archive(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    obsolete = make_archive(directory, "obsolete-source.tar.gz", 120)
+    referenced = make_archive(directory, "referenced-source.tar.gz", 110)
+    newest = make_archive(directory, "newest-source.tar.gz", 100)
+    quarantine = directory / "quarantine"
+    quarantine.mkdir()
+    (quarantine / "recovery-set-early.manifest").write_text(
+        "artifact.private_config.filename=referenced-source.tar.gz\n"
+    )
+
+    result = run(tmp_path, "apply", allow=True)
+
+    assert result.returncode == 0
+    assert not obsolete.exists()
+    assert referenced.exists() and newest.exists()
+    assert "reason=recovery-manifest-reference" in result.stdout
+
+
 def test_unrelated_voice_and_data_archives_are_never_candidates(tmp_path: Path) -> None:
     directory = tmp_path / "runtime" / "deploy-backups"
     make_archive(directory, "old-source.tar.gz", 96)

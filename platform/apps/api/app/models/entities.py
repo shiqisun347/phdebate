@@ -219,6 +219,24 @@ class Match(Base, TimestampMixin):
     room: Mapped[Room] = relationship()
 
 
+class MatchParticipant(Base):
+    """Immutable human/seat identity captured when a match is locked."""
+
+    __tablename__ = "match_participants"
+    __table_args__ = (
+        UniqueConstraint("match_id", "seat_key", name="uq_match_participant_seat"),
+        UniqueConstraint("match_id", "user_id", name="uq_match_participant_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    match_id: Mapped[str] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    room_id: Mapped[str] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    seat_key: Mapped[str] = mapped_column(String(24))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    display_name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class MatchEvent(Base):
     __tablename__ = "match_events"
     __table_args__ = (UniqueConstraint("room_id", "seq", name="uq_room_event_seq"),)
@@ -273,6 +291,116 @@ class TranscriptSegment(Base):
     end_ms: Mapped[int] = mapped_column(Integer, default=0)
     text: Mapped[str] = mapped_column(Text)
     is_final: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class CaptionSegment(Base):
+    """Recoverable presentation captions, deliberately separate from research transcripts.
+
+    ``presentation_offset_ms`` describes when text became displayable.  It is
+    not an audio alignment and must never be used as ASR/TTS timing evidence.
+    """
+
+    __tablename__ = "caption_segments"
+    __table_args__ = (
+        UniqueConstraint("speech_id", "source", "ordinal", name="uq_caption_segment_ordinal"),
+        Index("ix_caption_segments_room_speech_ordinal", "room_id", "speech_id", "ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    room_id: Mapped[str] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    speech_id: Mapped[str] = mapped_column(ForeignKey("speeches.id", ondelete="CASCADE"), index=True)
+    seat_key: Mapped[str] = mapped_column(String(24))
+    source: Mapped[str] = mapped_column(String(16))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    is_final: Mapped[bool] = mapped_column(Boolean, default=True)
+    timing_basis: Mapped[str] = mapped_column(String(24), default="presentation")
+    presentation_offset_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SpeechCorrectionRequest(Base, TimestampMixin):
+    """Auditable participant request to correct a finalized transcript.
+
+    Approval replaces the normalized transcript used by product views while
+    this row retains the exact previously-authoritative text and segment
+    snapshot.  We therefore never turn a student correction into an
+    untraceable in-place database edit.
+    """
+
+    __tablename__ = "speech_correction_requests"
+    __table_args__ = (
+        Index(
+            "uq_speech_correction_pending",
+            "speech_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            "uq_speech_correction_idempotency",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    speech_id: Mapped[str] = mapped_column(ForeignKey("speeches.id", ondelete="CASCADE"), index=True)
+    room_id: Mapped[str] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    requester_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    original_content: Mapped[str] = mapped_column(Text)
+    proposed_content: Mapped[str] = mapped_column(Text)
+    original_segments: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    reviewed_by_user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    review_reason: Mapped[str] = mapped_column(Text, default="")
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class FreeTurnRequest(Base):
+    """Server-authoritative request for the next human free-debate turn."""
+
+    __tablename__ = "free_turn_requests"
+    __table_args__ = (
+        Index(
+            "uq_free_turn_request_pending_seat",
+            "room_id",
+            "stage_key",
+            "turn_seq",
+            "seat_key",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            "uq_free_turn_request_idempotency",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4)
+    room_id: Mapped[str] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    match_id: Mapped[str] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    stage_key: Mapped[str] = mapped_column(String(80))
+    turn_seq: Mapped[int] = mapped_column(Integer)
+    side: Mapped[str] = mapped_column(String(8))
+    seat_key: Mapped[str] = mapped_column(String(24))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_reason: Mapped[str] = mapped_column(String(120), default="")
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
 
 
 class SpeechDataIssueDisposition(Base, TimestampMixin):

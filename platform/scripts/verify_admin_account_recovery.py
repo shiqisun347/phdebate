@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
 from secrets import token_hex
 
 import httpx
 from app.core.database import SessionLocal
 from app.models.entities import AdminAuditLog, User, UserSession
+from operator_credentials import admin_credentials
 from sqlalchemy import delete, select
 
 
@@ -23,10 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     args = parser.parse_args()
-    admin_account = os.environ.get("V2_ADMIN_ACCOUNT", "")
-    admin_password = os.environ.get("V2_ADMIN_PASSWORD", "")
-    if not admin_account or not admin_password:
-        raise RuntimeError("production admin credentials are not configured")
+    admin_account, admin_password = admin_credentials()
 
     account = f"recovery_{int(time.time())}_{token_hex(3)}"
     old_password = "Recovery-old-1234"

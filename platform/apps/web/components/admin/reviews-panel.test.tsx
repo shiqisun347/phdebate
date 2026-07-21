@@ -21,7 +21,7 @@ describe("ReviewsPanel", () => {
   it("explains the publication hold and provides evidence-first recovery actions", () => {
     const onRetry = vi.fn();
     const onReview = vi.fn();
-    render(<ReviewsPanel reviews={[pending]} recentReviews={[]} retryingIds={new Set()} onRetry={onRetry} onReview={onReview} />);
+    render(<ReviewsPanel reviews={[pending]} recentReviews={[]} speechCorrections={[]} recentSpeechCorrections={[]} retryingIds={new Set()} saving={false} onRetry={onRetry} onReview={onReview} onSpeechCorrectionReview={vi.fn()} />);
 
     expect(screen.getByText(/不会公布胜负或写入排行榜/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /查看比赛记录/ })).toHaveAttribute("href", "/rooms/381526/result");
@@ -32,7 +32,7 @@ describe("ReviewsPanel", () => {
   });
 
   it("shows an explicit healthy empty state", () => {
-    render(<ReviewsPanel reviews={[]} recentReviews={[]} retryingIds={new Set()} onRetry={vi.fn()} onReview={vi.fn()} />);
+    render(<ReviewsPanel reviews={[]} recentReviews={[]} speechCorrections={[]} recentSpeechCorrections={[]} retryingIds={new Set()} saving={false} onRetry={vi.fn()} onReview={vi.fn()} onSpeechCorrectionReview={vi.fn()} />);
     expect(screen.getByText("没有等待复核的比赛，正式赛果均已处理")).toBeInTheDocument();
   });
 });

@@ -320,7 +320,35 @@ async def test_round12_complete_mixed_human_agent_lifecycle_is_recoverable_and_r
     )
     assert approved.status_code == 200, approved.text
 
-    _speak(owner, ranked_code, owner_headers, f"《{ranked_topic}》自由辩论正方发言，观点与本房间历史严格关联。")
+    free_content = f"《{ranked_topic}》自由辩论正方发言，观点与本房间历史严格关联。"
+    free_identity = hashlib.sha256(free_content.encode()).hexdigest()[:16]
+    free_started = owner.post(
+        f"/api/rooms/{ranked_code}/speech/start",
+        headers=owner_headers | {"X-Idempotency-Key": f"start-{free_identity}"},
+        json={},
+    )
+    assert free_started.status_code == 200, free_started.text
+    requested_turn = returning_debater.post(
+        f"/api/rooms/{ranked_code}/free-turn-requests",
+        headers=csrf(returning_debater) | {"X-Idempotency-Key": "round12-neg-free-turn"},
+        json={},
+    )
+    assert requested_turn.status_code == 200, requested_turn.text
+    free_finished = owner.post(
+        f"/api/rooms/{ranked_code}/speech/finish",
+        headers=owner_headers | {"X-Idempotency-Key": f"finish-{free_identity}"},
+        json={"speech_id": free_started.json()["speech_id"], "content": free_content},
+    )
+    assert free_finished.status_code == 200, free_finished.text
+    with SessionLocal() as db:
+        room = load_room(db, ranked_code, lock=True)
+        current = dict(room.template_snapshot[room.current_stage_index])
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        snapshot = list(room.template_snapshot)
+        snapshot[room.current_stage_index] = current
+        room.template_snapshot = snapshot
+        db.commit()
+    await match_engine.process_room(ranked_code)
     returning_headers = _lease(returning_debater, ranked_code, "round12-returning-device")
     _speak(
         returning_debater,
@@ -331,7 +359,13 @@ async def test_round12_complete_mixed_human_agent_lifecycle_is_recoverable_and_r
     with SessionLocal() as db:
         room = load_room(db, ranked_code, lock=True)
         room.stage_deadline_at = now() - timedelta(seconds=1)
+        current = dict(room.template_snapshot[room.current_stage_index])
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        snapshot = list(room.template_snapshot)
+        snapshot[room.current_stage_index] = current
+        room.template_snapshot = snapshot
         db.commit()
+    await match_engine.process_room(ranked_code)
     await match_engine.process_room(ranked_code)
     with SessionLocal() as db:
         assert load_room(db, ranked_code).current_stage_index == 4

@@ -352,6 +352,7 @@ npm --prefix apps/web ci
 PHDEBATE_API_RELEASE=restore-20260719 ./deploy/build-api-release.sh
 PHDEBATE_WEB_DEPLOYMENT_MODE=root \
 PHDEBATE_RELEASE=restore-20260719 ./deploy/build-web-release.sh
+PHDEBATE_COLLAB_RELEASE=restore-20260719 ./deploy/build-transcript-collab-release.sh
 
 ln -sfn "$(pwd)/runtime/api-releases/restore-20260719" .api-primary
 ln -sfn "$(pwd)/runtime/api-releases/restore-20260719" .api-secondary
@@ -492,7 +493,8 @@ curl -fsS https://新服务器IP/debate/api/health
 
 ```bash
 ./deploy/prune-recovery-sets.sh dry-run
-./deploy/prune-recovery-sets.sh apply
+PHDEBATE_ALLOW_RECOVERY_PRUNE=yes \
+  ./deploy/prune-recovery-sets.sh apply
 ```
 
 该工具在把任何恢复集计入保留底线前，会重新校验其六类文件的唯一性、大小和 SHA-256。只要存在
@@ -500,6 +502,21 @@ curl -fsS https://新服务器IP/debate/api/health
 包、私密配置、可靠语音归档、平台/Agent 数据库备份或未识别的旧格式清单。数据库仍由各自的
 14 天保留任务管理；release 使用 `prune-releases.sh` 独立保留最近回滚版本。磁盘清理前后都必须
 执行 readiness、`audit-storage.py` 和当前恢复清单校验。
+
+早期不完整清单不能直接删除，也不能为了让清理继续而手工移出扫描目录。先运行受审计隔离工具：
+
+```bash
+./deploy/quarantine-recovery-manifests.py dry-run
+PHDEBATE_ALLOW_RECOVERY_MANIFEST_QUARANTINE=yes \
+  ./deploy/quarantine-recovery-manifests.py apply
+```
+
+工具只处理“结构不完整但仍能安全定位现有数据卷”的清单：原文件移动到权限受限的
+`runtime/deploy-backups/quarantine/`，同时写入包含原清单 SHA-256、隔离原因和受保护数据卷的
+审计 sidecar。它不会删除任何清单或归档。无法定位安全数据卷引用、数据卷已缺失或目标文件冲突时，
+隔离会被拒绝，原清单继续让清理 fail-closed。`prune-recovery-sets.sh` 和源码归档清理都会继续扫描
+隔离目录中的引用，因此隔离不是绕过保护。隔离完成后必须再次 dry-run，人工确认保留底线和候选文件，
+再显式设置 `PHDEBATE_ALLOW_RECOVERY_PRUNE=yes` 执行清理。
 
 完成三类备份和恢复验证后，使用版本化工具生成绑定清单；私密归档路径必须显式传入，避免误选：
 

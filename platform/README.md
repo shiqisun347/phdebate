@@ -93,9 +93,11 @@ PHDEBATE_SOAK_CYCLES=10 \
 .venv/bin/python scripts/verify_websocket_disconnect_storm.py \
   --base-url https://117.50.192.216 \
   --room 123456 \
-  --clients 500 \
-  --insecure
+  --clients 20
 ```
+
+该脚本同样遵守单房最多 20 个观战连接的产品限制。生产证书测试不得使用 `--insecure`；该参数只用于
+临时自签证书的隔离环境。
 
 生产前端使用 Node.js 24 LTS 独立运行时。房间计时和状态扫描彼此独立，不会因为单个外部服务调用变慢而停止其他房间；Agent 与裁判调用默认全局最多并发 8 个。真人录音在应用层限制为 50 MiB，Nginx API 入口限制为 52 MiB（包含 multipart 开销）。
 
@@ -154,6 +156,7 @@ sudo ./deploy/prepare-runtime.sh
 ```bash
 sudo ./deploy/prepare-runtime.sh
 PHDEBATE_WEB_DEPLOYMENT_MODE=root ./deploy/build-web-release.sh
+./deploy/build-transcript-collab-release.sh
 ./deploy/activate-web-release.sh <release-name>
 ```
 

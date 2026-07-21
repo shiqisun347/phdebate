@@ -51,6 +51,7 @@ describe("debate result redirect", () => {
 
   it("keeps a locally retained recording on the debate page until submission succeeds", async () => {
     const { rerender } = render(<DebatePage />);
+    expect(screen.getByRole("button", { name: "文字记录" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保留录音" }));
     mocks.room = { ...runningRoom, status: "completed", seq: 2 } as Room;
     rerender(<DebatePage />);
@@ -68,6 +69,7 @@ describe("debate result redirect", () => {
     render(<DebatePage />);
     expect(screen.getByText("本轮可发言席位")).toBeInTheDocument();
     expect(screen.getByText(/当前可发言阵营/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "自由辩论举手队列" })).toBeInTheDocument();
   });
 
   it.each([

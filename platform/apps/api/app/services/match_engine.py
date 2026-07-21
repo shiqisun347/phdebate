@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import math
 import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -17,6 +20,7 @@ from app.models.entities import (
     AgentProfile,
     AudioAsset,
     AudioCue,
+    FreeTurnRequest,
     JudgeScorecard,
     LeaderboardEntry,
     Match,
@@ -25,6 +29,14 @@ from app.models.entities import (
     RoomSeat,
     Speech,
     User,
+)
+from app.services.agent_decision import decide_should_speak, interrupt_agent_task, wait_while_current
+from app.services.captions import StreamingCaptionWriter
+from app.services.free_turn_queue import (
+    begin_intermission,
+    expire_room_requests,
+    intermission_deadline,
+    resolve_intermission,
 )
 from app.services.match_archive import enqueue_match_archive
 from app.services.provider_config import runtime_provider_config
@@ -66,6 +78,31 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AgentTextPrefetch:
+    room_code: str
+    stage_index: int
+    stage_key: str
+    seat_key: str
+    fingerprint: str
+    task_id: str
+    payload: dict[str, Any]
+    provider_config: dict[str, Any]
+    content: str = ""
+
+
+@dataclass(frozen=True)
+class FreeAgentSpeculation:
+    room_code: str
+    stage_key: str
+    turn_seq: int
+    seat_key: str
+    decision_payload: dict[str, Any]
+    candidate_payload: dict[str, Any]
+    provider_config: dict[str, Any]
+    task: asyncio.Task | None
 
 
 def _remove_generated_audio(room_code: str, asset_id: str) -> None:
@@ -261,6 +298,14 @@ class MatchEngine:
         self._room_retry_at: dict[str, float] = {}
         self._provider_slots: asyncio.Semaphore | None = None
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
+        # Speculative Agent text is deliberately process-local. It is never an
+        # authoritative match record and never reserves TTS/LiveKit capacity.
+        # A restart simply loses this cache and regenerates the same idempotent
+        # upstream task when the room becomes eligible again.
+        self._agent_prefetch_tasks: dict[str, asyncio.Task] = {}
+        self._agent_prefetch_cache: dict[str, AgentTextPrefetch] = {}
+        self._agent_prefetch_attempted: dict[str, str] = {}
+        self._free_agent_speculations: dict[str, FreeAgentSpeculation] = {}
 
     def start(self) -> None:
         if not settings.engine_enabled or self._task:
@@ -278,6 +323,20 @@ class MatchEngine:
                 pass
             self._task = None
         await self.drain_room_tasks(cancel=True)
+        prefetch_tasks = list(self._agent_prefetch_tasks.values())
+        for task in prefetch_tasks:
+            task.cancel()
+        if prefetch_tasks:
+            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
+        self._agent_prefetch_tasks.clear()
+        self._agent_prefetch_cache.clear()
+        self._agent_prefetch_attempted.clear()
+        free_tasks = [item.task for item in self._free_agent_speculations.values() if item.task]
+        for task in free_tasks:
+            task.cancel()
+        if free_tasks:
+            await asyncio.gather(*free_tasks, return_exceptions=True)
+        self._free_agent_speculations.clear()
         await livekit_audio_registry.close()
         self._room_locks.clear()
         self._room_failures.clear()
@@ -343,6 +402,12 @@ class MatchEngine:
                 self._room_locks.pop(stale_code, None)
         for stale_code in (set(self._room_failures) | set(self._room_transient_failures) | set(self._room_retry_at)) - active_codes:
             self._clear_room_failure(stale_code)
+        for stale_code in (
+            set(self._agent_prefetch_tasks)
+            | set(self._agent_prefetch_cache)
+            | set(self._agent_prefetch_attempted)
+        ) - active_codes:
+            self._invalidate_agent_prefetch(stale_code)
         current_time = time.monotonic()
         for code in codes:
             if current_time < self._room_retry_at.get(code, 0.0):
@@ -439,6 +504,10 @@ class MatchEngine:
         if self._runtime_loop is loop:
             return
         pending_codes = [code for code, task in self._room_tasks.items() if not task.done()]
+        pending_prefetch_codes = [
+            code for code, task in self._agent_prefetch_tasks.items() if not task.done()
+        ]
+        pending_codes.extend(pending_prefetch_codes)
         if pending_codes:
             raise RuntimeError(
                 "match engine event loop changed while room tasks were active; "
@@ -451,6 +520,9 @@ class MatchEngine:
         self._room_failures = {}
         self._room_transient_failures = {}
         self._room_retry_at = {}
+        self._agent_prefetch_tasks = {}
+        self._agent_prefetch_cache = {}
+        self._agent_prefetch_attempted = {}
         self._provider_slots = asyncio.Semaphore(settings.engine_max_concurrent_rooms)
 
     def _provider_semaphore(self) -> asyncio.Semaphore:
@@ -566,6 +638,203 @@ class MatchEngine:
         self._room_transient_failures.pop(code, None)
         self._room_retry_at.pop(code, None)
 
+    def _invalidate_agent_prefetch(self, room_code: str) -> None:
+        self._agent_prefetch_cache.pop(room_code, None)
+        self._agent_prefetch_attempted.pop(room_code, None)
+        task = self._agent_prefetch_tasks.pop(room_code, None)
+        if task and not task.done():
+            task.cancel()
+
+    def _preempt_agent_prefetch_tasks(self) -> None:
+        """Formal speech always has priority over speculative fixed-turn work."""
+        for room_code, task in list(self._agent_prefetch_tasks.items()):
+            self._agent_prefetch_tasks.pop(room_code, None)
+            self._agent_prefetch_attempted.pop(room_code, None)
+            if not task.done():
+                task.cancel()
+
+    def _agent_prefetch_descriptor(
+        self, db: Session, room: Room, stage_index: int
+    ) -> AgentTextPrefetch | None:
+        """Build the complete validity boundary for one speculative response."""
+        if room.status != "running" or stage_index < 0 or stage_index >= len(room.template_snapshot):
+            return None
+        if room.current_stage_index not in {stage_index - 1, stage_index}:
+            return None
+        target = room.template_snapshot[stage_index]
+        if target.get("kind") != "speech":
+            return None
+        seat = next((item for item in room.seats if item.seat_key == target.get("seat")), None)
+        # An AI substitute still belongs to a recoverable human seat. Avoid
+        # racing a legitimate restore; only permanent AI seats are prefetched.
+        if not seat or seat.occupant_type != "ai":
+            return None
+        match = db.scalar(select(Match).where(Match.room_id == room.id))
+        if not match:
+            return None
+        profile = db.get(AgentProfile, seat.agent_profile_id) if seat.agent_profile_id else None
+        history = self._history_for_agent_prefetch(db, room, stage_index)
+        next_name = (
+            room.template_snapshot[stage_index + 1]["name"]
+            if stage_index + 1 < len(room.template_snapshot)
+            else "比赛结束"
+        )
+        duration = max(1, int(target.get("duration", 120)))
+        max_token = min(1_000, max(160, int(duration * 2.1)))
+        agent_config = runtime_provider_config(match.service_snapshot, "agent")
+        fingerprint_input = {
+            "room_id": room.id,
+            "match_id": match.id,
+            "topic": room.topic,
+            "stage_index": stage_index,
+            "stage": target,
+            "seat": {
+                "seat_key": seat.seat_key,
+                "occupant_type": seat.occupant_type,
+                "display_name": seat.display_name,
+                "agent_profile_id": seat.agent_profile_id,
+            },
+            "profile": {
+                "profile_key": profile.profile_key if profile else None,
+                "model_name": profile.model_name if profile else None,
+                "updated_at": profile.updated_at.isoformat() if profile else None,
+            },
+            "history": history,
+            # Credential material only contributes to this local digest; it is
+            # never copied into logs, match events, or browser projections.
+            "agent_config": agent_config,
+        }
+        encoded = json.dumps(fingerprint_input, ensure_ascii=False, sort_keys=True, default=str).encode()
+        fingerprint = hashlib.sha256(encoded).hexdigest()
+        task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:agent-prefetch:{fingerprint}"))
+        payload = agent_payload(
+            topic=room.topic,
+            debater_name=seat.display_name,
+            seat_key=seat.seat_key,
+            current_stage=str(target["name"]),
+            next_stage=str(next_name),
+            history=history,
+            max_token=max_token,
+            model_name=profile.model_name if profile else None,
+            match_id=match.id,
+            room_code=room.code,
+            task_id=task_id,
+            agent_profile=profile.profile_key if profile else None,
+        )
+        return AgentTextPrefetch(
+            room_code=room.code,
+            stage_index=stage_index,
+            stage_key=str(target["key"]),
+            seat_key=seat.seat_key,
+            fingerprint=fingerprint,
+            task_id=task_id,
+            payload=payload,
+            provider_config=agent_config,
+        )
+
+    def _schedule_next_agent_prefetch(self, room_code: str, source_stage_index: int) -> None:
+        """Start text-only work for the immediately following fixed stage."""
+        existing = self._agent_prefetch_tasks.get(room_code)
+        if existing and not existing.done():
+            return
+        with SessionLocal() as db:
+            room = load_room(db, room_code)
+            if room.current_stage_index != source_stage_index:
+                self._invalidate_agent_prefetch(room_code)
+                return
+            descriptor = self._agent_prefetch_descriptor(db, room, source_stage_index + 1)
+        if not descriptor:
+            self._invalidate_agent_prefetch(room_code)
+            return
+        cached = self._agent_prefetch_cache.get(room_code)
+        if cached and cached.fingerprint == descriptor.fingerprint and cached.content:
+            return
+        if self._agent_prefetch_attempted.get(room_code) == descriptor.fingerprint:
+            return
+        if cached and cached.fingerprint != descriptor.fingerprint:
+            self._agent_prefetch_cache.pop(room_code, None)
+        self._agent_prefetch_attempted[room_code] = descriptor.fingerprint
+        task = asyncio.create_task(
+            self._run_agent_prefetch(descriptor),
+            name=f"jixia-agent-prefetch-{room_code}-{descriptor.stage_key}",
+        )
+        self._agent_prefetch_tasks[room_code] = task
+
+        def finished(completed: asyncio.Task, code: str = room_code) -> None:
+            if self._agent_prefetch_tasks.get(code) is completed:
+                self._agent_prefetch_tasks.pop(code, None)
+            if completed.cancelled():
+                return
+            exception = completed.exception()
+            if exception:
+                logger.warning("Agent text prefetch failed room=%s error_type=%s", code, type(exception).__name__)
+
+        task.add_done_callback(finished)
+
+    async def _run_agent_prefetch(self, descriptor: AgentTextPrefetch) -> None:
+        try:
+            async with self._provider_semaphore():
+                content = await debate_agent.generate(
+                    descriptor.payload, provider_config=descriptor.provider_config
+                )
+            if not isinstance(content, str) or not usable_transcript(content, require_substantive=True):
+                return
+            with SessionLocal() as db:
+                room = load_room(db, descriptor.room_code)
+                expected = self._agent_prefetch_descriptor(db, room, descriptor.stage_index)
+                if not expected or expected.fingerprint != descriptor.fingerprint:
+                    return
+            self._agent_prefetch_cache[descriptor.room_code] = AgentTextPrefetch(
+                **{**descriptor.__dict__, "content": content.strip()}
+            )
+        except asyncio.CancelledError:
+            raise
+        except ProviderError as exc:
+            logger.info(
+                "Agent text prefetch unavailable room=%s stage=%s code=%s",
+                descriptor.room_code,
+                descriptor.stage_key,
+                exc.code,
+            )
+
+    def _consume_agent_prefetch(
+        self, db: Session, room: Room, current: dict[str, Any], seat: RoomSeat
+    ) -> str:
+        cached = self._agent_prefetch_cache.pop(room.code, None)
+        self._agent_prefetch_attempted.pop(room.code, None)
+        if not cached:
+            return ""
+        expected = self._agent_prefetch_descriptor(db, room, room.current_stage_index)
+        if (
+            not expected
+            or expected.fingerprint != cached.fingerprint
+            or cached.stage_key != current.get("key")
+            or cached.seat_key != seat.seat_key
+        ):
+            return ""
+        return cached.content if usable_transcript(cached.content, require_substantive=True) else ""
+
+    def _history_for_agent_prefetch(
+        self, db: Session, room: Room, target_stage_index: int
+    ) -> list[dict[str, Any]]:
+        """Include a just-finalized source transcript before audio drain ends."""
+        source_key = ""
+        if target_stage_index > 0:
+            source_key = str(room.template_snapshot[target_stage_index - 1].get("key") or "")
+        grouped: dict[str, list[dict[str, str]]] = {}
+        rows = db.scalars(select(Speech).where(Speech.room_id == room.id).order_by(Speech.created_at)).all()
+        for item in rows:
+            include = item.status == "completed" or (
+                item.stage_key == source_key
+                and item.status in {"speaking", "synthesizing", "playing"}
+            )
+            if not include or not usable_transcript(item.content):
+                continue
+            grouped.setdefault(item.stage_key, []).append(
+                {"speaker": seat_label(item.seat_key), "content": item.content}
+            )
+        return [{"stage": key, "message": value} for key, value in grouped.items()]
+
     def _retry_later(self, code: str, attempts: int) -> float:
         delay = min(self._MAX_RETRY_SECONDS, float(2 ** max(0, attempts - 1)))
         self._room_retry_at[code] = time.monotonic() + delay
@@ -665,6 +934,7 @@ class MatchEngine:
             if room.status == "lobby":
                 return
             if room.status == "preparing":
+                self._invalidate_agent_prefetch(room.code)
                 db.commit()
                 if not await self._prepare_cues(db, room.code):
                     return
@@ -677,15 +947,32 @@ class MatchEngine:
                 await self._broadcast(db, room, "match.started")
                 return
             if room.status not in {"running", "judging"}:
+                self._invalidate_agent_prefetch(room.code)
+                await self.invalidate_free_agent_speculation(room.code)
                 return
             current = stage(room)
             if not current:
                 await self._complete_without_judge(db, room)
                 return
 
+            if current.get("host_announcement_pending"):
+                await self._open_hosted_stage(db, room, current)
+                return
+
             if current.get("kind") == "judging":
+                self._invalidate_agent_prefetch(room.code)
+                await self.invalidate_free_agent_speculation(room.code)
                 await self._judge(db, room)
                 return
+
+            if current.get("kind") != "free":
+                await self.invalidate_free_agent_speculation(room.code)
+
+            if current.get("kind") == "announcement":
+                # Host audio is already prepared and owns no Agent provider
+                # slot, making it the safest window to precompute only the
+                # next fixed AI speech text.
+                self._schedule_next_agent_prefetch(room.code, room.current_stage_index)
 
             playing = db.scalar(select(Speech).where(Speech.room_id == room.id, Speech.status == "playing"))
             if playing:
@@ -693,13 +980,28 @@ class MatchEngine:
                 if playback_ends_at and playback_ends_at.tzinfo is None:
                     playback_ends_at = playback_ends_at.replace(tzinfo=timezone.utc)
                 if playback_ends_at and playback_ends_at > now():
+                    if current.get("kind") == "speech":
+                        self._schedule_next_agent_prefetch(room.code, room.current_stage_index)
                     return
                 self._finish_ai_playback(db, room, playing)
                 db.commit()
+                if current.get("kind") == "free":
+                    self.schedule_free_agent_speculation(room.code)
                 await self._broadcast(db, room, "speech.completed")
                 return
 
             if current.get("kind") == "free":
+                deadline = intermission_deadline(room, current)
+                if deadline:
+                    if now() < deadline:
+                        self.schedule_free_agent_speculation(room.code)
+                        return
+                    current, winner = resolve_intermission(db, room, current)
+                    db.commit()
+                    if winner:
+                        await self.invalidate_free_agent_speculation(room.code)
+                    await self._broadcast(db, room, "free.intermission_resolved")
+                    return
                 # MOSS begins audible playback while the final WAV is still
                 # being assembled, so the speech remains `synthesizing` for
                 # most of the turn. Never revoke that authoritative stream at
@@ -754,10 +1056,13 @@ class MatchEngine:
                 if not active:
                     side = current.get("side", "aff")
                     humans = [item for item in room.seats if item.side == side and item.occupant_type == "human" and item.connected]
-                    if not humans:
+                    if current.get("force_ai_fallback") or not humans:
                         ai_seat = self._free_ai_seat(db, room, current, side)
                         if ai_seat:
-                            await self._ai_speech(db, room, ai_seat, current, free_turn=True)
+                            if not current.get("force_ai_fallback") or self._tts_reuse_source(db, room, current):
+                                await self._ai_speech(db, room, ai_seat, current, free_turn=True)
+                            else:
+                                await self._free_ai_speech_with_intent(db, room, ai_seat, current)
                             return
 
     def _enter_stage(self, db: Session, room: Room, index: int) -> None:
@@ -771,16 +1076,39 @@ class MatchEngine:
         room.current_stage_index = index
         current = dict(room.template_snapshot[index])
         started_at = now()
-        if current.get("kind") == "free":
+        hosted = current.get("kind") != "announcement" and bool(str(current.get("cue") or "").strip())
+        if current.get("kind") == "free" and not hosted:
+            current["turn_seq"] = max(0, int(current.get("turn_seq", 0)))
             current["turn_started_at"] = started_at.isoformat()
             snapshot = list(room.template_snapshot)
             snapshot[index] = current
             room.template_snapshot = snapshot
         duration = max(1, int(current.get("duration", 30)))
+        if str(current.get("cue") or "").strip():
+            asset_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:{room.id}:cue:{current['key']}"))
+            audio_duration = self._audio_duration(room.code, asset_id)
+            if audio_duration > 0:
+                # The cue was prepared before the match began and is already
+                # available to every client. Use its real length instead of a
+                # guessed template duration, with a small delivery guard so a
+                # normal network scheduling delay does not clip the final word.
+                cue_duration = max(1, math.ceil(audio_duration + 0.75))
+                if current.get("kind") == "announcement":
+                    duration = cue_duration
+                elif hosted:
+                    current["host_announcement_pending"] = True
+                    current["host_target_kind"] = current.get("kind")
+                    current["kind"] = "announcement"
+                    current["host_announcement_deadline_at"] = (started_at + timedelta(seconds=cue_duration)).isoformat()
+                    current["host_target_duration_seconds"] = duration
+                    snapshot = list(room.template_snapshot)
+                    snapshot[index] = current
+                    room.template_snapshot = snapshot
+                    duration = cue_duration
         room.stage_started_at = started_at
         room.stage_deadline_at = started_at + timedelta(seconds=duration)
         room.paused_remaining_seconds = None
-        room.status = "judging" if current.get("kind") == "judging" else "running"
+        room.status = "judging" if current.get("kind") == "judging" and not hosted else "running"
         append_event(
             db,
             room,
@@ -789,18 +1117,53 @@ class MatchEngine:
             idempotency_key=f"{room.id}:stage:{index}:start",
         )
 
+    async def _open_hosted_stage(self, db: Session, room: Room, current: dict[str, Any]) -> bool:
+        """Keep a target stage locked until its prepared host cue has ended."""
+
+        if not current.get("host_announcement_pending"):
+            return False
+        raw_deadline = current.get("host_announcement_deadline_at")
+        try:
+            deadline = datetime.fromisoformat(str(raw_deadline))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            deadline = now()
+        if now() < deadline:
+            return True
+        opened_at = now()
+        updated = dict(current)
+        duration = max(1, int(updated.pop("host_target_duration_seconds", updated.get("duration", 30))))
+        updated["kind"] = str(updated.pop("host_target_kind", updated.get("kind") or "announcement"))
+        updated.pop("host_announcement_pending", None)
+        updated.pop("host_announcement_deadline_at", None)
+        if updated.get("kind") == "free":
+            updated["turn_seq"] = max(0, int(updated.get("turn_seq", 0)))
+            updated["turn_started_at"] = opened_at.isoformat()
+        snapshot = list(room.template_snapshot)
+        snapshot[room.current_stage_index] = updated
+        room.template_snapshot = snapshot
+        room.stage_started_at = opened_at
+        room.stage_deadline_at = opened_at + timedelta(seconds=duration)
+        room.status = "judging" if updated.get("kind") == "judging" else "running"
+        append_event(
+            db,
+            room,
+            "stage.host_announcement_completed",
+            {"stage_key": updated.get("key"), "deadline_at": room.stage_deadline_at.isoformat()},
+            idempotency_key=f"{room.id}:stage:{room.current_stage_index}:host-opened",
+        )
+        db.commit()
+        await self._broadcast(db, room, "stage.host_announcement_completed")
+        return True
+
     def _advance(self, db: Session, room: Room, *, reason: str) -> None:
         current = stage(room)
         if current and current.get("kind") == "free" and reason == "free_turn_completed" and remaining_seconds(room) not in {0, None}:
-            next_side = "neg" if current.get("side") == "aff" else "aff"
-            updated_current = dict(current)
-            updated_current["side"] = next_side
-            updated_current["turn_started_at"] = now().isoformat()
-            snapshot = list(room.template_snapshot)
-            snapshot[room.current_stage_index] = updated_current
-            room.template_snapshot = snapshot
-            append_event(db, room, "free.side_changed", {"side": next_side})
+            begin_intermission(db, room, current)
             return
+        if current and current.get("kind") == "free":
+            expire_room_requests(db, room, "stage_ended")
         append_event(db, room, "stage.completed", {"stage": current, "reason": reason})
         self._enter_stage(db, room, room.current_stage_index + 1)
 
@@ -871,7 +1234,336 @@ class MatchEngine:
             return None
         return previous
 
-    async def _ai_speech(self, db: Session, room: Room, seat: RoomSeat, current: dict[str, Any], *, free_turn: bool = False) -> None:
+    def _free_agent_payloads(
+        self, db: Session, room: Room, seat: RoomSeat, current: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+        match = db.scalar(select(Match).where(Match.room_id == room.id))
+        if not match:
+            return None
+        profile = db.get(AgentProfile, seat.agent_profile_id) if seat.agent_profile_id else None
+        next_stage = (
+            room.template_snapshot[room.current_stage_index + 1]["name"]
+            if room.current_stage_index + 1 < len(room.template_snapshot)
+            else "比赛结束"
+        )
+        turn_seq = int(current.get("intermission_turn_seq", current.get("turn_seq", 0)))
+        identity = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"phdebate:free-agent:{room.id}:{current['key']}:{turn_seq}:{seat.seat_key}",
+        ).hex
+        base_payload = agent_payload(
+            topic=room.topic,
+            debater_name=seat.display_name,
+            seat_key=seat.seat_key,
+            current_stage=current["name"],
+            next_stage=next_stage,
+            history=self._history(db, room.id),
+            max_token=min(1_000, max(160, int(current.get("turn_duration", 45) * 2.1))),
+            model_name=profile.model_name if profile else None,
+            match_id=match.id,
+            room_code=room.code,
+            agent_profile=profile.profile_key if profile else None,
+        )
+        return (
+            {**base_payload, "task_id": f"decision-{identity}", "max_token": 48},
+            {**base_payload, "task_id": f"candidate-{identity}", "task_type": "debate_candidate"},
+            runtime_provider_config(match.service_snapshot, "agent"),
+        )
+
+    def _free_agent_turn_current(self, room_code: str, stage_key: str, turn_seq: int) -> bool:
+        with SessionLocal() as check_db:
+            check_room = load_room(check_db, room_code)
+            check_stage = stage(check_room)
+            if (
+                check_room.status != "running"
+                or not check_stage
+                or check_stage.get("kind") != "free"
+                or str(check_stage.get("key")) != stage_key
+            ):
+                return False
+            intermission_turn = check_stage.get("intermission_turn_seq")
+            if intermission_turn is not None:
+                if int(intermission_turn) != turn_seq:
+                    return False
+            elif int(check_stage.get("turn_seq", -1)) != turn_seq:
+                return False
+            elif not check_stage.get("force_ai_fallback") and any(
+                item.side == check_stage.get("side")
+                and item.occupant_type == "human"
+                and item.connected
+                for item in check_room.seats
+            ):
+                return False
+            active = check_db.scalar(
+                select(Speech.id).where(
+                    Speech.room_id == check_room.id,
+                    Speech.status.in_(["speaking", "synthesizing", "playing"]),
+                )
+            )
+            pending_human = check_db.scalar(
+                select(FreeTurnRequest.id).where(
+                    FreeTurnRequest.room_id == check_room.id,
+                    FreeTurnRequest.stage_key == stage_key,
+                    FreeTurnRequest.turn_seq == turn_seq,
+                    FreeTurnRequest.status == "pending",
+                )
+            )
+            return active is None and pending_human is None
+
+    async def _run_free_agent_speculation(
+        self,
+        descriptor: FreeAgentSpeculation,
+    ) -> tuple[object, object]:
+        endpoint = str(descriptor.provider_config.get("endpoint") or "")
+        decision_task = asyncio.create_task(
+            decide_should_speak(descriptor.decision_payload, descriptor.provider_config)
+        )
+
+        async def generate_candidate() -> str:
+            async with self._provider_semaphore():
+                return await debate_agent.generate(
+                    descriptor.candidate_payload, provider_config=descriptor.provider_config
+                )
+
+        candidate_task = asyncio.create_task(generate_candidate())
+
+        async def invalidate() -> None:
+            await asyncio.gather(
+                interrupt_agent_task(
+                    endpoint, descriptor.decision_payload["task_id"], descriptor.provider_config
+                ),
+                interrupt_agent_task(
+                    endpoint, descriptor.candidate_payload["task_id"], descriptor.provider_config
+                ),
+                return_exceptions=True,
+            )
+
+        valid = await wait_while_current(
+            {decision_task},
+            lambda: self._free_agent_turn_current(
+                descriptor.room_code, descriptor.stage_key, descriptor.turn_seq
+            ),
+            invalidate,
+        )
+        if not valid:
+            candidate_task.cancel()
+            await asyncio.gather(candidate_task, return_exceptions=True)
+            raise asyncio.CancelledError
+        decision = (await asyncio.gather(decision_task, return_exceptions=True))[0]
+        if not bool(getattr(decision, "should_speak", True)):
+            await invalidate()
+            candidate_task.cancel()
+            await asyncio.gather(candidate_task, return_exceptions=True)
+            return decision, ""
+        valid = await wait_while_current(
+            {candidate_task},
+            lambda: self._free_agent_turn_current(
+                descriptor.room_code, descriptor.stage_key, descriptor.turn_seq
+            ),
+            invalidate,
+        )
+        if not valid:
+            raise asyncio.CancelledError
+        return decision, (await asyncio.gather(candidate_task, return_exceptions=True))[0]
+
+    def schedule_free_agent_speculation(self, room_code: str) -> None:
+        existing = self._free_agent_speculations.get(room_code)
+        # Keep completed negative/positive results until the authoritative
+        # three-second window resolves. Re-scheduling here would replay the
+        # decision and, after a negative decision, hit an interrupted candidate
+        # task instead of reusing the original result.
+        if existing:
+            return
+        with SessionLocal() as db:
+            room = load_room(db, room_code)
+            current = stage(room)
+            if room.status != "running" or not current or not intermission_deadline(room, current):
+                return
+            turn_seq = int(current.get("intermission_turn_seq", -1))
+            side = str(current.get("intermission_side") or "")
+            seat = self._free_ai_seat(db, room, current, side)
+            if not seat:
+                return
+            built = self._free_agent_payloads(db, room, seat, current)
+            if not built:
+                return
+            decision_payload, candidate_payload, agent_config = built
+        descriptor = FreeAgentSpeculation(
+            room_code=room_code,
+            stage_key=str(current["key"]),
+            turn_seq=turn_seq,
+            seat_key=seat.seat_key,
+            decision_payload=decision_payload,
+            candidate_payload=candidate_payload,
+            provider_config=agent_config,
+            task=None,
+        )
+        task = asyncio.create_task(
+            self._run_free_agent_speculation(descriptor),
+            name=f"free-agent-speculation-{room_code}-{turn_seq}",
+        )
+        self._free_agent_speculations[room_code] = FreeAgentSpeculation(
+            **{**descriptor.__dict__, "task": task}
+        )
+
+    async def invalidate_free_agent_speculation(self, room_code: str) -> None:
+        descriptor = self._free_agent_speculations.pop(room_code, None)
+        if not descriptor:
+            return
+        await asyncio.gather(
+            interrupt_agent_task(
+                str(descriptor.provider_config.get("endpoint") or ""),
+                descriptor.decision_payload["task_id"],
+                descriptor.provider_config,
+            ),
+            interrupt_agent_task(
+                str(descriptor.provider_config.get("endpoint") or ""),
+                descriptor.candidate_payload["task_id"],
+                descriptor.provider_config,
+            ),
+            return_exceptions=True,
+        )
+        if descriptor.task:
+            descriptor.task.cancel()
+            await asyncio.gather(descriptor.task, return_exceptions=True)
+
+    async def _free_ai_speech_with_intent(
+        self,
+        db: Session,
+        room: Room,
+        seat: RoomSeat,
+        current: dict[str, Any],
+    ) -> None:
+        """Run the intent check and hidden candidate generation concurrently."""
+
+        turn_seq = int(current.get("turn_seq", 0))
+        room_code = room.code
+        stage_key = str(current["key"])
+        existing = self._free_agent_speculations.pop(room_code, None)
+        if (
+            existing
+            and existing.stage_key == stage_key
+            and existing.turn_seq == turn_seq
+            and existing.seat_key == seat.seat_key
+            and existing.task
+        ):
+            descriptor = existing
+        else:
+            if existing:
+                self._free_agent_speculations[room_code] = existing
+                await self.invalidate_free_agent_speculation(room_code)
+            built = self._free_agent_payloads(db, room, seat, current)
+            if not built:
+                return
+            decision_payload, candidate_payload, agent_config = built
+            descriptor = FreeAgentSpeculation(
+                room_code=room_code,
+                stage_key=stage_key,
+                turn_seq=turn_seq,
+                seat_key=seat.seat_key,
+                decision_payload=decision_payload,
+                candidate_payload=candidate_payload,
+                provider_config=agent_config,
+                task=None,
+            )
+        decision_payload = descriptor.decision_payload
+        candidate_payload = descriptor.candidate_payload
+        agent_config = descriptor.provider_config
+        db.commit()
+        speculation_task = descriptor.task or asyncio.create_task(self._run_free_agent_speculation(descriptor))
+        try:
+            decision_value, candidate_value = await speculation_task
+        except asyncio.CancelledError:
+            return
+        should_speak = bool(getattr(decision_value, "should_speak", True))
+        reason = str(getattr(decision_value, "reason", "判断异常，按既有流程发言"))[:300]
+        fallback = bool(getattr(decision_value, "fallback", not hasattr(decision_value, "should_speak")))
+
+        db.expire_all()
+        room = load_room(db, room_code, lock=True)
+        current = stage(room) or current
+        if (
+            room.status != "running"
+            or not current
+            or current.get("kind") != "free"
+            or str(current.get("key")) != stage_key
+            or int(current.get("turn_seq", -1)) != turn_seq
+            or (
+                not current.get("force_ai_fallback")
+                and any(
+                    item.side == current.get("side")
+                    and item.occupant_type == "human"
+                    and item.connected
+                    for item in room.seats
+                )
+            )
+        ):
+            db.rollback()
+            await asyncio.gather(
+                interrupt_agent_task(
+                    str(agent_config.get("endpoint") or ""), decision_payload["task_id"], agent_config
+                ),
+                interrupt_agent_task(
+                    str(agent_config.get("endpoint") or ""), candidate_payload["task_id"], agent_config
+                ),
+                return_exceptions=True,
+            )
+            return
+        append_event(
+            db,
+            room,
+            "free.agent_intent_resolved",
+            {
+                "seat_key": seat.seat_key,
+                "turn_seq": turn_seq,
+                "should_speak": should_speak,
+                "reason": reason,
+                "fallback": fallback,
+                "decision_task_id": decision_payload["task_id"],
+                "candidate_task_id": candidate_payload["task_id"],
+            },
+            idempotency_key=f"{room.id}:{stage_key}:{turn_seq}:{seat.seat_key}:agent-intent",
+        )
+        if not should_speak:
+            append_event(
+                db,
+                room,
+                "free.agent_candidate_discarded",
+                {"seat_key": seat.seat_key, "turn_seq": turn_seq, "reason": "decision_declined"},
+            )
+            self._advance(db, room, reason="free_turn_completed")
+            db.commit()
+            await self._broadcast(db, room, "free.agent_candidate_discarded")
+            return
+        prefetched_content = (
+            candidate_value
+            if isinstance(candidate_value, str) and usable_transcript(candidate_value, require_substantive=True)
+            else ""
+        )
+        if not prefetched_content:
+            append_event(db, room, "free.agent_candidate_failed", {"seat_key": seat.seat_key, "turn_seq": turn_seq})
+        db.commit()
+        await self._broadcast(db, room, "free.agent_intent_resolved")
+        await self._ai_speech(
+            db,
+            room,
+            seat,
+            current,
+            free_turn=True,
+            speculative_content=prefetched_content,
+        )
+
+    async def _ai_speech(
+        self,
+        db: Session,
+        room: Room,
+        seat: RoomSeat,
+        current: dict[str, Any],
+        *,
+        free_turn: bool = False,
+        speculative_content: str = "",
+    ) -> None:
+        self._preempt_agent_prefetch_tasks()
         match = db.scalar(select(Match).where(Match.room_id == room.id))
         if not match:
             return
@@ -893,7 +1585,7 @@ class MatchEngine:
         lighttts_config = runtime_provider_config(match.service_snapshot, "lighttts")
         agent_config = runtime_provider_config(match.service_snapshot, "agent")
         previous = self._tts_reuse_source(db, room, current)
-        reusable_content = (
+        retry_content = (
             previous.content.strip()
             if (
                 previous
@@ -901,6 +1593,10 @@ class MatchEngine:
             )
             else ""
         )
+        prefetched_content = speculative_content or (
+            "" if retry_content or free_turn else self._consume_agent_prefetch(db, room, current, seat)
+        )
+        reusable_content = retry_content or prefetched_content
         speech = Speech(
             match_id=match.id,
             room_id=room.id,
@@ -929,6 +1625,17 @@ class MatchEngine:
                     "source_speech_id": previous.id,
                     "seat_key": seat.seat_key,
                     "reason": "tts_only_retry",
+                },
+            )
+        elif prefetched_content:
+            append_event(
+                db,
+                room,
+                "speech.content.prefetched",
+                {
+                    "speech_id": speech.id,
+                    "seat_key": seat.seat_key,
+                    "stage_key": current["key"],
                 },
             )
         db.commit()
@@ -977,6 +1684,7 @@ class MatchEngine:
         room_code = room.code
         speech_id = speech.id
         stage_key = current["key"]
+        source_stage_index = room.current_stage_index
         tts_deadline_monotonic = 0.0
         stream_generation: str | None = None
         stream_playback_started_at: datetime | None = None
@@ -1134,11 +1842,40 @@ class MatchEngine:
                         on_first_readable_delta=mark_first_readable_delta,
                     )
                 else:
+                    caption_writer = StreamingCaptionWriter(room_code, speech_id, seat.seat_key)
+
                     async def agent_events():
                         async with self._provider_semaphore():
                             raw_events = debate_agent.generate_stream(payload, provider_config=agent_config)
                             async for event in self._validated_agent_stream(raw_events):
+                                # Yield to the authoritative voice pipeline
+                                # first. Caption persistence must never enter
+                                # the first-sound latency path.
                                 yield event
+                                if event.get("type") == "delta" and isinstance(event.get("delta"), str):
+                                    await caption_writer.feed(event["delta"])
+                                elif event.get("type") == "final":
+                                    final_content = str(event.get("content") or "").strip()
+                                    await caption_writer.finish(final_content)
+                                    # Persist the fixed transcript while native
+                                    # audio is still draining, so the next
+                                    # Agent sees the exact latest argument. The
+                                    # speech remains non-completed until audio
+                                    # playback itself is authoritative.
+                                    if usable_transcript(final_content, require_substantive=True):
+                                        db.expire_all()
+                                        prefetch_room = load_room(db, room_code, lock=True)
+                                        prefetch_speech = db.get(Speech, speech_id)
+                                        if self._speech_task_current(
+                                            prefetch_room, prefetch_speech, stage_key, "synthesizing"
+                                        ):
+                                            prefetch_speech.content = final_content
+                                            db.commit()
+                                    # The transcript is now fixed, while the
+                                    # native realtime session may still be
+                                    # draining audio. Start only next-turn
+                                    # Agent text; TTS/LiveKit remain untouched.
+                                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
 
                     async def interrupt_agent() -> None:
                         await debate_agent.interrupt(speech_id, provider_config=agent_config)
@@ -1394,6 +2131,8 @@ class MatchEngine:
         )
         self._advance(db, room, reason="free_turn_completed" if free_turn else "speech_completed")
         db.commit()
+        if free_turn:
+            self.schedule_free_agent_speculation(room.code)
         await self._broadcast(db, room, "speech.completed")
 
     def _audio_duration(self, room_code: str, speech_id: str) -> float:
@@ -1613,6 +2352,12 @@ class MatchEngine:
                     AudioCue.audio_url != "",
                 )
             )
+            # A stage key identifies the placement in a versioned flow, but a
+            # future host announcement may resolve room-specific variables
+            # such as the topic or speaker name. Never copy a stale preset WAV
+            # merely because the key matches when its declared text does not.
+            if preset and " ".join((preset.text or "").split()) != " ".join(cue.split()):
+                preset = None
             preset_source = settings.media_path / "_cues" / f"{preset.id}.wav" if preset else None
             db.commit()
             try:

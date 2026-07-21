@@ -11,6 +11,25 @@ export type Review = {
   updated_at: string;
 };
 
+export type AdminSpeechCorrection = {
+  id: string;
+  speech_id: string;
+  room_id: string;
+  room_code: string;
+  topic: string;
+  seat_key: string;
+  requester_name: string;
+  requester_user_id: string;
+  original_content: string;
+  proposed_content: string;
+  reason: string;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  review_reason: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+};
+
 export type Audit = {
   id: string;
   actor_name: string;

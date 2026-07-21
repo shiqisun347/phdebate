@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "prune-recovery-sets.sh"
+QUARANTINE_SCRIPT = ROOT / "quarantine-recovery-manifests.py"
 
 
 def make_set(directory: Path, name: str, data_name: str, age_hours: int, schema: str = "3") -> tuple[Path, Path]:
@@ -46,19 +47,51 @@ def make_set(directory: Path, name: str, data_name: str, age_hours: int, schema:
 
 
 def run(root: Path, mode: str, *, keep: int = 2, minimum_age: int = 24) -> subprocess.CompletedProcess[str]:
+    env = os.environ | {
+        "PHDEBATE_ROOT": str(root),
+        "PHDEBATE_AGENT_ROOT": str(root / "agent"),
+        "PHDEBATE_DEPLOY_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
+        "PHDEBATE_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
+        "PHDEBATE_AGENT_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
+        "PHDEBATE_RECOVERY_INDEX_VERIFY_SCRIPT": str(ROOT / "verify-recovery-index.py"),
+        "PHDEBATE_RECOVERY_KEEP": str(keep),
+        "PHDEBATE_RECOVERY_MIN_AGE_HOURS": str(minimum_age),
+    }
+    if mode == "apply":
+        env["PHDEBATE_ALLOW_RECOVERY_PRUNE"] = "yes"
     return subprocess.run(
         ["bash", str(SCRIPT), mode],
-        env=os.environ
-        | {
-            "PHDEBATE_ROOT": str(root),
-            "PHDEBATE_AGENT_ROOT": str(root / "agent"),
-            "PHDEBATE_DEPLOY_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
-            "PHDEBATE_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
-            "PHDEBATE_AGENT_BACKUP_DIR": str(root / "runtime" / "deploy-backups"),
-            "PHDEBATE_RECOVERY_INDEX_VERIFY_SCRIPT": str(ROOT / "verify-recovery-index.py"),
-            "PHDEBATE_RECOVERY_KEEP": str(keep),
-            "PHDEBATE_RECOVERY_MIN_AGE_HOURS": str(minimum_age),
-        },
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_recovery_prune_apply_requires_explicit_operator_acknowledgement(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    make_set(directory, "current", "current-data-volumes.tar.gz", 48)
+    env = os.environ | {
+        "PHDEBATE_ROOT": str(tmp_path),
+        "PHDEBATE_DEPLOY_BACKUP_DIR": str(directory),
+    }
+    env.pop("PHDEBATE_ALLOW_RECOVERY_PRUNE", None)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "apply"],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "requires PHDEBATE_ALLOW_RECOVERY_PRUNE=yes" in result.stderr
+
+
+def quarantine(root: Path, mode: str = "apply") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["python3", str(QUARANTINE_SCRIPT), mode, "--backup-dir", str(root / "runtime" / "deploy-backups")],
+        env=os.environ | {"PHDEBATE_ALLOW_RECOVERY_MANIFEST_QUARANTINE": "yes"},
         text=True,
         capture_output=True,
         check=True,
@@ -171,6 +204,58 @@ def test_truncated_schema_two_manifest_fails_closed(tmp_path: Path) -> None:
     assert "reason=unsafe-manifests-present" in result.stdout
     assert current.exists() and current_data.exists()
     assert truncated.exists() and truncated_data.exists()
+
+
+def test_explicit_quarantine_preserves_old_data_and_unblocks_verified_pruning(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    invalid, invalid_data = make_set(directory, "early", "early-data-volumes.tar.gz", 144, schema="1")
+    obsolete, obsolete_data = make_set(directory, "obsolete", "obsolete-data-volumes.tar.gz", 120)
+    current, current_data = make_set(directory, "current", "current-data-volumes.tar.gz", 48)
+
+    quarantined = quarantine(tmp_path)
+
+    assert "candidates=1 refused=0" in quarantined.stdout
+    assert not invalid.exists()
+    isolated = directory / "quarantine" / invalid.name
+    assert isolated.exists()
+    assert (directory / "quarantine" / f"{invalid.name}.quarantine.json").exists()
+
+    result = run(tmp_path, "apply", keep=1)
+
+    assert "reason=unsafe-manifests-present" not in result.stdout
+    assert f"protects={invalid_data.name}" in result.stdout
+    assert invalid_data.exists()
+    assert not obsolete.exists() and not obsolete_data.exists()
+    assert current.exists() and current_data.exists()
+
+
+def test_quarantine_refuses_an_incomplete_manifest_without_a_data_reference(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    directory.mkdir(parents=True)
+    incomplete = directory / "recovery-set-no-data.manifest"
+    incomplete.write_text("schema_version=2\nartifact.v2_database.filename=old.dump\n")
+
+    result = quarantine(tmp_path)
+
+    assert "candidates=0 refused=1" in result.stdout
+    assert "quarantine_refused=missing-safe-data-reference" in result.stdout
+    assert incomplete.exists()
+    assert not (directory / "quarantine").exists()
+
+
+def test_quarantine_apply_requires_explicit_operator_acknowledgement(tmp_path: Path) -> None:
+    directory = tmp_path / "runtime" / "deploy-backups"
+    make_set(directory, "early", "early-data-volumes.tar.gz", 144, schema="1")
+
+    result = subprocess.run(
+        ["python3", str(QUARANTINE_SCRIPT), "apply", "--backup-dir", str(directory)],
+        env={key: value for key, value in os.environ.items() if key != "PHDEBATE_ALLOW_RECOVERY_MANIFEST_QUARANTINE"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "requires PHDEBATE_ALLOW_RECOVERY_MANIFEST_QUARANTINE=yes" in result.stderr
 
 
 def test_complete_but_corrupt_recovery_set_stops_all_pruning(tmp_path: Path) -> None:

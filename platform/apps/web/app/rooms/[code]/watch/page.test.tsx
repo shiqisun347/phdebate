@@ -47,6 +47,7 @@ describe("watch result redirect", () => {
     mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
     render(<WatchPage />);
     expect(mocks.push).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "文字记录" })).toBeInTheDocument();
   });
 
   it("tells a redirected non-owner why the control console became read-only", async () => {
@@ -54,9 +55,9 @@ describe("watch result redirect", () => {
     mocks.room = { id: "room", code: "123456", status: "running", seq: 1 } as unknown as Room;
     render(<WatchPage />);
 
-    expect(await screen.findByRole("status")).toHaveTextContent("只有房主或系统管理员可以进入本房间控制台");
+    expect(await screen.findByText(/只有房主或系统管理员可以进入本房间控制台/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "知道了" }));
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText(/只有房主或系统管理员可以进入本房间控制台/)).not.toBeInTheDocument();
     expect(window.location.search).toBe("");
   });
 
@@ -72,6 +73,8 @@ describe("watch result redirect", () => {
     render(<WatchPage />);
     expect(screen.getByText("本轮可发言席位")).toBeInTheDocument();
     expect(screen.getByText(/当前可发言阵营/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "自由辩论举手队列" })).toBeInTheDocument();
+    expect(screen.getByText("观战模式仅展示队列，不能申请发言。")).toBeInTheDocument();
   });
 
   it("returns a cancelled room to the public lobby", async () => {

@@ -8,10 +8,10 @@ import subprocess
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Response, UploadFile
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -22,21 +22,38 @@ from app.core.deps import authenticated_session, current_user, optional_user, ve
 from app.models.entities import (
     Competition,
     CompetitionTopic,
+    FreeTurnRequest,
     JudgeProfile,
     JudgeScorecard,
     Match,
     MatchEvent,
+    MatchParticipant,
     RatingChange,
     Room,
     RoomSeat,
     Season,
     SeatRestoreRequest,
     Speech,
+    SpeechCorrectionRequest,
     TranscriptSegment,
     User,
     UserSession,
 )
-from app.schemas.requests import ControlLeaseRequest, ControlRequest, CreateRoomRequest, FinishSpeechRequest, ReadyRequest, SeatRequest
+from app.schemas.requests import (
+    ControlLeaseRequest,
+    ControlRequest,
+    CreateRoomRequest,
+    FinishSpeechRequest,
+    ReadyRequest,
+    SeatRequest,
+    SpeechCorrectionCreate,
+)
+from app.services.free_turn_queue import (
+    cancel_free_turn,
+    expire_room_requests,
+    intermission_remaining_ms,
+    request_free_turn,
+)
 from app.services.livekit_audio import (
     create_livekit_token,
     livekit_audio_enabled,
@@ -78,8 +95,16 @@ from app.services.seat_restore import (
     review_restore_request,
     serialize_restore_request,
 )
+from app.services.speech_correction import (
+    can_request_correction,
+    cancel_correction_request,
+    create_correction_request,
+    serialize_correction_request,
+    visible_correction_requests,
+)
 from app.services.speech_pagination import SpeechCursorError, paginate_match_speeches
 from app.services.speech_quality import PcmVoiceActivity, normalize_transcript, transcript_rejection_reason
+from app.services.transcript_collab import create_transcript_collab_token
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 MAX_AUDIO_BYTES = 50 * 1024 * 1024
@@ -632,6 +657,7 @@ def room_result(
                 "audio_url": item.audio_url,
                 "duration_seconds": item.duration_seconds,
                 "created_at": item.created_at.isoformat(),
+                "can_request_correction": can_request_correction(db, room, item, user),
             }
             for item in speech_result.rows
         ],
@@ -966,6 +992,114 @@ async def reject_seat_restore(
     return {"room": serialize_room(db, loaded, user), "replayed": replayed}
 
 
+@router.get("/{code}/speech-correction-requests")
+def list_speech_correction_requests(
+    code: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    room = load_room(db, code)
+    if not can_view_room(db, room, user):
+        raise HTTPException(status_code=403, detail="无权查看该房间。")
+    return {"items": visible_correction_requests(db, room, user)}
+
+
+@router.post("/{code}/transcript-collab-token")
+def transcript_collab_token(
+    code: str,
+    response: Response,
+    user: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    room = load_room(db, code)
+    if not can_view_room(db, room, user):
+        raise HTTPException(status_code=403, detail="无权查看该房间。")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Pragma"] = "no-cache"
+    return create_transcript_collab_token(db, room, user)
+
+
+@router.post("/{code}/speeches/{speech_id}/correction-requests")
+async def request_speech_correction(
+    code: str,
+    speech_id: str,
+    payload: SpeechCorrectionCreate,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    user: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    room = load_room(db, code, lock=True)
+    request, replayed = create_correction_request(
+        db,
+        room,
+        speech_id,
+        user,
+        proposed_content=payload.proposed_content,
+        reason=payload.reason,
+        provided_idempotency_key=idempotency_key,
+    )
+    db.commit()
+    if not replayed:
+        await _publish(room, "speech.correction_requested")
+    return {
+        "request": serialize_correction_request(request),
+        "room": serialize_room(db, load_room(db, code), user),
+        "replayed": replayed,
+    }
+
+
+@router.post("/{code}/speech-correction-requests/{request_id}/cancel")
+async def cancel_speech_correction(
+    code: str,
+    request_id: str,
+    user: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    room = load_room(db, code, lock=True)
+    request = db.get(SpeechCorrectionRequest, request_id)
+    if not request:
+        raise HTTPException(status_code=404, detail="修正申请不存在。")
+    replayed = cancel_correction_request(db, room, request, user)
+    db.commit()
+    if not replayed:
+        await _publish(room, "speech.correction_cancelled")
+    return {"request": serialize_correction_request(request), "replayed": replayed}
+
+
+@router.post("/{code}/free-turn-requests")
+async def create_free_turn_request(
+    code: str,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    user: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    room = load_room(db, code, lock=True)
+    item, replayed = request_free_turn(db, room, user, provided_idempotency_key=idempotency_key)
+    db.commit()
+    if not replayed:
+        await match_engine.invalidate_free_agent_speculation(code)
+        await _publish(room, "free.turn_requested")
+    return {"request_id": item.id, "status": item.status, "replayed": replayed, "room": serialize_room(db, load_room(db, code), user)}
+
+
+@router.post("/{code}/free-turn-requests/{request_id}/cancel")
+async def cancel_free_turn_request(
+    code: str,
+    request_id: str,
+    user: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    room = load_room(db, code, lock=True)
+    item = db.get(FreeTurnRequest, request_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="自由辩论申请不存在。")
+    replayed = cancel_free_turn(db, room, item, user)
+    db.commit()
+    if not replayed:
+        await _publish(room, "free.turn_request_cancelled")
+    return {"request_id": item.id, "status": item.status, "replayed": replayed, "room": serialize_room(db, load_room(db, code), user)}
+
+
 @router.post("/{code}/ready")
 async def ready(
     code: str,
@@ -1153,6 +1287,18 @@ async def start_room(
         service_snapshot=service_snapshot,
     )
     db.add(match)
+    db.flush()
+    for seat in humans:
+        if seat.user_id:
+            db.add(
+                MatchParticipant(
+                    match_id=match.id,
+                    room_id=room.id,
+                    seat_key=seat.seat_key,
+                    user_id=seat.user_id,
+                    display_name=seat.display_name,
+                )
+            )
     room.status = "preparing"
     room.started_at = now()
     append_event(
@@ -1424,6 +1570,8 @@ async def finish_speech(
     current = stage(room)
     match_engine._advance(db, room, reason="free_turn_completed" if current and current.get("kind") == "free" else "speech_completed")
     db.commit()
+    if current and current.get("kind") == "free":
+        match_engine.schedule_free_agent_speculation(code)
     await _publish(room, "speech.completed")
     return {"room": serialize_room(db, load_room(db, code), user), "speech_id": speech.id}
 
@@ -1585,14 +1733,30 @@ async def control(
             raise HTTPException(status_code=409, detail="真人正在发言，请先结束发言再暂停比赛。")
         current = stage(room)
         stage_remaining = remaining_seconds(room)
+        host_announcement_ms = None
+        if current and current.get("host_announcement_pending"):
+            try:
+                host_deadline = datetime.fromisoformat(str(current.get("host_announcement_deadline_at")))
+                if host_deadline.tzinfo is None:
+                    host_deadline = host_deadline.replace(tzinfo=now().tzinfo)
+                host_announcement_ms = max(0, round((host_deadline - now()).total_seconds() * 1000))
+            except (TypeError, ValueError):
+                host_announcement_ms = 0
         turn_remaining = free_turn_remaining_seconds(room, current) if current and current.get("kind") == "free" else None
+        intermission_ms = intermission_remaining_ms(room, current) if current and current.get("kind") == "free" else None
         match_engine.interrupt_inflight_ai_speeches(db, room, reason="manual_pause")
         match_engine.interrupt_inflight_judging(db, room, reason="manual_pause")
         room.paused_remaining_seconds = 1 if stage_remaining is None else stage_remaining
         current = stage(room)
         updated_current = dict(current) if current else None
+        if updated_current and host_announcement_ms is not None:
+            updated_current["paused_host_announcement_remaining_ms"] = host_announcement_ms
+            updated_current.pop("host_announcement_deadline_at", None)
         if updated_current and updated_current.get("kind") == "free":
             updated_current["paused_turn_remaining_seconds"] = turn_remaining or 0
+            if intermission_ms is not None:
+                updated_current["paused_intermission_remaining_ms"] = intermission_ms
+                updated_current.pop("intermission_deadline_at", None)
         playing = db.scalar(select(Speech).where(Speech.room_id == room.id, Speech.status == "playing"))
         if updated_current and playing and playing.playback_started_at:
             playback_started_at = playing.playback_started_at
@@ -1619,17 +1783,34 @@ async def control(
         resume_seconds = room.paused_remaining_seconds if room.paused_remaining_seconds is not None else 1
         room.stage_deadline_at = resumed_at + timedelta(seconds=max(0, resume_seconds))
         current = stage(room)
-        if current and current.get("kind") == "free":
+        if current and current.get("host_announcement_pending"):
             updated_current = dict(current)
-            paused_turn_remaining = max(
-                0,
-                min(
-                    int(updated_current.pop("paused_turn_remaining_seconds", updated_current.get("turn_duration", 45))),
-                    max(1, int(updated_current.get("turn_duration", 45))),
-                ),
-            )
-            elapsed = max(0, int(updated_current.get("turn_duration", 45)) - paused_turn_remaining)
-            updated_current["turn_started_at"] = (resumed_at - timedelta(seconds=elapsed)).isoformat()
+            host_remaining_ms = max(0, int(updated_current.pop("paused_host_announcement_remaining_ms", 0)))
+            host_deadline = resumed_at + timedelta(milliseconds=host_remaining_ms)
+            updated_current["host_announcement_deadline_at"] = host_deadline.isoformat()
+            snapshot = list(room.template_snapshot)
+            snapshot[room.current_stage_index] = updated_current
+            room.template_snapshot = snapshot
+            room.stage_deadline_at = host_deadline
+            current = updated_current
+        elif current and current.get("kind") == "free":
+            updated_current = dict(current)
+            paused_intermission_ms = updated_current.pop("paused_intermission_remaining_ms", None)
+            if paused_intermission_ms is not None:
+                updated_current["intermission_deadline_at"] = (
+                    resumed_at + timedelta(milliseconds=max(0, int(paused_intermission_ms)))
+                ).isoformat()
+                updated_current.pop("paused_turn_remaining_seconds", None)
+            else:
+                paused_turn_remaining = max(
+                    0,
+                    min(
+                        int(updated_current.pop("paused_turn_remaining_seconds", updated_current.get("turn_duration", 45))),
+                        max(1, int(updated_current.get("turn_duration", 45))),
+                    ),
+                )
+                elapsed = max(0, int(updated_current.get("turn_duration", 45)) - paused_turn_remaining)
+                updated_current["turn_started_at"] = (resumed_at - timedelta(seconds=elapsed)).isoformat()
             snapshot = list(room.template_snapshot)
             snapshot[room.current_stage_index] = updated_current
             room.template_snapshot = snapshot
@@ -1741,6 +1922,7 @@ async def control(
         room.stage_deadline_at = None
         room.paused_remaining_seconds = None
         expire_pending_restore_requests(db, room, "比赛已终止")
+        expire_room_requests(db, room, "match_terminated")
         match = db.scalar(select(Match).where(Match.room_id == room.id))
         if match:
             match.status = "terminated"
@@ -1756,6 +1938,10 @@ async def control(
         idempotency_key=operation_key,
     )
     db.commit()
+    if action in {"pause", "skip", "terminate"}:
+        await match_engine.invalidate_free_agent_speculation(code)
+    elif action == "resume":
+        match_engine.schedule_free_agent_speculation(code)
     if archive_match_id:
         enqueue_match_archive(archive_match_id)
     await _publish(room, f"control.{action}")

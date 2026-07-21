@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="${PHDEBATE_ROOT:-/home/ubuntu/sunsq/phdebate}"
 AGENT_ROOT="${PHDEBATE_AGENT_ROOT:-/home/ubuntu/sunsq/debate-agent}"
 BACKUP_DIR="${PHDEBATE_DEPLOY_BACKUP_DIR:-$ROOT/runtime/deploy-backups}"
+QUARANTINE_DIR="${PHDEBATE_RECOVERY_QUARANTINE_DIR:-$BACKUP_DIR/quarantine}"
 PLATFORM_DATABASE_BACKUP_DIR="${PHDEBATE_BACKUP_DIR:-$ROOT/runtime/backups}"
 AGENT_DATABASE_BACKUP_DIR="${PHDEBATE_AGENT_BACKUP_DIR:-$AGENT_ROOT/backups}"
 VERIFY_INDEX_SCRIPT="${PHDEBATE_RECOVERY_INDEX_VERIFY_SCRIPT:-$ROOT/deploy/verify-recovery-index.py}"
@@ -13,6 +14,10 @@ MIN_AGE_HOURS="${PHDEBATE_RECOVERY_MIN_AGE_HOURS:-24}"
 
 if [[ "$MODE" != "dry-run" && "$MODE" != "apply" ]]; then
   echo "Usage: $0 [dry-run|apply]" >&2
+  exit 2
+fi
+if [[ "$MODE" == "apply" && "${PHDEBATE_ALLOW_RECOVERY_PRUNE:-}" != "yes" ]]; then
+  echo "apply requires PHDEBATE_ALLOW_RECOVERY_PRUNE=yes after reviewing dry-run output." >&2
   exit 2
 fi
 [[ "$KEEP" =~ ^[1-9][0-9]*$ ]] || {
@@ -53,6 +58,24 @@ array_contains() {
   done
   return 1
 }
+
+if [[ -d "$QUARANTINE_DIR" ]]; then
+  for manifest in "$QUARANTINE_DIR"/recovery-set-*.manifest; do
+    [[ -f "$manifest" ]] || continue
+    data_filename="$(value_for "$manifest" artifact.data_volumes.filename 2>/dev/null || true)"
+    if ! safe_filename "$data_filename"; then
+      echo "preserve kind=quarantined_manifest file=$(basename "$manifest") reason=missing-safe-data-reference"
+      preserved=$((preserved + 1))
+      unsafe_manifests=$((unsafe_manifests + 1))
+      continue
+    fi
+    if ! array_contains "$data_filename" "${protected_data[@]-}"; then
+      protected_data+=("$data_filename")
+    fi
+    echo "preserve kind=quarantined_manifest file=$(basename "$manifest") protects=$data_filename"
+    preserved=$((preserved + 1))
+  done
+fi
 
 manifest_is_complete() {
   local manifest="$1" role filename bytes checksum schema roles

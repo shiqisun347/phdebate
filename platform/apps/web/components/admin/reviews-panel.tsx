@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 
-import type { Review } from "@/components/admin/admin-module-types";
+import type { AdminSpeechCorrection, Review } from "@/components/admin/admin-module-types";
+import { SpeechCorrectionsPanel } from "@/components/admin/speech-corrections-panel";
 
 type ReviewsPanelProps = {
   reviews: Review[];
@@ -9,6 +10,10 @@ type ReviewsPanelProps = {
   retryingIds: Set<string>;
   onRetry: (review: Review) => void;
   onReview: (review: Review, mode?: "approve" | "correct") => void;
+  speechCorrections: AdminSpeechCorrection[];
+  recentSpeechCorrections: AdminSpeechCorrection[];
+  saving: boolean;
+  onSpeechCorrectionReview: (item: AdminSpeechCorrection, decision: "approve" | "reject", reason: string) => Promise<void>;
 };
 
 function reviewTime(value: string) {
@@ -17,7 +22,7 @@ function reviewTime(value: string) {
   return time.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-export default function ReviewsPanel({ reviews, recentReviews, retryingIds, onRetry, onReview }: ReviewsPanelProps) {
+export default function ReviewsPanel({ reviews, recentReviews, retryingIds, onRetry, onReview, speechCorrections, recentSpeechCorrections, saving, onSpeechCorrectionReview }: ReviewsPanelProps) {
   return (
     <>
       <div className="panel-title admin-review-title">
@@ -65,6 +70,7 @@ export default function ReviewsPanel({ reviews, recentReviews, retryingIds, onRe
         ))}
         {!recentReviews.length && <div className="empty">还没有可修正的已确认赛果</div>}
       </div>
+      <SpeechCorrectionsPanel pending={speechCorrections} recent={recentSpeechCorrections} saving={saving} onReview={onSpeechCorrectionReview} />
     </>
   );
 }

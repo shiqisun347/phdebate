@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 from datetime import datetime, timezone
 
 import httpx
 from app.core.database import SessionLocal
 from app.models.entities import AdminAuditLog, AgentProfile, Room, RoomSeat
+from operator_credentials import admin_credentials
 from sqlalchemy import delete, select
 
 
@@ -22,10 +22,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     args = parser.parse_args()
-    account = os.environ.get("V2_ADMIN_ACCOUNT", "")
-    password = os.environ.get("V2_ADMIN_PASSWORD", "")
-    if not account or not password:
-        raise RuntimeError("production admin credentials are not configured")
+    account, password = admin_credentials()
 
     client = httpx.Client(base_url=args.base_url, verify=False, timeout=20, follow_redirects=True)
     actor_id = ""

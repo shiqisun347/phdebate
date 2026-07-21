@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -17,6 +17,7 @@ from app.models.entities import (
     JudgeScorecard,
     Match,
     MatchEvent,
+    MatchParticipant,
     RatingChange,
     Room,
     RoomSeat,
@@ -39,6 +40,7 @@ from app.services.room_service import (
     use_public_projection,
 )
 from app.services.seasons import serialize_season
+from app.services.speech_correction import can_request_correction
 from app.services.speech_pagination import SpeechCursorError, paginate_match_speeches
 from app.services.system_health import system_readiness
 
@@ -61,6 +63,17 @@ PUBLIC_PAUSED_ROOM_LISTING_SECONDS = _bounded_int_env(
     86_400,
 )
 PUBLIC_PAUSE_EVENT_TYPES = ("control.pause", "engine.quarantined", "provider.failed")
+
+
+def _current_pause_time(room: Room, paused_at: datetime | None) -> str | None:
+    """Expose pause time only while a room is actually paused.
+
+    The aggregate query intentionally keeps the last pause event for freshness
+    filtering. Returning that historical value after resume makes a healthy
+    running room look stale to API consumers.
+    """
+
+    return paused_at.isoformat() if room.status == "paused" and paused_at else None
 
 
 def _public_pause_times():
@@ -177,7 +190,7 @@ def competition_detail(slug: str, db: Session = Depends(get_db)) -> dict:
                 "code": room.code,
                 "topic": room.topic,
                 "status": room.status,
-                "paused_at": paused_at.isoformat() if paused_at else None,
+                "paused_at": _current_pause_time(room, paused_at),
                 "updated_at": room.updated_at.isoformat(),
             }
             for room, paused_at in live_rooms
@@ -239,7 +252,7 @@ def live_rooms(db: Session = Depends(get_db)) -> dict:
                 "topic": room.topic,
                 "status": room.status,
                 "competition_name": room.competition.name,
-                "paused_at": paused_at.isoformat() if paused_at else None,
+                "paused_at": _current_pause_time(room, paused_at),
                 "updated_at": room.updated_at.isoformat(),
                 "stage": room.template_snapshot[room.current_stage_index]["name"]
                 if 0 <= room.current_stage_index < len(room.template_snapshot)
@@ -275,12 +288,35 @@ def me(
         )
         .order_by(Room.updated_at.desc(), Room.id.desc())
     ).all()
+    immutable_participation = or_(
+        exists(
+            select(MatchParticipant.id).where(
+                MatchParticipant.match_id == Match.id,
+                MatchParticipant.user_id == user.id,
+            )
+        ),
+        exists(
+            select(RoomSeat.id).where(
+                RoomSeat.room_id == Room.id,
+                RoomSeat.user_id == user.id,
+            )
+        ),
+        # Compatibility for pre-0028 matches whose current seat was later
+        # repaired or transferred. Human speech events retain the immutable
+        # actor identity even when RoomSeat no longer does.
+        exists(
+            select(MatchEvent.id).where(
+                MatchEvent.match_id == Match.id,
+                MatchEvent.actor_user_id == user.id,
+                MatchEvent.event_type.in_(["speech.started", "speech.completed", "speech.late_finalized"]),
+            )
+        ),
+    )
     history_filter = (
         select(Match.id)
         .join(Room, Match.room_id == Room.id)
-        .join(RoomSeat, RoomSeat.room_id == Room.id)
         .where(
-            RoomSeat.user_id == user.id,
+            immutable_participation,
             Match.status.in_(["completed", "review_required", "terminated"]),
         )
     )
@@ -288,9 +324,8 @@ def me(
     history = db.execute(
         select(Match, Room)
         .join(Room, Match.room_id == Room.id)
-        .join(RoomSeat, RoomSeat.room_id == Room.id)
         .where(
-            RoomSeat.user_id == user.id,
+            immutable_participation,
             Match.status.in_(["completed", "review_required", "terminated"]),
         )
         .order_by(Match.updated_at.desc(), Match.id.desc())
@@ -403,7 +438,13 @@ def match_history(
     return {
         "match": {"id": match.id, "status": match.status, "winner": match.winner, "topic": room.topic, "room_code": room.code},
         "speeches": [
-            {"seat_key": item.seat_key, "stage_key": item.stage_key, "content": item.content, "audio_url": item.audio_url}
+            {
+                "seat_key": item.seat_key,
+                "stage_key": item.stage_key,
+                "content": item.content,
+                "audio_url": item.audio_url,
+                "can_request_correction": can_request_correction(db, room, item, user),
+            }
             for item in speech_result.rows
         ],
         "speech_pagination": {
@@ -476,7 +517,20 @@ def download_match_archive(match_id: str, user: User = Depends(current_user), db
     room = db.get(Room, match.room_id)
     if not room:
         raise HTTPException(status_code=404, detail="比赛缺少对应房间。")
-    participant = db.scalar(select(RoomSeat.id).where(RoomSeat.room_id == room.id, RoomSeat.user_id == user.id))
+    participant = db.scalar(
+        select(MatchParticipant.id).where(
+            MatchParticipant.match_id == match.id,
+            MatchParticipant.user_id == user.id,
+        )
+    ) or db.scalar(
+        select(MatchEvent.id).where(
+            MatchEvent.match_id == match.id,
+            MatchEvent.actor_user_id == user.id,
+            MatchEvent.event_type.in_(["speech.started", "speech.completed", "speech.late_finalized"]),
+        )
+    ) or db.scalar(
+        select(RoomSeat.id).where(RoomSeat.room_id == room.id, RoomSeat.user_id == user.id)
+    )
     if not participant and not can_control(db, room, user):
         raise HTTPException(status_code=403, detail="仅参赛者、房主或系统管理员可下载比赛归档。")
     try:
@@ -488,7 +542,7 @@ def download_match_archive(match_id: str, user: User = Depends(current_user), db
     archive_sha256 = archive.sha256
     projection = "research"
     if user.role != "system_admin":
-        content, archive_sha256 = serialize_participant_archive(json.loads(payload.content))
+        content, archive_sha256 = serialize_participant_archive(json.loads(payload.content), viewer_user_id=user.id)
         projection = "participant"
     return Response(
         content=content,

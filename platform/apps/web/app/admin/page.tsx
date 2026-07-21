@@ -34,6 +34,7 @@ import { SystemOverview, type AdminDashboard } from "@/components/admin/system-o
 import { UsersPanel } from "@/components/admin/users-panel";
 import type {
   AgentProfileSummary,
+  AdminSpeechCorrection,
   ArchiveStatus,
   AudioCue,
   Audit,
@@ -137,6 +138,8 @@ export default function AdminPage() {
   const [dataQuality, setDataQuality] = useState<DataQualityStatus | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [recentReviews, setRecentReviews] = useState<Review[]>([]);
+  const [speechCorrections, setSpeechCorrections] = useState<AdminSpeechCorrection[]>([]);
+  const [recentSpeechCorrections, setRecentSpeechCorrections] = useState<AdminSpeechCorrection[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
   const [auditQuery, setAuditQuery] = useState("");
   const [auditPagination, setAuditPagination] =
@@ -262,12 +265,39 @@ export default function AdminPage() {
     setAudioCues(audioCueData.items);
   }
   async function refreshReviewData() {
-    const data = await apiFetch<{ items: Review[]; recent: Review[] }>(
-      "/api/admin/reviews",
-    );
-    setReviews(data.items);
-    setRecentReviews(data.recent || []);
+    const [reviewData, correctionData] = await Promise.all([
+      apiFetch<{ items: Review[]; recent: Review[] }>("/api/admin/reviews"),
+      apiFetch<{ items: AdminSpeechCorrection[]; recent: AdminSpeechCorrection[] }>("/api/admin/speech-corrections"),
+    ]);
+    setReviews(reviewData.items);
+    setRecentReviews(reviewData.recent || []);
+    setSpeechCorrections(correctionData.items);
+    setRecentSpeechCorrections(correctionData.recent || []);
     loadedTabs.current.add("reviews");
+  }
+
+  async function reviewSpeechCorrection(
+    item: AdminSpeechCorrection,
+    decision: "approve" | "reject",
+    reason: string,
+  ) {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await apiFetch(`/api/admin/speech-corrections/${item.id}/${decision}`, {
+        method: "POST",
+        body: JSON.stringify({ expected_updated_at: item.updated_at, reason }),
+      });
+      await Promise.all([refreshReviewData(), refreshAuditIfLoaded()]);
+      setNotice(decision === "approve" ? "发言文字修正已批准并写入审计记录。" : "发言文字修正申请已拒绝。");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "发言修正审核失败";
+      setError(message);
+      throw caught;
+    } finally {
+      setSaving(false);
+    }
   }
   useEffect(() => {
     if (user?.role === "system_admin") void load();
@@ -1206,9 +1236,13 @@ export default function AdminPage() {
             <ReviewsModule
               reviews={reviews}
               recentReviews={recentReviews}
+              speechCorrections={speechCorrections}
+              recentSpeechCorrections={recentSpeechCorrections}
               retryingIds={retryingReviewIds}
+              saving={saving}
               onRetry={(item) => void retryJudge(item)}
               onReview={review}
+              onSpeechCorrectionReview={reviewSpeechCorrection}
             />
           )}
           {tab === "audit" && (

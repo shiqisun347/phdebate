@@ -218,6 +218,7 @@ def test_legacy_match_speeches_keep_compatible_result_and_history_shape(client: 
             "stage_key": "legacy_stage",
             "content": "legacy 发言 0",
             "audio_url": "",
+            "can_request_correction": True,
         }
     ]
 

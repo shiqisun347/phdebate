@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
 from secrets import token_hex
 
@@ -14,6 +13,7 @@ from app.models.entities import AdminAuditLog, AutomationTemplate, Competition, 
 from app.services.room_service import load_room
 from app.services.seed import seed_database
 from app.services.verification_cleanup import release_verification_room_codes
+from operator_credentials import admin_credentials
 from sqlalchemy import delete
 
 
@@ -26,10 +26,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://117.50.192.216")
     args = parser.parse_args()
-    account = os.environ.get("V2_ADMIN_ACCOUNT", "")
-    password = os.environ.get("V2_ADMIN_PASSWORD", "")
-    if not account or not password:
-        raise RuntimeError("production admin credentials are not configured")
+    account, password = admin_credentials()
     suffix = f"{int(time.time())}_{token_hex(3)}"
     admin = httpx.Client(base_url=args.base_url, verify=False, timeout=20, follow_redirects=True)
     participant = httpx.Client(base_url=args.base_url, verify=False, timeout=20, follow_redirects=True)

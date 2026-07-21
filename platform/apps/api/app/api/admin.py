@@ -36,6 +36,7 @@ from app.models.entities import (
     RoomSeat,
     Season,
     Speech,
+    SpeechCorrectionRequest,
     SpeechDataIssueDisposition,
     TranscriptSegment,
     User,
@@ -57,6 +58,7 @@ from app.schemas.requests import (
     ProviderConfigUpsert,
     SeasonCreate,
     SeasonPatch,
+    SpeechCorrectionReview,
     SpeechDataIssueDispositionPatch,
     TopicCreate,
     TopicPatch,
@@ -80,6 +82,11 @@ from app.services.room_service import (
 )
 from app.services.seasons import serialize_season
 from app.services.seat_restore import expire_pending_restore_requests
+from app.services.speech_correction import (
+    enqueue_correction_archive,
+    review_correction_request,
+    serialize_correction_request,
+)
 from app.services.system_health import system_readiness
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -1678,6 +1685,105 @@ def reviews(admin: User = Depends(system_admin), db: Session = Depends(get_db)) 
         "items": [serialize(score, match, room) for score, match, room in pending_rows],
         "recent": [serialize(score, match, room) for score, match, room in recent_rows],
     }
+
+
+@router.get("/speech-corrections")
+def speech_corrections(admin: User = Depends(system_admin), db: Session = Depends(get_db)) -> dict:
+    del admin
+    base = (
+        select(SpeechCorrectionRequest, Speech, Room, User)
+        .join(Speech, SpeechCorrectionRequest.speech_id == Speech.id)
+        .join(Room, SpeechCorrectionRequest.room_id == Room.id)
+        .join(User, SpeechCorrectionRequest.requester_user_id == User.id)
+    )
+    pending_rows = db.execute(
+        base.where(SpeechCorrectionRequest.status == "pending")
+        .order_by(SpeechCorrectionRequest.created_at)
+        .limit(500)
+    ).all()
+    recent_rows = db.execute(
+        base.where(SpeechCorrectionRequest.status != "pending")
+        .order_by(SpeechCorrectionRequest.updated_at.desc())
+        .limit(50)
+    ).all()
+
+    def serialize(item: SpeechCorrectionRequest, speech: Speech, room: Room, requester: User) -> dict:
+        return serialize_correction_request(item, expose_internal=True) | {
+            "room_code": room.code,
+            "topic": room.topic,
+            "seat_key": speech.seat_key,
+            "requester_name": requester.real_name,
+        }
+
+    return {
+        "items": [serialize(item, speech, room, requester) for item, speech, room, requester in pending_rows],
+        "recent": [serialize(item, speech, room, requester) for item, speech, room, requester in recent_rows],
+    }
+
+
+async def _review_speech_correction(
+    request_id: str,
+    payload: SpeechCorrectionReview,
+    admin: User,
+    db: Session,
+    *,
+    approve: bool,
+) -> dict:
+    request = db.get(SpeechCorrectionRequest, request_id)
+    if not request:
+        raise HTTPException(status_code=404, detail="修正申请不存在。")
+    room_row = db.get(Room, request.room_id)
+    if not room_row:
+        raise HTTPException(status_code=409, detail="修正申请缺少房间记录。")
+    room = load_room(db, room_row.code, lock=True)
+    db.refresh(request)
+    replayed, archive_match_id = review_correction_request(
+        db,
+        room,
+        request,
+        admin,
+        approve=approve,
+        reason=payload.reason,
+        expected_updated_at=payload.expected_updated_at,
+    )
+    action = "speech_correction.approve" if approve else "speech_correction.reject"
+    audit(
+        db,
+        admin,
+        action,
+        "speech_correction_request",
+        request.id,
+        {"speech_id": request.speech_id, "room_code": room.code, "reason": payload.reason},
+    )
+    db.commit()
+    enqueue_correction_archive(archive_match_id)
+    event_type = "speech.corrected" if approve else "speech.correction_rejected"
+    await room_hub.publish(room.code, {"type": event_type, "room_code": room.code, "seq": room.seq})
+    return {"ok": True, "replayed": replayed, "request": serialize_correction_request(request, expose_internal=True)}
+
+
+@router.post("/speech-corrections/{request_id}/approve")
+async def approve_speech_correction(
+    request_id: str,
+    payload: SpeechCorrectionReview,
+    admin: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "system_admin":
+        raise HTTPException(status_code=403, detail="仅系统管理员可操作。")
+    return await _review_speech_correction(request_id, payload, admin, db, approve=True)
+
+
+@router.post("/speech-corrections/{request_id}/reject")
+async def reject_speech_correction(
+    request_id: str,
+    payload: SpeechCorrectionReview,
+    admin: User = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if admin.role != "system_admin":
+        raise HTTPException(status_code=403, detail="仅系统管理员可操作。")
+    return await _review_speech_correction(request_id, payload, admin, db, approve=False)
 
 
 @router.post("/reviews/{scorecard_id}/retry", status_code=202)

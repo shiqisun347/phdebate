@@ -132,6 +132,14 @@ describe("admin operations", () => {
       } }));
       if (url.endsWith("/api/admin/reviews/score-1/retry")) return Promise.resolve(response({ ok: true }));
       if (url.endsWith("/api/admin/reviews/score-2/retry")) return Promise.resolve(response({ ok: true }));
+      if (url.endsWith("/api/admin/speech-corrections/correction-1/approve")) return Promise.resolve(response({ ok: true }));
+      if (url.endsWith("/api/admin/speech-corrections")) return Promise.resolve(response({ items: [{
+        id: "correction-1", speech_id: "speech-1", room_id: "room-1", room_code: "381526",
+        topic: "技术进步是否让人更自由？", seat_key: "aff_1", requester_name: "参赛学生", requester_user_id: "user-1",
+        original_content: "技术应该替代人的选择。", proposed_content: "技术不应该替代人的选择。",
+        reason: "语音识别漏掉否定词", status: "pending", review_reason: "",
+        created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(), resolved_at: null,
+      }], recent: [] }));
       if (url.endsWith("/api/admin/reviews")) return Promise.resolve(response({ items: [
         {
           scorecard_id: "score-1", match_id: "match-1", room_code: "381526", topic: "技术进步是否让人更自由？",
@@ -274,6 +282,19 @@ describe("admin operations", () => {
     expect(screen.getByText(/只影响新创建房间/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /结果复核/ }));
+    expect(await screen.findByRole("heading", { name: /真人发言修正/ })).toBeInTheDocument();
+    expect(screen.getByText("技术不应该替代人的选择。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批准修正" }));
+    fireEvent.change(screen.getByLabelText("审核理由"), { target: { value: "已对照录音和上下文确认" } });
+    confirm.mockReturnValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "确认批准" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/admin/speech-corrections/correction-1/approve"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ expected_updated_at: new Date(0).toISOString(), reason: "已对照录音和上下文确认" }),
+      }),
+    ));
     const retryJudges = await screen.findAllByRole("button", { name: "重试 AI 裁判" });
     expect(retryJudges).toHaveLength(2);
     fireEvent.click(retryJudges[0]);

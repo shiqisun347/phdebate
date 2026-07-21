@@ -10,28 +10,41 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+
+def _with_host_cue(stage: dict, cue: str | None = None) -> dict:
+    result = dict(stage)
+    result["cue"] = cue or f"接下来进入{stage['name']}。请相关辩手做好准备。"
+    return result
+
+
 DAILY_STAGES = [
     {"key": "opening", "name": "开场与规则", "kind": "announcement", "duration": 12, "cue": "欢迎来到稷下辩论日常赛，比赛即将开始。"},
-    {"key": "aff_1_case", "name": "正方一辩立论", "kind": "speech", "seat": "aff_1", "duration": 180},
-    {"key": "neg_1_case", "name": "反方一辩立论", "kind": "speech", "seat": "neg_1", "duration": 180},
-    {"key": "aff_2_rebuttal", "name": "正方二辩驳论", "kind": "speech", "seat": "aff_2", "duration": 120},
-    {"key": "neg_2_rebuttal", "name": "反方二辩驳论", "kind": "speech", "seat": "neg_2", "duration": 120},
-    {"key": "aff_3_question", "name": "正方三辩质询", "kind": "speech", "seat": "aff_3", "duration": 120},
-    {"key": "neg_3_question", "name": "反方三辩质询", "kind": "speech", "seat": "neg_3", "duration": 120},
-    {"key": "free_debate", "name": "自由辩论", "kind": "free", "side": "aff", "duration": 300, "turn_duration": 45},
-    {"key": "neg_4_summary", "name": "反方四辩总结", "kind": "speech", "seat": "neg_4", "duration": 180},
-    {"key": "aff_4_summary", "name": "正方四辩总结", "kind": "speech", "seat": "aff_4", "duration": 180},
-    {"key": "judging", "name": "AI 裁判评议", "kind": "judging", "duration": 30},
+    _with_host_cue({"key": "aff_1_case", "name": "正方一辩立论", "kind": "speech", "seat": "aff_1", "duration": 180}),
+    _with_host_cue({"key": "neg_1_case", "name": "反方一辩立论", "kind": "speech", "seat": "neg_1", "duration": 180}),
+    _with_host_cue({"key": "aff_2_rebuttal", "name": "正方二辩驳论", "kind": "speech", "seat": "aff_2", "duration": 120}),
+    _with_host_cue({"key": "neg_2_rebuttal", "name": "反方二辩驳论", "kind": "speech", "seat": "neg_2", "duration": 120}),
+    _with_host_cue({"key": "aff_3_question", "name": "正方三辩质询", "kind": "speech", "seat": "aff_3", "duration": 120}),
+    _with_host_cue({"key": "neg_3_question", "name": "反方三辩质询", "kind": "speech", "seat": "neg_3", "duration": 120}),
+    _with_host_cue(
+        {"key": "free_debate", "name": "自由辩论", "kind": "free", "side": "aff", "duration": 300, "turn_duration": 30},
+        "接下来进入自由辩论。请双方留意发言申请和三秒换方提示。",
+    ),
+    _with_host_cue({"key": "neg_4_summary", "name": "反方四辩总结", "kind": "speech", "seat": "neg_4", "duration": 180}),
+    _with_host_cue({"key": "aff_4_summary", "name": "正方四辩总结", "kind": "speech", "seat": "aff_4", "duration": 180}),
+    _with_host_cue({"key": "judging", "name": "AI 裁判评议", "kind": "judging", "duration": 30}, "双方发言结束，下面进入裁判评议。"),
 ]
 
 TRAINING_STAGES = [
     {"key": "opening", "name": "训练开始", "kind": "announcement", "duration": 8, "cue": "一对一辩论训练即将开始。"},
-    {"key": "aff_1_case", "name": "正方立论", "kind": "speech", "seat": "aff_1", "duration": 150},
-    {"key": "neg_1_case", "name": "反方立论", "kind": "speech", "seat": "neg_1", "duration": 150},
-    {"key": "free_debate", "name": "自由辩论", "kind": "free", "side": "aff", "duration": 240, "turn_duration": 40},
-    {"key": "neg_1_summary", "name": "反方总结", "kind": "speech", "seat": "neg_1", "duration": 120},
-    {"key": "aff_1_summary", "name": "正方总结", "kind": "speech", "seat": "aff_1", "duration": 120},
-    {"key": "judging", "name": "训练点评", "kind": "judging", "duration": 30},
+    _with_host_cue({"key": "aff_1_case", "name": "正方立论", "kind": "speech", "seat": "aff_1", "duration": 150}),
+    _with_host_cue({"key": "neg_1_case", "name": "反方立论", "kind": "speech", "seat": "neg_1", "duration": 150}),
+    _with_host_cue(
+        {"key": "free_debate", "name": "自由辩论", "kind": "free", "side": "aff", "duration": 240, "turn_duration": 30},
+        "接下来进入自由辩论。请留意发言申请和三秒换方提示。",
+    ),
+    _with_host_cue({"key": "neg_1_summary", "name": "反方总结", "kind": "speech", "seat": "neg_1", "duration": 120}),
+    _with_host_cue({"key": "aff_1_summary", "name": "正方总结", "kind": "speech", "seat": "aff_1", "duration": 120}),
+    _with_host_cue({"key": "judging", "name": "训练点评", "kind": "judging", "duration": 30}, "本轮训练发言结束，下面进入裁判点评。"),
 ]
 
 
@@ -47,8 +60,8 @@ def seed_database(db: Session) -> None:
         db.add(season)
         db.flush()
 
-    daily_template = _template(db, "daily-4v4", "4v4 自动辩论流程", DAILY_STAGES, version=2)
-    training_template = _template(db, "training-1v1", "1v1 自动训练流程", TRAINING_STAGES, version=2)
+    daily_template = _template(db, "daily-4v4", "4v4 自动辩论流程", DAILY_STAGES, version=3)
+    training_template = _template(db, "training-1v1", "1v1 自动训练流程", TRAINING_STAGES, version=3)
 
     daily = db.scalar(select(Competition).where(Competition.slug == "daily-4v4"))
     if not daily:
@@ -72,6 +85,12 @@ def seed_database(db: Session) -> None:
         # Keep databases created by early platform builds aligned with the public
         # competition name without overwriting an administrator's custom name.
         daily.name = "4v4 人机辩论正式赛"
+    if (
+        daily.automation_template
+        and daily.automation_template.slug == "daily-4v4"
+        and daily.automation_template.version < daily_template.version
+    ):
+        daily.automation_template_id = daily_template.id
     _ensure_topics(
         db,
         daily,
@@ -100,6 +119,12 @@ def seed_database(db: Session) -> None:
         )
         db.add(training)
         db.flush()
+    elif (
+        training.automation_template
+        and training.automation_template.slug == "training-1v1"
+        and training.automation_template.version < training_template.version
+    ):
+        training.automation_template_id = training_template.id
     _ensure_topics(
         db,
         training,

@@ -52,6 +52,55 @@ export type RoomSeat = {
   is_owner?: boolean;
 };
 
+export type CaptionSegment = {
+  segment_id: string;
+  speech_id: string;
+  seat_key: string;
+  text: string;
+  is_final: boolean;
+  start_ms: number | null;
+  end_ms: number | null;
+  updated_at: string;
+  source?: "asr" | "ai" | string;
+};
+
+export type RoomSpeech = {
+  id: string;
+  seat_key: string;
+  speaker: string;
+  stage_key: string;
+  content: string;
+  audio_url: string;
+  duration_seconds: number;
+  playback_started_at: string | null;
+  playback_ends_at: string | null;
+  stream_generation?: string;
+  stream_sample_rate?: number;
+  status: string;
+  created_at: string;
+  can_request_correction?: boolean;
+};
+
+export type FreeTurnQueueItem = {
+  request_id?: string;
+  side: "aff" | "neg";
+  seat_key: string;
+  order: number;
+  requested_at: string;
+  is_me: boolean;
+};
+
+export type FreeTurnQueue = {
+  items: FreeTurnQueueItem[];
+  window_deadline_at: string | null;
+  window_remaining_ms: number | null;
+  my_request: FreeTurnQueueItem | null;
+  target_side?: "aff" | "neg";
+  target_turn_seq?: number;
+  can_request: boolean;
+  request_reason: string;
+};
+
 type SeatRestoreRequest = {
   id: string;
   seat_key: string;
@@ -77,6 +126,10 @@ type Stage = {
   turn_duration?: number;
   turn_started_at?: string;
   ai_preparing?: boolean;
+  selected_human_seat?: string;
+  intermission_side?: "aff" | "neg";
+  intermission_turn_seq?: number;
+  intermission_deadline_at?: string;
   preparing_stage_remaining_seconds?: number;
   preparing_turn_remaining_seconds?: number;
 };
@@ -118,8 +171,11 @@ export type Room = {
   recording_consent?: RecordingConsent;
   seat_restore_requests?: SeatRestoreRequest[];
   failure_reason?: string;
+  /** Ordered, server-authored caption projection. Missing means the backend has not enabled segmented captions. */
+  caption_segments?: CaptionSegment[];
+  free_turn_queue?: FreeTurnQueue;
   recent_events: { seq: number; type: string; payload: Record<string, unknown>; created_at: string }[];
-  speeches: { id: string; seat_key: string; speaker: string; stage_key: string; content: string; audio_url: string; duration_seconds: number; playback_started_at: string | null; playback_ends_at: string | null; stream_generation?: string; stream_sample_rate?: number; status: string; created_at: string }[];
+  speeches: RoomSpeech[];
 };
 
 export type Ranking = {

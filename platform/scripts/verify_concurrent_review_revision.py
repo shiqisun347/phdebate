@@ -29,6 +29,7 @@ from app.models.entities import (
 from app.services.match_archive import archive_lock_name, build_match_archive
 from app.services.room_service import now
 from app.services.verification_cleanup import release_verification_room_codes
+from operator_credentials import admin_credentials
 from sqlalchemy import delete, func, select
 
 PASSWORD = "Concurrent-review-1234"
@@ -63,6 +64,7 @@ def main() -> None:
     match_id = ""
     scorecard_id = ""
     try:
+        admin_account, admin_password = admin_credentials()
         suffix = f"{int(time.time())}_{token_hex(3)}"
         registered = participant.post(
             "/api/auth/register",
@@ -78,7 +80,7 @@ def main() -> None:
         for admin in (admin_a, admin_b):
             logged_in = admin.post(
                 "/api/auth/login",
-                json={"account": os.environ["V2_ADMIN_ACCOUNT"], "password": os.environ["V2_ADMIN_PASSWORD"]},
+                json={"account": admin_account, "password": admin_password},
             )
             logged_in.raise_for_status()
 

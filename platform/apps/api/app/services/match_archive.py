@@ -19,11 +19,13 @@ from app.models.entities import (
     JudgeScorecard,
     Match,
     MatchEvent,
+    MatchParticipant,
     RatingChange,
     Room,
     RoomSeat,
     Season,
     Speech,
+    SpeechCorrectionRequest,
     TranscriptSegment,
     User,
 )
@@ -64,6 +66,27 @@ def _sha256(data: bytes) -> str:
 
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _transcript_sha256(speeches: list[Speech], overrides: dict[str, str] | None = None) -> str:
+    replacements = overrides or {}
+    payload = [
+        {
+            "speech_id": item.id,
+            "seat_key": item.seat_key,
+            "stage_key": item.stage_key,
+            "speaker_type": item.speaker_type,
+            "status": item.status,
+            "content": replacements.get(item.id, item.content),
+        }
+        for item in speeches
+        if item.status == "completed"
+    ]
+    return _sha256(_canonical_json(payload))
 
 
 def archive_lock_name(match_id: str) -> str:
@@ -124,6 +147,13 @@ def _archive_source(db: Session, match_id: str) -> dict[str, Any]:
     competition = db.get(Competition, match.competition_id)
     season = db.get(Season, match.season_id) if match.season_id else None
     seats = list(db.scalars(select(RoomSeat).where(RoomSeat.room_id == room.id).order_by(RoomSeat.side, RoomSeat.position)).all())
+    participant_snapshots = list(
+        db.scalars(
+            select(MatchParticipant)
+            .where(MatchParticipant.match_id == match.id)
+            .order_by(MatchParticipant.seat_key, MatchParticipant.id)
+        ).all()
+    )
     user_ids = {seat.user_id for seat in seats if seat.user_id}
     users = {item.id: item for item in db.scalars(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
     speeches = list(db.scalars(select(Speech).where(Speech.match_id == match.id).order_by(Speech.created_at, Speech.id)).all())
@@ -137,9 +167,34 @@ def _archive_source(db: Session, match_id: str) -> dict[str, Any]:
         ).all()
         for segment in segments:
             segments_by_speech.setdefault(segment.speech_id, []).append(segment)
+    corrections = list(
+        db.scalars(
+            select(SpeechCorrectionRequest)
+            .where(SpeechCorrectionRequest.room_id == room.id)
+            .order_by(SpeechCorrectionRequest.created_at, SpeechCorrectionRequest.id)
+        ).all()
+    )
     events = db.scalars(select(MatchEvent).where(MatchEvent.room_id == room.id).order_by(MatchEvent.seq)).all()
     assets = db.scalars(select(AudioAsset).where(AudioAsset.match_id == match.id).order_by(AudioAsset.created_at, AudioAsset.id)).all()
     scorecard = db.scalar(select(JudgeScorecard).where(JudgeScorecard.match_id == match.id))
+    current_transcript_sha256 = _transcript_sha256(speeches)
+    after_judging: dict[str, bool] = {}
+    judged_overrides: dict[str, str] = {}
+    if scorecard:
+        judged_at = _as_utc(scorecard.updated_at)
+        approved_after_judging = [
+            item
+            for item in corrections
+            if item.status == "approved" and item.resolved_at and _as_utc(item.resolved_at) > judged_at
+        ]
+        after_judging = {item.id: item in approved_after_judging for item in corrections}
+        for item in sorted(
+            approved_after_judging,
+            key=lambda value: (_as_utc(value.resolved_at), value.id),
+            reverse=True,
+        ):
+            judged_overrides[item.speech_id] = item.original_content
+    judged_transcript_sha256 = _transcript_sha256(speeches, judged_overrides)
     rating_changes = list(
         db.scalars(select(RatingChange).where(RatingChange.match_id == match.id).order_by(RatingChange.created_at, RatingChange.id)).all()
     )
@@ -201,6 +256,15 @@ def _archive_source(db: Session, match_id: str) -> dict[str, Any]:
             }
             for seat in seats
         ],
+        "participant_snapshots": [
+            {
+                "seat_key": item.seat_key,
+                "user_id": item.user_id,
+                "display_name": item.display_name,
+                "created_at": _iso(item.created_at),
+            }
+            for item in participant_snapshots
+        ],
         "speeches": [
             {
                 "id": speech.id,
@@ -224,6 +288,25 @@ def _archive_source(db: Session, match_id: str) -> dict[str, Any]:
                 ],
             }
             for speech in speeches
+        ],
+        "speech_corrections": [
+            {
+                "id": item.id,
+                "speech_id": item.speech_id,
+                "requester_user_id": item.requester_user_id,
+                "original_content": item.original_content,
+                "proposed_content": item.proposed_content,
+                "original_segments": item.original_segments,
+                "reason": item.reason,
+                "status": item.status,
+                "reviewed_by_user_id": item.reviewed_by_user_id,
+                "review_reason": item.review_reason,
+                "resolved_at": _iso(item.resolved_at),
+                "created_at": _iso(item.created_at),
+                "updated_at": _iso(item.updated_at),
+                "after_judging": after_judging.get(item.id, False),
+            }
+            for item in corrections
         ],
         "events": [
             {
@@ -259,6 +342,12 @@ def _archive_source(db: Session, match_id: str) -> dict[str, Any]:
                 "reviewed_by": scorecard.reviewed_by,
                 "created_at": _iso(scorecard.created_at),
                 "updated_at": _iso(scorecard.updated_at),
+                "transcript_provenance": {
+                    "basis": "pre_correction" if judged_transcript_sha256 != current_transcript_sha256 else "current",
+                    "judged_transcript_sha256": judged_transcript_sha256,
+                    "current_transcript_sha256": current_transcript_sha256,
+                    "correction_after_judging_count": sum(after_judging.values()),
+                },
             }
             if scorecard
             else None

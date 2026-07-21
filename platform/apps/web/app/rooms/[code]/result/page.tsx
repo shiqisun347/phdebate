@@ -27,6 +27,7 @@ import {
 } from "react";
 
 import { LoadError } from "@/components/load-error";
+import { SpeechCorrectionControl, type SpeechCorrectionRequest } from "@/components/speech-correction-control";
 import { ApiRequestError, apiFetch, apiOrigin } from "@/lib/api";
 import {
   matchEventDetail,
@@ -60,6 +61,7 @@ export type Result = {
     audio_url: string;
     duration_seconds: number;
     created_at: string;
+    can_request_correction?: boolean;
   }[];
   speech_pagination: {
     page: number;
@@ -120,12 +122,21 @@ export default function ResultPage() {
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [rematchBusy, setRematchBusy] = useState(false);
+  const [speechCorrections, setSpeechCorrections] = useState<SpeechCorrectionRequest[]>([]);
+  const [speechCorrectionError, setSpeechCorrectionError] = useState("");
   const rematchKey = useRef<string | null>(null);
   const loadSequence = useRef(0);
   const loadedSpeechIds = useRef(new Set<string>());
   const speechLoadInFlight = useRef<string | null>(null);
   const audioElements = useRef(new Map<string, HTMLAudioElement>());
   const { room: liveRoom, error: connectionError, reconnect } = useRoom(code);
+
+  const updateSpeechCorrection = useCallback((request: SpeechCorrectionRequest) => {
+    setSpeechCorrections((current) => [
+      request,
+      ...current.filter((item) => item.id !== request.id),
+    ]);
+  }, []);
 
   const stopAudio = useCallback((except?: HTMLAudioElement, reset = false) => {
     audioElements.current.forEach((audio) => {
@@ -178,6 +189,24 @@ export default function ResultPage() {
         setError(err instanceof Error ? err.message : "比赛结果载入失败");
     }
   }, [code, router]);
+
+  useEffect(() => {
+    if (!data?.speeches.some((speech) => speech.can_request_correction)) {
+      setSpeechCorrections([]);
+      setSpeechCorrectionError("");
+      return;
+    }
+    let cancelled = false;
+    setSpeechCorrectionError("");
+    apiFetch<{ items: SpeechCorrectionRequest[] }>(`/api/rooms/${code}/speech-correction-requests`)
+      .then((response) => {
+        if (!cancelled) setSpeechCorrections(response.items);
+      })
+      .catch((caught) => {
+        if (!cancelled) setSpeechCorrectionError(caught instanceof Error ? caught.message : "修正申请载入失败");
+      });
+    return () => { cancelled = true; };
+  }, [code, data?.speeches]);
 
   useEffect(() => {
     void load(false);
@@ -597,6 +626,7 @@ export default function ResultPage() {
             已加载 {data.speeches.length} / {data.speech_pagination.total}
           </span>
         </div>
+        {speechCorrectionError && <div className="error-box" role="alert">{speechCorrectionError}</div>}
         <div className="transcript-list" role={data.speeches.length ? "list" : undefined} aria-label={data.speeches.length ? "完整辩论记录" : undefined}>
           {data.speeches.map((speech) => (
             <article className="transcript-item" role="listitem" key={speech.id}>
@@ -640,6 +670,16 @@ export default function ResultPage() {
                     ? "（服务失败，未生成可用发言）"
                     : "（该发言仅保存了音频）")}
               </p>
+              {speech.can_request_correction && (
+                <SpeechCorrectionControl
+                  roomCode={code}
+                  speech={{ id: speech.id, stage_name: speech.stage_name || speech.stage_key, content: speech.content }}
+                  request={speechCorrections
+                    .filter((item) => item.speech_id === speech.id)
+                    .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime())[0]}
+                  onChanged={updateSpeechCorrection}
+                />
+              )}
             </article>
           ))}
           {!data.speeches.length && (

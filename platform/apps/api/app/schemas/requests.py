@@ -82,6 +82,26 @@ class FinishSpeechRequest(BaseModel):
     content: str = Field(default="", max_length=20000)
 
 
+class SpeechCorrectionCreate(BaseModel):
+    proposed_content: str = Field(min_length=2, max_length=20000)
+    reason: str = Field(min_length=2, max_length=500)
+
+    @field_validator("proposed_content", "reason")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
+
+class SpeechCorrectionReview(BaseModel):
+    expected_updated_at: datetime
+    reason: str = Field(min_length=2, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
+
 class AdminUserPatch(BaseModel):
     is_active: bool | None = None
     role: Literal["user", "system_admin"] | None = None

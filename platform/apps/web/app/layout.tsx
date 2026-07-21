@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { GlobalNav } from "@/components/global-nav";
+import { MainContent } from "@/components/main-content";
 import { SkipLink } from "@/components/skip-link";
 
 export const metadata: Metadata = {
@@ -16,7 +17,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <div className="ambient ambient-a" />
         <div className="ambient ambient-b" />
         <GlobalNav />
-        <main id="main-content" tabIndex={-1}>{children}</main>
+        <MainContent>{children}</MainContent>
         <footer className="site-footer">
           <span>稷下辩论 JIXIA DEBATE</span>
           <span>真人思辨 · AI 协作 · 自动赛程</span>

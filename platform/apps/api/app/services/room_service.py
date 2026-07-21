@@ -9,6 +9,7 @@ from typing import Any
 from app.core.database import acquire_transaction_locks
 from app.models.entities import (
     AgentProfile,
+    CaptionSegment,
     Competition,
     JudgeScorecard,
     LeaderboardEntry,
@@ -19,6 +20,7 @@ from app.models.entities import (
     RoomSeat,
     Season,
     Speech,
+    TranscriptSegment,
     User,
 )
 from app.services.seasons import serialize_season
@@ -93,6 +95,8 @@ def remaining_seconds(room: Room) -> int | None:
     if room.status == "paused":
         return room.paused_remaining_seconds
     current = stage(room)
+    if current and current.get("host_announcement_pending"):
+        return max(1, int(current.get("host_target_duration_seconds") or current.get("duration", 30)))
     if current and current.get("ai_preparing"):
         frozen = current.get("preparing_stage_remaining_seconds")
         return max(0, int(frozen)) if frozen is not None else None
@@ -254,13 +258,23 @@ def speaking_permission(
     current = stage(room)
     if not current:
         return False, "当前没有发言环节"
+    if current.get("host_announcement_pending"):
+        return False, "主持人正在播报下一环节"
     active = active_speech(db=None, room=room)
     if active and not ignore_active_speech:
         return False, "该席位正在另一设备发言" if active.seat_key == seat.seat_key else "其他辩手正在发言"
     if current.get("kind") == "speech" and current.get("seat") != seat.seat_key:
         return False, f"当前轮到 {seat_label(current.get('seat', ''))}"
-    if current.get("kind") == "free" and current.get("side") != seat.side:
-        return False, f"自由辩论当前轮到{'正方' if current.get('side') == 'aff' else '反方'}"
+    if current.get("kind") == "free":
+        if current.get("intermission_deadline_at"):
+            return False, "正在等待下一方的三秒发言申请窗口结束"
+        if current.get("side") != seat.side:
+            return False, f"自由辩论当前轮到{'正方' if current.get('side') == 'aff' else '反方'}"
+        if current.get("force_ai_fallback"):
+            return False, "本轮无人申请，系统正在安排 AI 接替"
+        selected = current.get("selected_human_seat")
+        if selected and selected != seat.seat_key:
+            return False, f"本轮已按申请顺序选中 {seat_label(str(selected))}"
     if current.get("kind") not in {"speech", "free"}:
         return False, "当前是自动流程环节"
     return True, "轮到你发言"
@@ -361,6 +375,10 @@ PUBLIC_ROOM_HIDDEN_EVENT_TYPES = frozenset(
         "presence.changed",
         "seat.control_acquired",
         "seat.control_taken_over",
+        "speech.correction_requested",
+        "speech.correction_cancelled",
+        "speech.correction_rejected",
+        "speech.corrected",
     }
 )
 
@@ -403,6 +421,37 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
     turn_remaining_seconds = free_turn_remaining_seconds(room, current)
     events = db.scalars(select(MatchEvent).where(MatchEvent.room_id == room.id).order_by(MatchEvent.seq.desc()).limit(40)).all()
     recent_speeches = db.scalars(select(Speech).where(Speech.room_id == room.id).order_by(Speech.created_at.desc()).limit(20)).all()
+    active_caption_segments = []
+    if active:
+        active_caption_segments = list(
+            reversed(
+                list(
+                    db.scalars(
+                        select(CaptionSegment)
+                        .where(CaptionSegment.speech_id == active.id)
+                        .order_by(CaptionSegment.ordinal.desc(), CaptionSegment.id.desc())
+                        .limit(40)
+                    ).all()
+                )
+            )
+        )
+        # A speech may have started just before migration 0031 or an old ASR
+        # client may not yet have written the display projection. Preserve a
+        # reconnect-safe fallback without ever treating AI text-generation
+        # offsets as research transcript timing.
+        if not active_caption_segments:
+            active_caption_segments = list(
+                reversed(
+                    list(
+                        db.scalars(
+                            select(TranscriptSegment)
+                            .where(TranscriptSegment.speech_id == active.id)
+                            .order_by(TranscriptSegment.start_ms.desc(), TranscriptSegment.id.desc())
+                            .limit(40)
+                        ).all()
+                    )
+                )
+            )
     expose_internal_details = bool(user and user.role == "system_admin")
     serialized_events = []
     for item in reversed(events):
@@ -422,6 +471,9 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
         from app.services.seat_restore import visible_restore_requests
 
         restore_requests = visible_restore_requests(db, room, user)
+    from app.services.free_turn_queue import queue_projection
+
+    free_turn_queue = queue_projection(db, room, user)
     return {
         "id": room.id,
         "code": room.code,
@@ -466,11 +518,34 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
             if active
             else None
         ),
+        "caption_segments": [
+            {
+                "segment_id": item.id,
+                "speech_id": item.speech_id,
+                "text": item.text,
+                "start_ms": (
+                    item.presentation_offset_ms if isinstance(item, CaptionSegment) else item.start_ms
+                ),
+                "end_ms": (
+                    item.presentation_offset_ms if isinstance(item, CaptionSegment) else item.end_ms
+                ),
+                "is_final": item.is_final,
+                "timing_basis": item.timing_basis if isinstance(item, CaptionSegment) else "asr",
+                "source": item.source if isinstance(item, CaptionSegment) else "asr",
+                "updated_at": (
+                    item.updated_at
+                    if isinstance(item, CaptionSegment)
+                    else active.created_at + timedelta(milliseconds=max(item.start_ms, item.end_ms))
+                ).isoformat(),
+            }
+            for item in active_caption_segments
+        ],
         "my_seat": seat.seat_key if seat else None,
         "can_speak": allowed,
         "speak_reason": reason,
         "can_control": bool(user and can_control(db, room, user)),
         "seat_restore_requests": restore_requests,
+        "free_turn_queue": free_turn_queue,
         "failure_reason": (
             room.failure_reason if expose_internal_details else "服务暂时异常，比赛已安全暂停。" if room.failure_reason else ""
         ),
@@ -622,11 +697,19 @@ def anonymous_realtime_event(message: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"type": event_type} if isinstance(event_type, str) else {}
     if type(message.get("seq")) is int:
         result["seq"] = message["seq"]
-    if event_type == "asr":
+    if event_type in {"asr", "caption.segment"}:
         if isinstance(message.get("text"), str):
             result["text"] = message["text"]
         if isinstance(message.get("is_final"), bool):
             result["is_final"] = message["is_final"]
+        for key in ("speech_id", "seat_key", "segment_id"):
+            if isinstance(message.get(key), str):
+                result[key] = message[key]
+        for key in ("start_ms", "end_ms"):
+            if type(message.get(key)) is int:
+                result[key] = message[key]
+        if message.get("timing_basis") in {"agent_text", "asr"}:
+            result["timing_basis"] = message["timing_basis"]
     if event_type in {"audio.rtc.interrupt", "audio.realtime.aborted", "audio.stream.aborted"} and isinstance(
         message.get("generation"), str
     ):

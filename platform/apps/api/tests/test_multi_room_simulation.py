@@ -1127,6 +1127,18 @@ async def test_free_ai_audio_finishes_naturally_after_nominal_turn_boundary(clie
         room = load_room(db, code)
         speech = db.get(Speech, speech_id)
         assert speech.status == "completed"
+        assert room.template_snapshot[0]["side"] == "aff"
+        assert room.template_snapshot[0]["intermission_side"] == "neg"
+        assert room.template_snapshot[0]["intermission_deadline_at"]
+
+        current = dict(room.template_snapshot[0])
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        room.template_snapshot = [current]
+        db.commit()
+
+    await match_engine.process_room(code)
+    with SessionLocal() as db:
+        room = load_room(db, code)
         assert room.template_snapshot[0]["side"] == "neg"
 
 
@@ -1441,6 +1453,14 @@ async def test_free_debate_tts_retry_reuses_immediate_seat_once_then_returns_to_
     with SessionLocal() as db:
         room = load_room(db, code, lock=True)
         current = dict(room.template_snapshot[0])
+        assert current["intermission_side"] == "neg"
+        current["intermission_deadline_at"] = (now() - timedelta(milliseconds=1)).isoformat()
+        room.template_snapshot = [current]
+        db.commit()
+    await match_engine.process_room(code)
+    with SessionLocal() as db:
+        room = load_room(db, code, lock=True)
+        current = dict(room.template_snapshot[0])
         assert current["side"] == "neg"
         current["side"] = "aff"
         current["turn_started_at"] = now().isoformat()
@@ -1476,7 +1496,11 @@ async def test_free_debate_tts_retry_reuses_immediate_seat_once_then_returns_to_
         assert latest.content == "下一正常轮必须重新生成内容，不能再次复用旧失败文本。"
         assert len(reuse_events) == 1
         assert reuse_events[0].payload["source_speech_id"] == source_speech_id
-    assert agent_calls == 1
+    # The first call is the next-side candidate started during the three-second
+    # window; this test then rewrites the side to exercise rotation, so that
+    # candidate is correctly discarded and the authoritative side generates
+    # once more. Neither call may reuse the stale failed TTS text.
+    assert agent_calls == 2
 
 
 def test_free_debate_rotates_across_ai_teammates(client, register_user) -> None:

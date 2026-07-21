@@ -126,6 +126,33 @@ describe("result archive download", () => {
     expect(screen.queryByRole("link", { name: "返回个人中心" })).not.toBeInTheDocument();
   });
 
+  it("offers correction controls only on the participant's own eligible human speech", async () => {
+    const participantResult = result("aff_1");
+    participantResult.speeches = [
+      { ...audioSpeech("speech-human", "本人的真人发言"), audio_url: "", can_request_correction: true },
+      { ...audioSpeech("speech-ai", "AI 发言", "neg"), audio_url: "", can_request_correction: false },
+    ];
+    participantResult.speech_pagination = { page: 1, page_size: 50, total: 2, pages: 1, next_cursor: null, has_more: false };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/speech-correction-requests")) {
+        return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
+      return Promise.resolve(new Response(JSON.stringify(participantResult), { status: 200, headers: { "Content-Type": "application/json" } }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ResultPage />);
+
+    expect(await screen.findByText("本人的真人发言")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "申请修正发言文字" })).toHaveLength(1);
+    expect(screen.getByText("AI 发言").closest("article")).not.toHaveTextContent("申请修正发言文字");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/rooms/381526/speech-correction-requests"),
+      expect.anything(),
+    ));
+  });
+
   it("returns an anonymous watcher to the public projection while a result is not final", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "比赛尚未结束，请前往观战页面。" }), {
       status: 409,

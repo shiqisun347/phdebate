@@ -4,10 +4,14 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { DebateStage } from "@/components/debate-stage";
+import { FreeTurnQueue, FreeTurnSeatQueueAdapter } from "@/components/free-turn-queue";
 import { LoadError } from "@/components/load-error";
+import { StageAnnouncement } from "@/components/stage-announcement";
+import { StageCaptionProjection } from "@/components/stage-caption-projection";
 import { StageScrollAccessibility } from "@/components/stage-scroll-accessibility";
 import { StageSeatAccessibility } from "@/components/stage-seat-accessibility";
 import { TextSpeechFallback } from "@/components/text-speech-fallback";
+import { TranscriptDrawer } from "@/components/transcript-drawer";
 import { useRoom } from "@/lib/use-room";
 
 export default function DebatePage() {
@@ -62,6 +66,11 @@ export default function DebatePage() {
         mode="debate"
         liveEvent={liveEvent}
       />
+      <StageCaptionProjection room={room} liveEvent={liveEvent} />
+      <FreeTurnSeatQueueAdapter room={room} />
+      <FreeTurnQueue room={room} interactive onRoomChanged={applyRoom} />
+      <TranscriptDrawer room={room} liveEvent={liveEvent} />
+      <StageAnnouncement room={room} />
       <StageSeatAccessibility room={room} />
       <TextSpeechFallback
         room={room}

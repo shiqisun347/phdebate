@@ -862,7 +862,10 @@ class DebateAgentEngine:
             task.model_preset_id = prepared["preset_id"]
             task.usage = usage
             task.latency_ms = latency_ms
-            if payload.match_id and settings.memory_enabled:
+            # Speculative free-debate candidates and intent checks must not
+            # become memory.  Only text that entered the normal authoritative
+            # debate path may influence later matches.
+            if payload.match_id and settings.memory_enabled and payload.task_type == "debate":
                 db.add(
                     MemoryItem(
                         profile_key=task.profile_key,

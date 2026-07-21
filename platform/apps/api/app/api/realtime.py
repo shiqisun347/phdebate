@@ -12,14 +12,14 @@ from time import monotonic
 
 import websockets
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import settings
 from app.core.database import SessionLocal, TransactionLockTimeout
 from app.core.deps import SESSION_COOKIE
 from app.core.security import as_utc, token_hash
-from app.models.entities import Match, Room, RoomSeat, Speech, TranscriptSegment, User, UserSession
+from app.models.entities import CaptionSegment, Match, Room, RoomSeat, Speech, TranscriptSegment, User, UserSession
 from app.services.provider_config import runtime_provider_config
 from app.services.public_snapshot import public_snapshot_cache
 from app.services.realtime import audio_stream_aborts, room_hub
@@ -125,8 +125,42 @@ def persist_asr_final(
         speech = db.get(Speech, speech_id)
         if not speech or speech.status != "speaking":
             return False
+        last_caption = db.scalar(
+            select(CaptionSegment)
+            .where(CaptionSegment.speech_id == speech.id, CaptionSegment.source == "asr")
+            .order_by(CaptionSegment.ordinal.desc())
+            .limit(1)
+        )
+        if last_caption and last_caption.text == normalized:
+            return True
+        ordinal = int(
+            db.scalar(
+                select(func.coalesce(func.max(CaptionSegment.ordinal), 0)).where(
+                    CaptionSegment.speech_id == speech.id,
+                    CaptionSegment.source == "asr",
+                )
+            )
+            or 0
+        ) + 1
         speech.content = f"{speech.content}{normalized}"
         db.add(TranscriptSegment(speech_id=speech.id, text=normalized, is_final=True))
+        db.add(
+            CaptionSegment(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:caption:asr:{speech.id}:{ordinal}")),
+                room_id=speech.room_id,
+                speech_id=speech.id,
+                seat_key=speech.seat_key,
+                source="asr",
+                ordinal=ordinal,
+                text=normalized,
+                is_final=True,
+                timing_basis="asr",
+                # ASR providers do not currently expose trustworthy word
+                # alignment here. Zero explicitly means "unknown", not an
+                # audio timestamp.
+                presentation_offset_ms=0,
+            )
+        )
         db.commit()
         return True
 
@@ -567,10 +601,12 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                 # with a stale connected=false value.
                 with SessionLocal() as db:
                     room = load_room(db, code)
-                    projection = serialize_room(db, room, user, public=use_public_projection(db, room, user))
+                    public_event_projection = use_public_projection(db, room, user)
+                    projection = serialize_room(db, room, user, public=public_event_projection)
                 for event_type, seq in presence_events:
                     await room_hub.publish(code, {"type": event_type, "room_code": code, "seq": seq})
             else:
+                public_event_projection = True
                 with SessionLocal() as db:
                     room = load_room(db, code)
                     if not can_view_room(db, room, None):
@@ -594,7 +630,7 @@ async def room_websocket(websocket: WebSocket, code: str) -> None:
                     await send_json({"type": "snapshot", "room": projection})
                     initial_snapshot_seq = projection_seq
                 continue
-            outgoing_event = message if user else anonymous_realtime_event(message)
+            outgoing_event = anonymous_realtime_event(message) if public_event_projection else message
             await send_json({"type": "snapshot", "event": outgoing_event, "room": projection})
 
     async def receiver() -> None:

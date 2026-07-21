@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -32,6 +33,7 @@ from app.models import (
 from app.schemas import (
     AdminCreateInput,
     DebateRequest,
+    ShouldSpeakRequest,
     GatewayKeyInput,
     JudgeRequest,
     LLMProviderInput,
@@ -698,6 +700,101 @@ async def debate(payload: DebateRequest, key: GatewayKey = Depends(gateway_key),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _parse_should_speak(content: str) -> tuple[bool, str]:
+    """Parse the intentionally tiny decision output without accepting prose.
+
+    A malformed response is an upstream/configuration failure, not an implicit
+    negative decision.  The match platform can then fail open and preserve the
+    established automatic-debate flow.
+    """
+
+    raw = content.strip()
+    if raw.startswith("```"):
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AgentEngineError("decision_invalid_output", "是否发言判断未返回有效 JSON。") from exc
+    if not isinstance(value, dict) or type(value.get("should_speak")) is not bool:
+        raise AgentEngineError("decision_invalid_output", "是否发言判断缺少布尔字段 should_speak。")
+    reason = str(value.get("reason") or "").strip()[:300]
+    return value["should_speak"], reason
+
+
+@app.post("/debate/api/should-speak")
+async def should_speak(
+    payload: ShouldSpeakRequest,
+    key: GatewayKey = Depends(gateway_key),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return one idempotent free-debate intent decision.
+
+    The endpoint deliberately does not generate or return the candidate speech.
+    Callers start ``/api/debate`` concurrently under a separate task id, which
+    makes negative decisions cheap to cancel and impossible to leak as output.
+    """
+
+    key.last_used_at = utcnow()
+    db.commit()
+    task, replayed = _create_or_replay_task(db, payload)
+    if replayed:
+        if task.status == "completed":
+            decision, reason = _parse_should_speak(task.content)
+            return {
+                "task_id": task.task_id,
+                "should_speak": decision,
+                "reason": reason,
+                "replayed": True,
+            }
+        if task.status == "running":
+            return JSONResponse(
+                status_code=202,
+                content={"task_id": task.task_id, "status": "running", "replayed": True},
+            )
+        raise HTTPException(status_code=409, detail=f"任务当前状态为 {task.status}。")
+    try:
+        prepared = await agent_engine.prepare(payload)
+        prepared["messages"] = [
+            *prepared["messages"],
+            {
+                "role": "user",
+                "content": (
+                    "这是自由辩论抢答判断。结合当前完整历史，判断此刻该辩手是否有必要主动发言。"
+                    "只有在能提出新论点、直接反驳关键漏洞或澄清重大误解时才选择发言；避免重复和无效占时。"
+                    "只输出一个 JSON 对象，格式严格为 "
+                    '{"should_speak":true,"reason":"不超过60字"}，不得输出 Markdown 或发言正文。'
+                ),
+            },
+        ]
+        content = ""
+        # Intent must never occupy the hot path for a full speech duration.
+        async with asyncio.timeout(5.0):
+            async for event in agent_engine.stream(task, payload, prepared):
+                if event.get("type") == "delta":
+                    content += str(event.get("delta") or "")
+                elif event.get("type") == "final":
+                    content = str(event.get("content") or content)
+        decision, reason = _parse_should_speak(content)
+    except TimeoutError as exc:
+        await agent_engine.interrupt(task.task_id)
+        raise HTTPException(status_code=504, detail="是否发言判断超时。") from exc
+    except AgentEngineError as exc:
+        with SessionLocal() as failure_db:
+            failed = failure_db.scalar(select(AgentTask).where(AgentTask.task_id == task.task_id))
+            if failed and failed.status != "interrupted":
+                failed.status = "failed"
+                failed.error_code = exc.code
+                failed.error_message = exc.message
+                failure_db.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {
+        "task_id": task.task_id,
+        "should_speak": decision,
+        "reason": reason,
+        "replayed": False,
+    }
 
 
 @app.post("/debate/api/judge")
