@@ -2169,13 +2169,6 @@ class MatchEngine:
             if audio_url:
                 return audio_url
             if stable_moss_playback:
-                if not free_turn:
-                    # The current transcript is fixed. Start the next Agent
-                    # immediately; its TTS job will queue behind this formal
-                    # speech, then can run while the prepared WAV is playing.
-                    # The current call reaches MOSS admission first, so
-                    # speculative work cannot overtake the live turn.
-                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
                 synthesized_url = await moss_tts_realtime.synthesize(
                     content,
                     room_code=room_code,
@@ -2190,6 +2183,11 @@ class MatchEngine:
                     speech_id,
                     settings.moss_tts_playback_speed,
                 )
+                if not free_turn:
+                    # The single MOSS endpoint is now free. Generate the next
+                    # complete response while this immutable WAV is published;
+                    # never queue speculative TTS ahead of the formal turn.
+                    self._schedule_next_agent_prefetch(room_code, source_stage_index)
                 if livekit_audio_enabled():
                     await lighttts.publish_wav_to_livekit(
                         room_code=room_code,
