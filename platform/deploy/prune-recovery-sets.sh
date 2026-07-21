@@ -224,7 +224,13 @@ for row in "${valid_rows[@]-}"; do
   age_hours=$(( (now - modified) / 3600 ))
   echo "$MODE kind=manifest file=$(basename "$manifest") age_hours=$age_hours"
   if [[ "$MODE" == "apply" ]]; then
-    find "$BACKUP_DIR" -maxdepth 1 -type f -name "$(basename "$manifest")" -delete
+    manifest_filename="$(basename "$manifest")"
+    # A recovery manifest and its checksum sidecar form one metadata unit.
+    # Leaving the sidecar behind is misleading during later restore audits and
+    # slowly accumulates unreferenced recovery metadata.  Use exact basenames
+    # and the same top-level boundary as the manifest deletion.
+    find "$BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name "$manifest_filename" -o -name "$manifest_filename.sha256" \) -delete
   fi
   removed=$((removed + 1))
 done

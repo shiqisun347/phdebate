@@ -198,15 +198,21 @@ def test_apply_keeps_the_configured_rollback_floor_and_shared_data(tmp_path: Pat
     obsolete, obsolete_data = make_set(directory, "obsolete", "obsolete-data-volumes.tar.gz", 120)
     rollback, shared_data = make_set(directory, "rollback", "shared-data-volumes.tar.gz", 72)
     current, _ = make_set(directory, "current", "shared-data-volumes.tar.gz", 48)
+    obsolete_sidecar = directory / f"{obsolete.name}.sha256"
+    obsolete_sidecar.write_text("obsolete manifest checksum\n")
+    current_sidecar = directory / f"{current.name}.sha256"
+    current_sidecar.write_text("current manifest checksum\n")
     private = directory / "private.tar.gz"
     private.write_bytes(b"private")
 
     run(tmp_path, "apply", keep=2)
 
     assert not obsolete.exists()
+    assert not obsolete_sidecar.exists()
     assert not obsolete_data.exists()
     assert not (directory / "obsolete-data-volumes.tar.gz.sha256").exists()
     assert rollback.exists() and current.exists()
+    assert current_sidecar.exists()
     assert shared_data.exists()
     assert private.exists()
 
