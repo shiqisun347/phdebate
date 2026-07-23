@@ -1,7 +1,7 @@
 # Round 65：ASR 真双向流式、字幕生命周期与观战隐私
 
-日期：2026-07-24  
-范围：浏览器真人发言采集、ASR WebSocket、舞台字幕、断线重连、观战脱敏  
+日期：2026-07-24
+范围：浏览器真人发言采集、ASR WebSocket、舞台字幕、断线重连、观战脱敏
 部署：本轮未部署
 
 ## 结论
@@ -93,4 +93,3 @@ ASR socket 意外断开并进入有限重试时：
 - `apps/web/lib/asr-text.test.ts`
 - `apps/web/components/debate-stage.tsx`
 - `apps/web/components/debate-stage.test.tsx`
-
