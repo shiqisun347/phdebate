@@ -162,6 +162,14 @@ PHDEBATE_WEB_DEPLOYMENT_MODE=root ./deploy/build-web-release.sh
 ./deploy/activate-web-release.sh <release-name>
 ```
 
+API/Web release 可以滚动发布；比赛引擎和 worker 不得依据赛事列表判断是否可以重启。重启前必须直接检查数据库中的 `preparing/running/paused/judging` 房间：
+
+```bash
+./deploy/restart-engine-workers.sh
+```
+
+只要存在任一活动比赛，脚本就以非零状态退出且不会调用 Supervisor。不要绕过该门禁；等待比赛完成或由房主明确终止后再重启。
+
 根路径 Nginx 位置模板位于 `deploy/nginx-root.locations.conf`；生产不提供版本化 URL 或平行前端入口。
 
 Python 运行依赖升级必须使用版本化虚拟环境。脚本会先在独立端口完成影子启动与就绪检查，再原子切换 `.venv` 链接；API、比赛引擎或 worker 启动失败时会自动恢复上一版本：

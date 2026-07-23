@@ -288,12 +288,13 @@ runuser -u postgres -- pg_restore -p 5433 --exit-on-error \
 ```bash
 cd /home/ubuntu/sunsq/phdebate
 set -a; source .env; set +a
-PYTHONPATH=apps/api .venv/bin/alembic -c apps/api/alembic.ini current
-PYTHONPATH=apps/api .venv/bin/alembic -c apps/api/alembic.ini heads
+cd apps/api
+PYTHONPATH=. ../../.venv/bin/python -m alembic current
+PYTHONPATH=. ../../.venv/bin/python -m alembic heads
 
 cd /home/ubuntu/sunsq/debate-agent/apps/api
-../../.venv/bin/alembic current
-../../.venv/bin/alembic heads
+PYTHONPATH=. ../../.venv/bin/python -m alembic current
+PYTHONPATH=. ../../.venv/bin/python -m alembic heads
 ```
 
 `current` 必须与 `heads` 一致。恢复已有数据库后不要先运行 `upgrade head` 来掩盖错批次；先核对

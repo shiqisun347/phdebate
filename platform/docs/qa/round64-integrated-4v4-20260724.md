@@ -1,7 +1,7 @@
 # Round 64：4v4 多用户全流程、实时语音恢复与参考图 UI 综合验收
 
 日期：2026-07-24  
-状态：本地实现与回归完成；是否部署以生产环境活动房间检查为准。
+状态：本地实现与回归完成；API/Web release 已部署到生产，后续引擎重启因活动比赛门禁停止。
 
 ## 结论
 
@@ -149,3 +149,17 @@ Ruff: All checks passed
 - 真实公网下完全没有卡顿、撕裂音、吞字或音色漂移。
 
 上述指标必须在目标服务器上用真实 Agent、MOSS、LiveKit、Chrome/Safari、网络整形和实体扬声器继续验收。生产环境存在运行中比赛时不得部署或重启服务。
+
+## 生产部署记录
+
+- GitHub 备份分支：`backup/production-20260724-round64`。
+- 源码提交：`8ea3a4314c75565cc82fd36296585175a43abd59`。
+- API release：`round64-complete-4v4-ui-20260724`。
+- Web release：`round64-complete-4v4-ui-20260724`。
+- 上一回滚 release：`round61-disconnect-voice-affinity-20260724`。
+- PostgreSQL 迁移：当前 schema 已是 head，没有新增迁移。
+- API、双 worker、Web、Engine、Worker、MOSS、LiveKit、FunASR 均为 RUNNING；公开 `/api/health` 返回 `ok=true`。
+
+部署前通过赛事列表检查未发现活动房间，但部署后 `#117519` 重新显示为 `running`，且真人席位存在有效 Redis 在线租约。说明赛事列表不能作为引擎重启的唯一门禁。发现后已立即关闭本轮匿名观战连接，不终止、不跳过、不继续重启该房间。
+
+本轮新增直接数据库门禁：`deploy/restart-engine-workers.sh` 在调用 Supervisor 前运行 `assert-no-active-matches.py`。只要数据库存在 `preparing/running/paused/judging` 房间，脚本即失败关闭。后续不得再手工直接重启 Engine/Worker。
