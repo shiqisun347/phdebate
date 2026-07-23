@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "runtime": "openmoss-native-session-gateway",
+  "upstream": {
+    "repository": "https://github.com/OpenMOSS/MOSS-TTS.git",
+    "revision": "ad99ec5f26debf1d6c1a4dc8461b2bcb787ec9af"
+  },
+  "models": {
+    "realtime": {
+      "id": "OpenMOSS-Team/MOSS-TTS-Realtime",
+      "revision": "6acbc7f161a0db71c291f2d0aaa9eee59334cab2"
+    },
+    "codec": {
+      "id": "OpenMOSS-Team/MOSS-Audio-Tokenizer",
+      "revision": "3cd226ba2947efa357ef453bcad111b6eafba782"
+    }
+  },
+  "local_snapshots": {
+    "required": true,
+    "network_fallback_allowed": false,
+    "model_required_config": "config.json",
+    "codec_required_config": "config.json",
+    "tokenizer_required_config": "tokenizer_config.json"
+  },
+  "gpu_admission": {
+    "minimum_total_memory_gib": 24,
+    "minimum_free_memory_gib": 20,
+    "require_no_compute_processes": false,
+    "attention_implementation": "sdpa",
+    "allow_sub24gb_diagnostic": false
+  },
+  "runtime_parameters": {
+    "sample_rate": 24000,
+    "attention_implementation": "sdpa",
+    "prompt_chunk_duration_seconds": 0.24,
+    "decode_chunk_frames": 12,
+    "decode_overlap_frames": 0,
+    "initial_chunk_frames": 6,
+    "dynamo_cache_size_limit": 64,
+    "local_compile_mode": "disabled",
+    "local_compile_dynamic": false,
+    "async_decoder_enabled": false,
+    "async_decoder_queue_size": 2,
+    "max_length": 10000,
+    "temperature": 0.8,
+    "top_p": 0.6,
+    "top_k": 30,
+    "do_sample": true,
+    "repetition_penalty": 1.1,
+    "repetition_window": 50
+  },
+  "prompts": {
+    "debate_voice_1": {
+      "filename": "candidate_voice_1.wav",
+      "sha256": "67db118696aa8f0c637344871d1343374f262db87cf9451a9939773f688b053a"
+    },
+    "debate_voice_2": {
+      "filename": "candidate_voice_2.wav",
+      "sha256": "2e05e8ab9919e5fd9d6d765b62ada6891afffdfb82b5173789a19ee4e9d5e67f"
+    },
+    "debate_voice_3": {
+      "filename": "candidate_voice_3.wav",
+      "sha256": "7531485676b9fe9ed4af46c523f16e0f7faf0173dc8bcf417747a4f17c7ac883"
+    },
+    "debate_voice_4": {
+      "filename": "candidate_voice_4.wav",
+      "sha256": "1d32c88e4bd1427e3834180b329e9fb887a915802f62d68c014b087f21977a1b"
+    },
+    "debate_voice_5": {
+      "filename": "candidate_voice_5.wav",
+      "sha256": "41105727db43a32b8289783f00915a0f1c199fb406b1ff90542404f446cc4e1a"
+    },
+    "debate_voice_6": {
+      "filename": "candidate_voice_6.wav",
+      "sha256": "74335f280e30f127ab4bb7e7df8fa4852bf1cd5a45354ef07b4f929244b2d7ea"
+    },
+    "debate_voice_7": {
+      "filename": "candidate_voice_7.wav",
+      "sha256": "fee596cfbc031eb52abec47fa128d0f71298cb226dc9d0a87bf29c4394141dac"
+    },
+    "debate_voice_8": {
+      "filename": "candidate_voice_8.wav",
+      "sha256": "aec2efcfb1aec4acfd5a5a62baa68fb8ebdb387dc1d2bce2d348182d09cde523"
+    }
+  }
+}

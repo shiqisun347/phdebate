@@ -1,0 +1,434 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-18T22:53:18.392349+00:00",
+  "policy": "frozen_reliable_audio_baseline",
+  "change_rule": "Do not modify without explicit user approval and a new audio release gate.",
+  "protected_paths": [
+    "apps/api/app/core/config.py",
+    "apps/api/app/services/livekit_audio.py",
+    "apps/api/app/services/providers.py",
+    "apps/api/app/services/voice_runtime",
+    "apps/web/components/debate-stage.tsx",
+    "apps/web/lib/audio",
+    "apps/web/public/worklets/asr-pcm-capture.js",
+    "apps/web/public/worklets/livekit-interrupt-gate.js",
+    "apps/web/public/worklets/pcm-ring-player.js",
+    "assets/moss-prompts",
+    "deploy/openmoss",
+    "services/moss-realtime-gateway"
+  ],
+  "file_count": 82,
+  "fingerprint_sha256": "3219138b22878e766c94b9a1fa0e422211a6f27dd74afbbb93a8e45f7e295285",
+  "files": [
+    {
+      "path": "apps/api/app/core/config.py",
+      "bytes": 16572,
+      "sha256": "ed097c2d24d5d217f178a53ffba271f702761bcb5c58bd41fec7dbe98fc5d582"
+    },
+    {
+      "path": "apps/api/app/services/livekit_audio.py",
+      "bytes": 32423,
+      "sha256": "42c610c72fa2c59dcf01d9b54f6dce4f76b963e366c05229530f6fa7978d690c"
+    },
+    {
+      "path": "apps/api/app/services/providers.py",
+      "bytes": 178373,
+      "sha256": "94581d076627862c4967264fde2511106ab74edda821237bba745bbea46e26c5"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/__init__.py",
+      "bytes": 706,
+      "sha256": "6666b7a254377581a07346bff81d6b2f7c354a4fcf3d023fbcebe77195969a54"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/admission.py",
+      "bytes": 784,
+      "sha256": "a03c5eb9e02245ab9071cb6e1702439ca00edab6ed8f4bc0def6b5cfe965316b"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/archive.py",
+      "bytes": 1207,
+      "sha256": "9b5a4eb340634152947bfba65aee4cfa3fb8962576b350a1d69456716106f06b"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/lighttts.py",
+      "bytes": 4804,
+      "sha256": "75b310b8f70293c2fc39610fc89d1cb270eba14e1b56fbc0412277d130dce55c"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/livekit.py",
+      "bytes": 592,
+      "sha256": "607959be1ee5484d07887b395c5fdbafd5ff48b4599e8d27fdb0df53f2d0bc52"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/metrics.py",
+      "bytes": 1054,
+      "sha256": "d6c6478b3400097c731f306f0a9b7e0eea95c0d166f2c0c05b2f50aec4c2e87c"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/pipeline.py",
+      "bytes": 10534,
+      "sha256": "f6e8a7a8f4ec745751fe054d127c76665c2f1590811f66ce2e125ab035e72e2b"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/text.py",
+      "bytes": 7869,
+      "sha256": "78922d7b26b0fa6d3f9e205d8afcda43a3e5e2d894b03da79bc1676764a3d2c7"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/voices.py",
+      "bytes": 1757,
+      "sha256": "1b668630da2cd8eb8416a7b3142c0732f2eb13b0c2c17eedb86ebc8e83eef89b"
+    },
+    {
+      "path": "apps/api/app/services/voice_runtime/volcengine_protocol.py",
+      "bytes": 6592,
+      "sha256": "1d8e1862c779327c1bd5ff6dd1b186e0660da496ad3f616e2ff6c47bcdb5bb52"
+    },
+    {
+      "path": "apps/web/components/debate-stage.tsx",
+      "bytes": 90833,
+      "sha256": "6944a087e56051756e86e406119e63beed8f66ebb25aa6c0b72a92b592e47fc6"
+    },
+    {
+      "path": "apps/web/lib/audio/asr-capture-worklet.test.ts",
+      "bytes": 2638,
+      "sha256": "cb96dd17d8567af400e029225302d9e0c4bcd4c25745d64fb812e553854a6632"
+    },
+    {
+      "path": "apps/web/lib/audio/livekit-interrupt-gate-worklet.test.ts",
+      "bytes": 4950,
+      "sha256": "2da508a49ee4c45b35f5a9aae93ce4a65645b9c5878c588c5ba6b265713e5260"
+    },
+    {
+      "path": "apps/web/lib/audio/livekit-room-audio.test.ts",
+      "bytes": 9363,
+      "sha256": "fdbc7cbcf62c9dd3892b597a86f07bad85cc7932f0d29b121afdd05386f2b8c4"
+    },
+    {
+      "path": "apps/web/lib/audio/livekit-room-audio.ts",
+      "bytes": 19781,
+      "sha256": "7232bc6ee4e9476ecfc558bba3a1cb380a0ab76155e5eb5cd99dce6268265907"
+    },
+    {
+      "path": "apps/web/lib/audio/pcm-ring-worklet.test.ts",
+      "bytes": 4734,
+      "sha256": "609baeaf99dc7813981168f57d205bd7ec9c8c11307850f301cd69734003f784"
+    },
+    {
+      "path": "apps/web/lib/audio/pcm-stream-player.test.ts",
+      "bytes": 7485,
+      "sha256": "c6967c4015145cc8a589a9070f767d7caa586ccbd84e2936c2f7a8ad010cd5ac"
+    },
+    {
+      "path": "apps/web/lib/audio/pcm-stream-player.ts",
+      "bytes": 10507,
+      "sha256": "4403a3abaf370b2fabd3b2b4dec310b245c199a76ba5e2f031fa45681b0bc976"
+    },
+    {
+      "path": "apps/web/lib/audio/streaming-resampler.test.ts",
+      "bytes": 1568,
+      "sha256": "6cdb6ffac7aa2ef63b04c1d81a1ebe80cd92bd1c2acb964d1c3b22287e8036fe"
+    },
+    {
+      "path": "apps/web/lib/audio/streaming-resampler.ts",
+      "bytes": 1240,
+      "sha256": "657390bf6b9ac8a90c4150782ac6bf0ec56e7a1cc4adc7ced06310dca55f0703"
+    },
+    {
+      "path": "apps/web/public/worklets/asr-pcm-capture.js",
+      "bytes": 1853,
+      "sha256": "c5d0b1af285f8ab827ecdac85e65fa779e13ff6333e80346b922663ff13f4dd9"
+    },
+    {
+      "path": "apps/web/public/worklets/livekit-interrupt-gate.js",
+      "bytes": 6590,
+      "sha256": "de373b01d9b5587bdbaa38115227d99a21b2ec3645f3046bfbda5068663ba219"
+    },
+    {
+      "path": "apps/web/public/worklets/pcm-ring-player.js",
+      "bytes": 5857,
+      "sha256": "7a6ea767a3a0ee582188a685bc231ab17616d2f56623771ea0fa35b2102e1e3e"
+    },
+    {
+      "path": "assets/moss-prompts/README.md",
+      "bytes": 1113,
+      "sha256": "87787c180214557ec977cb956c523d3c9d5680803238b388f6553053a5c8b0c7"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_1.wav",
+      "bytes": 542774,
+      "sha256": "67db118696aa8f0c637344871d1343374f262db87cf9451a9939773f688b053a"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_2.wav",
+      "bytes": 507368,
+      "sha256": "2e05e8ab9919e5fd9d6d765b62ada6891afffdfb82b5173789a19ee4e9d5e67f"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_3.wav",
+      "bytes": 502612,
+      "sha256": "7531485676b9fe9ed4af46c523f16e0f7faf0173dc8bcf417747a4f17c7ac883"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_4.wav",
+      "bytes": 533160,
+      "sha256": "1d32c88e4bd1427e3834180b329e9fb887a915802f62d68c014b087f21977a1b"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_5.wav",
+      "bytes": 501470,
+      "sha256": "41105727db43a32b8289783f00915a0f1c199fb406b1ff90542404f446cc4e1a"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_6.wav",
+      "bytes": 506100,
+      "sha256": "74335f280e30f127ab4bb7e7df8fa4852bf1cd5a45354ef07b4f929244b2d7ea"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_7.wav",
+      "bytes": 507138,
+      "sha256": "fee596cfbc031eb52abec47fa128d0f71298cb226dc9d0a87bf29c4394141dac"
+    },
+    {
+      "path": "assets/moss-prompts/audio/candidate_voice_8.wav",
+      "bytes": 503118,
+      "sha256": "aec2efcfb1aec4acfd5a5a62baa68fb8ebdb387dc1d2bce2d348182d09cde523"
+    },
+    {
+      "path": "assets/moss-prompts/source-manifest.json",
+      "bytes": 30242,
+      "sha256": "2592cb33838bc630998006185d9aac4301439917e3bb1594e221c38a863fec2a"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_1.prompt.txt",
+      "bytes": 200,
+      "sha256": "46598315d4f8c6e6beb0d19141e886a0e92db56d9295ee45c49138836409b7e2"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_1.txt",
+      "bytes": 157,
+      "sha256": "a7b627124a5e7457e6f1608d3f55a6381be26db5861d9344dcba7455fac1a301"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_2.prompt.txt",
+      "bytes": 158,
+      "sha256": "d39aa8b8693d9c5b27d12b8dbc8ea0e4eaa93d1a8cf361ba52f3183db38efae9"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_2.txt",
+      "bytes": 115,
+      "sha256": "4662195834ee47bdfb9c88c60297c944a25da3c120cbe32bf8f2e2968d18935d"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_3.prompt.txt",
+      "bytes": 164,
+      "sha256": "99c4b5aad3c93406623dbe6dde6a26360799402a7baa2d67dc60b5c7c466b068"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_3.txt",
+      "bytes": 121,
+      "sha256": "7b2b335635e162db440037cb880486c3ae4ec2ddf417dd5b36b24176256c7387"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_4.prompt.txt",
+      "bytes": 164,
+      "sha256": "f2f01dac555353b1aa651c8e994adaae75801d55f338afe77f899216e256d93e"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_4.txt",
+      "bytes": 121,
+      "sha256": "ac2f36a962000b8c4f42c0d3dfc3e0c765b2bde7739c324f1cf73979823e550f"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_5.prompt.txt",
+      "bytes": 200,
+      "sha256": "22b136f5b44aa540795877cb229b1bf9f54bb2c4def99d21a311577d47b4c33e"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_5.txt",
+      "bytes": 157,
+      "sha256": "b575de69f28c72c776fb8045221ad81e75d2d5afe157355aad5173d5e3db8f17"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_6.prompt.txt",
+      "bytes": 197,
+      "sha256": "62b81b0ed32d89a2891270151395dea479ab8995c7882b7b577085d1169b71f6"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_6.txt",
+      "bytes": 154,
+      "sha256": "97c5c381ad44c95fa45194263d04ff631ccc339b7ff4c720f12d392be44e2b2f"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_7.prompt.txt",
+      "bytes": 197,
+      "sha256": "55a72561bb0e2b59c9464a00afb4be9b6c3add7e56f926c5f78a0800dc04bdf4"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_7.txt",
+      "bytes": 154,
+      "sha256": "6ee4ee6e79c2fcef22fcca5d3b66c01e30ff9a6b4ed8ed21f13b0486186c2df6"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_8.prompt.txt",
+      "bytes": 200,
+      "sha256": "1c4ac569547af42e5260c27aa9014ab1d7240dbdefd9e97c4f5a1576bed3feb1"
+    },
+    {
+      "path": "assets/moss-prompts/transcripts/candidate_voice_8.txt",
+      "bytes": 157,
+      "sha256": "5c102c8e181d5b09180a035c6894ab4eb7d0736154a7557506d942a072f41bf3"
+    },
+    {
+      "path": "deploy/openmoss/README.md",
+      "bytes": 3474,
+      "sha256": "9cead1a0e2aec78e3468e957db12fa87012ddfdbb780f98421fa7d5fee47a2c6"
+    },
+    {
+      "path": "deploy/openmoss/deployment-manifest.json",
+      "bytes": 2732,
+      "sha256": "e478e77b093cc25947e151f997db253c33ce36b3152f0456ad358ff9a5ec9b63"
+    },
+    {
+      "path": "deploy/openmoss/gpu_fingerprint.py",
+      "bytes": 925,
+      "sha256": "d09db62012b4fdd27bbbc2d3d9e419ae169d0e099f28fe14e189a55210cc5f0b"
+    },
+    {
+      "path": "deploy/openmoss/gpu_telemetry.py",
+      "bytes": 2649,
+      "sha256": "348efd1450c8d22b41117040c6c8b070e1422e1d693192b133c66a11af5ed837"
+    },
+    {
+      "path": "deploy/openmoss/preflight.py",
+      "bytes": 18397,
+      "sha256": "97dce66649bc8ef30ca1fa03163cc0a509736887ecf98319fd1860c4134f3157"
+    },
+    {
+      "path": "deploy/openmoss/run-endpoint.sh",
+      "bytes": 6767,
+      "sha256": "ff83cb612952ec57aa986b0bb9370aca1bd6073167f1dfc7663eaedff1915847"
+    },
+    {
+      "path": "deploy/openmoss/supervisor-3-endpoints.conf",
+      "bytes": 3942,
+      "sha256": "b047ba40dfe8fa6338c75af8aab1974d324d4e8a00705c2323c5663862f7b9e9"
+    },
+    {
+      "path": "deploy/openmoss/supervisor.env.example",
+      "bytes": 1132,
+      "sha256": "5a211449455db2bfe3c464b776de4654be8cf7d55522d0c6a872609074c57c77"
+    },
+    {
+      "path": "deploy/openmoss/test-static.sh",
+      "bytes": 6171,
+      "sha256": "844d73a3de7dd4e8aaef1b9f1a2f5d728dadff7724b06fb3768716a7a4987bb5"
+    },
+    {
+      "path": "deploy/openmoss/wait_ready.py",
+      "bytes": 3493,
+      "sha256": "3c3582cfb47de60d356278b7caf1d646c87efe49de5e62bb45e57576733b2eff"
+    },
+    {
+      "path": "services/moss-realtime-gateway/.gitignore",
+      "bytes": 51,
+      "sha256": "cd99fb1a2a820b208495d96dd98bda65b4b5cad4fa5c2e7d3c211bb56085be11"
+    },
+    {
+      "path": "services/moss-realtime-gateway/README.md",
+      "bytes": 11310,
+      "sha256": "2206a4ebe78f24c3788c9441def89d66bc56e5d8abe8e78fb267a8a6a7536541"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/__init__.py",
+      "bytes": 185,
+      "sha256": "9b479fc7b1cb019e11a56c46e75318c1dd2ebbfa5780108a90b15dfb741d7577"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/__main__.py",
+      "bytes": 209,
+      "sha256": "96da47c9c425ce40c21b79e0befb3662f318a8e5944c247b11cdbd278694ffac"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/app.py",
+      "bytes": 7464,
+      "sha256": "85aa6b8ba348dc518bd9d0de5d4cc8e1e37f62f8e28362ff24867b5366d9e8f2"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/backends.py",
+      "bytes": 40393,
+      "sha256": "cd4361633f818bcbc016ce7f1e38282c7da575d285b3c176ec5a2e22a0c34925"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/config.py",
+      "bytes": 13914,
+      "sha256": "bc742141e921f7b7687b8b66ebaeb34b1ae3458f12d1adaa1b8e851c78c092c3"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/low_latency_bridge.py",
+      "bytes": 22767,
+      "sha256": "54780c3a1ba467ee1c70428f9ec12a1aac3049a6f496c1debc2d64f6be6716db"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/runtime.py",
+      "bytes": 24841,
+      "sha256": "f2f4813b67d7f41337a627cd15575d3fe7f63bf14155d64cc395ab11bfc1fcd4"
+    },
+    {
+      "path": "services/moss-realtime-gateway/moss_realtime_gateway/websocket_protocol.py",
+      "bytes": 21126,
+      "sha256": "cf30e9b886c42367e5ec28430d413078a4cc0b407b3908357eb48395e2478a38"
+    },
+    {
+      "path": "services/moss-realtime-gateway/phdebate_moss_realtime_gateway.egg-info/PKG-INFO",
+      "bytes": 540,
+      "sha256": "ccddbbc93c4231420d326723f9142b2af569ee8905b8252be8493c75cb4b2ca9"
+    },
+    {
+      "path": "services/moss-realtime-gateway/phdebate_moss_realtime_gateway.egg-info/SOURCES.txt",
+      "bytes": 555,
+      "sha256": "30c5aab413b216f2b080da7ef27a372dc4ee0884991943a7ad4d88d23a83fb55"
+    },
+    {
+      "path": "services/moss-realtime-gateway/phdebate_moss_realtime_gateway.egg-info/dependency_links.txt",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "services/moss-realtime-gateway/phdebate_moss_realtime_gateway.egg-info/requires.txt",
+      "bytes": 137,
+      "sha256": "57b17297ad82e95a8b327b7663655c056344413188f563f00264f3f4d268f2d4"
+    },
+    {
+      "path": "services/moss-realtime-gateway/phdebate_moss_realtime_gateway.egg-info/top_level.txt",
+      "bytes": 22,
+      "sha256": "4da3f3406f928d13fbe2afbe0c1bd4e60143efc0386cb03af4d1bd20f6afee18"
+    },
+    {
+      "path": "services/moss-realtime-gateway/pyproject.toml",
+      "bytes": 724,
+      "sha256": "9cddfb4dcefca29f45033a83648da552da2c79f397786ed851e627cefdb23a87"
+    },
+    {
+      "path": "services/moss-realtime-gateway/tests/conftest.py",
+      "bytes": 194,
+      "sha256": "179951ce693dff484c0956e3f217503522f4c58b520ee9b1b40c9e0a50b9c0e9"
+    },
+    {
+      "path": "services/moss-realtime-gateway/tests/test_gateway.py",
+      "bytes": 66463,
+      "sha256": "6b63e74e14571efd79acdc2b866728df78215dc502299067a8cc698f1d2a0ff1"
+    },
+    {
+      "path": "services/moss-realtime-gateway/tests/test_low_latency_bridge.py",
+      "bytes": 15479,
+      "sha256": "a7fb0f6fd64032f8b0cc4359c7d82f24b2458ca78fe95f9a412dcbd9a8455bd3"
+    },
+    {
+      "path": "services/moss-realtime-gateway/uv.lock",
+      "bytes": 102702,
+      "sha256": "118e309654ad8df0c8f4aeac705f6d18f3504f91a31f3d6759d8bfeb7b9d8c75"
+    }
+  ]
+}

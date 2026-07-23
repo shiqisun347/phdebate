@@ -1,0 +1,202 @@
+export type User = {
+  id: string;
+  account: string;
+  real_name: string;
+  role: "user" | "system_admin";
+  is_active: boolean;
+  is_test_account?: boolean;
+};
+
+export type Season = {
+  id: string;
+  name: string;
+  slug: string;
+  starts_at: string;
+  ends_at: string | null;
+  is_active: boolean;
+  is_open: boolean;
+  created_at: string;
+  updated_at: string;
+  competition_count?: number;
+  match_count?: number;
+};
+
+export type Competition = {
+  id: string;
+  slug: string;
+  name: string;
+  tagline: string;
+  description: string;
+  rules: string;
+  format: string;
+  seat_count: number;
+  ranked: boolean;
+  allow_custom_topic: boolean;
+  accent: string;
+  live_count: number;
+  is_active?: boolean;
+  season?: Season | null;
+  topics?: { id: string; title: string; is_active?: boolean }[];
+};
+
+export type RoomSeat = {
+  seat_key: string;
+  side: "aff" | "neg";
+  position: number;
+  label: string;
+  occupant_type: "open" | "human" | "ai";
+  display_name: string;
+  is_ready: boolean;
+  connected: boolean;
+  is_me: boolean;
+  is_owner?: boolean;
+};
+
+export type CaptionSegment = {
+  segment_id: string;
+  speech_id: string;
+  seat_key: string;
+  text: string;
+  is_final: boolean;
+  start_ms: number | null;
+  end_ms: number | null;
+  updated_at: string;
+  source?: "asr" | "ai" | string;
+  timing_basis?: "asr" | "agent_text" | "audio_duration" | string;
+};
+
+export type RoomSpeech = {
+  id: string;
+  seat_key: string;
+  speaker: string;
+  stage_key: string;
+  content: string;
+  audio_url: string;
+  duration_seconds: number;
+  playback_started_at: string | null;
+  playback_ends_at: string | null;
+  stream_generation?: string;
+  stream_sample_rate?: number;
+  status: string;
+  created_at: string;
+  can_request_correction?: boolean;
+};
+
+export type FreeTurnQueueItem = {
+  request_id?: string;
+  side: "aff" | "neg";
+  seat_key: string;
+  order: number;
+  requested_at: string;
+  is_me: boolean;
+};
+
+export type FreeTurnQueue = {
+  items: FreeTurnQueueItem[];
+  window_deadline_at: string | null;
+  window_remaining_ms: number | null;
+  my_request: FreeTurnQueueItem | null;
+  target_side?: "aff" | "neg";
+  target_turn_seq?: number;
+  can_request: boolean;
+  request_reason: string;
+};
+
+type Stage = {
+  key: string;
+  name: string;
+  kind: "announcement" | "speech" | "free" | "judging";
+  duration: number;
+  seat?: string;
+  side?: "aff" | "neg";
+  cue?: string;
+  turn_duration?: number;
+  turn_started_at?: string;
+  ai_preparing?: boolean;
+  selected_human_seat?: string;
+  intermission_side?: "aff" | "neg";
+  intermission_turn_seq?: number;
+  intermission_deadline_at?: string;
+  preparing_stage_remaining_seconds?: number;
+  preparing_turn_remaining_seconds?: number;
+  awaiting_human_start?: boolean;
+  human_speech_duration_seconds?: number;
+};
+
+/** @deprecated Dormant compatibility shape; current competition APIs never emit it. */
+export type RecordingConsent = {
+  organization_id: string | null;
+  required: boolean;
+  granted: boolean;
+  policy: { id: string; version: number; title: string; content: string; effective_at?: string } | null;
+  decision: "grant" | "revoke" | "system_admin" | null;
+  decided_at: string | null;
+  actor_user_id: string | null;
+  record_id: string | null;
+};
+
+export type Room = {
+  id: string;
+  code: string;
+  topic: string;
+  status: string;
+  visibility: string;
+  is_test_data?: boolean;
+  seq: number;
+  competition: Competition;
+  season: Season | null;
+  owner: { id?: string; real_name: string };
+  seats: RoomSeat[];
+  current_stage: Stage | null;
+  current_stage_index: number;
+  remaining_seconds: number | null;
+  turn_remaining_seconds: number | null;
+  active_speech: { id: string; seat_key: string; speaker_type: string; status: string; content: string; playback_started_at?: string | null; stream_generation?: string; stream_sample_rate?: number } | null;
+  my_seat: string | null;
+  can_speak: boolean;
+  speak_reason: string;
+  can_control: boolean;
+  can_view_transcript?: boolean;
+  /**
+   * Whether this room keeps per-speech audio as a durable match artifact.
+   * Missing is treated as false by the web app so new rooms stay text-only.
+   */
+  match_audio_archive_enabled?: boolean;
+  /** @deprecated Not emitted by the competition-only backend. */
+  recording_consent?: RecordingConsent;
+  failure_reason?: string;
+  pause_health?: {
+    paused_at: string;
+    paused_duration_seconds: number;
+    is_stale: boolean;
+    capacity_consuming: boolean;
+    reason_code: "participant_disconnected" | "service_failure_and_participant_disconnected" | "service_or_manual_pause";
+    recommended_action: "resume" | "retry";
+    can_terminate_to_release_capacity: boolean;
+  } | null;
+  disconnect_grace?: {
+    will_pause: boolean;
+    pending?: { seat_key: string; display_name: string; remaining_seconds: number }[];
+    pending_count?: number;
+    minimum_remaining_seconds?: number;
+  } | null;
+  /** Ordered, server-authored caption projection. Missing means the backend has not enabled segmented captions. */
+  caption_segments?: CaptionSegment[];
+  free_turn_queue?: FreeTurnQueue;
+  recent_events: { seq: number; type: string; payload: Record<string, unknown>; created_at: string }[];
+  speeches: RoomSpeech[];
+};
+
+export type Ranking = {
+  rank: number;
+  user_id: string;
+  real_name: string;
+  points: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  matches: number;
+  average_score: number;
+  last_match_at?: string | null;
+  season_id?: string;
+};

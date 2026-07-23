@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="zh-CN" data-document-id="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="稷下辩论平台唯一官方系统文档：架构、模块、接口、部署维护与单场故障处置。">
+  <title>系统文档｜稷下辩论平台</title>
+  <link rel="stylesheet" href="official-docs.css">
+  <script src="official-docs.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#top"><span class="brand-mark">辩</span><strong>稷下辩论平台 · 官方文档</strong></a>
+    <nav class="doc-switch" aria-label="官方文档切换">
+      <a href="system.html" aria-current="page">系统文档</a>
+      <a href="user.html">用户使用说明</a>
+    </nav>
+    <div class="top-actions">
+      <input id="doc-search" class="search" type="search" placeholder="搜索本页" aria-label="搜索系统文档">
+      <button id="open-notes" class="plain-button" type="button"><span class="button-label">备注</span><span class="note-count" data-note-count>0</span></button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="系统文档目录">
+      <p class="sidebar-label">系统文档</p>
+      <nav class="toc">
+        <a href="#authority">文档边界</a>
+        <a href="#architecture">系统架构</a>
+        <a href="#modules">模块设计</a>
+        <a href="#match-engine">单场比赛状态机</a>
+        <a href="#voice">实时语音链路</a>
+        <a href="#data">数据与权限</a>
+        <a href="#interfaces">接口说明</a>
+        <a href="#deployment">部署与发布</a>
+        <a href="#operations">日常维护</a>
+        <a href="#incident">单场故障处置</a>
+        <a href="#quality">测试与发布门禁</a>
+        <a href="#change">变更约定</a>
+      </nav>
+      <div class="sidebar-meta"><strong>文档版本 2026.07</strong>基于 2026-07-22 主分支代码事实<br>单版本 · 根路径部署</div>
+    </aside>
+
+    <main id="top">
+      <article class="document">
+        <header class="hero">
+          <span class="hero-kicker">唯一官方系统文档</span>
+          <h1>让一场辩论可靠地开始、进行并留下可用数据</h1>
+          <p class="hero-copy">本文面向开发者、运维人员与 Coding Agent，说明当前系统真实结构、关键约束、接口边界和故障处理顺序。先保证单场比赛完成，再优化外围功能。</p>
+          <div class="status-strip">
+            <span class="status-chip strong">当前有效</span>
+            <span class="status-chip">根路径唯一版本</span>
+            <span class="status-chip">最多 5 个开放房间</span>
+            <span class="status-chip">全站最多 5 位观众</span>
+            <span class="status-chip">观众不可见文字稿</span>
+          </div>
+        </header>
+
+        <div class="local-note-notice"><span>✦</span><div><strong>可在任意章节添加高亮备注。</strong>先选中文字，再点章节右上角“高亮备注”。备注仅保存在当前浏览器的 localStorage，不会上传服务器，也不会自动同步到其他设备；重要备注请导出备份。</div></div>
+        <div id="search-empty" class="search-empty">没有找到匹配章节。请缩短关键词后重试。</div>
+
+        <section id="authority" class="noteable" data-block-id="authority">
+          <h2>1. 文档边界</h2>
+          <p class="lead">这份系统文档与《用户使用说明》是平台仅有的两份规范性文档。仓库中的 QA 报告、事故记录、迁移方案和历史 README 是证据或操作记录，不替代本文件。</p>
+          <div class="fact-grid">
+            <div class="fact"><strong>目标</strong><span>学生能连续完成大量真实辩论</span></div>
+            <div class="fact"><strong>P0</strong><span>单场流程、发言权限与实时语音</span></div>
+            <div class="fact"><strong>数据</strong><span>可追溯、可校正、可归档</span></div>
+          </div>
+          <div class="callout warning"><strong>禁止重新引入的概念</strong>系统只围绕赛事、房间、比赛、辩手、观众、结果和平台管理展开；不出现教学管理或平行版本入口。不使用 6016，不使用 Qwen3 8B。</div>
+          <p>代码事实优先级：可运行代码与数据库迁移 ＞ 本文 ＞模块 README ＞ QA/事故记录。若代码和本文不一致，必须先确认实际生产行为，再在同一变更中修正文档。</p>
+        </section>
+
+        <section id="architecture" class="noteable" data-block-id="architecture">
+          <h2>2. 系统架构</h2>
+          <p>平台采用服务端权威的房间状态。浏览器只展示状态和提交操作，不能自行决定轮次、席位、计时或比赛结果。</p>
+          <div class="architecture" aria-label="系统架构图">
+            <div class="arch-row"><div class="arch-label">访问层</div><div class="arch-cells"><div class="arch-cell blue"><strong>Nginx / HTTPS</strong><span>根路径、API、媒体、WebSocket、RTC 入口</span></div><div class="arch-cell"><strong>Next.js Web</strong><span>大厅、房间、比赛、观战、结果、管理</span></div><div class="arch-cell"><strong>LiveKit</strong><span>将连续语音轨道送到浏览器</span></div></div></div>
+            <div class="arch-row"><div class="arch-label">业务层</div><div class="arch-cells"><div class="arch-cell blue"><strong>FastAPI × 2</strong><span>认证、权限、REST、房间 WebSocket</span></div><div class="arch-cell blue"><strong>Match Engine</strong><span>唯一比赛状态机、计时与自动推进</span></div><div class="arch-cell"><strong>Dramatiq Worker</strong><span>归档、裁判和非交互异步任务</span></div></div></div>
+            <div class="arch-row"><div class="arch-label">状态层</div><div class="arch-cells"><div class="arch-cell green"><strong>PostgreSQL</strong><span>权威业务数据与追加式事件</span></div><div class="arch-cell green"><strong>Redis</strong><span>广播、在线租约、分布式锁与队列</span></div><div class="arch-cell"><strong>数据卷</strong><span>音频、归档、研究导出与备份状态</span></div></div></div>
+            <div class="arch-row"><div class="arch-label">外部能力</div><div class="arch-cells"><div class="arch-cell"><strong>Debate Agent</strong><span>REST/SSE 辩手与裁判服务</span></div><div class="arch-cell"><strong>MOSS TTS</strong><span>AI 辩手语音生成</span></div><div class="arch-cell"><strong>FunASR</strong><span>真人发言语音识别</span></div></div></div>
+          </div>
+          <h3>生产请求路径</h3>
+          <ul>
+            <li><code>/</code> 与页面路由 → Next.js（本机 12341）。</li>
+            <li><code>/api/*</code> 与房间主 WebSocket → 两个 FastAPI 实例（12340 / 12342）。</li>
+            <li><code>/ws/rooms/:code/audio</code>、<code>/asr</code> 和 <code>/media/*</code> → 固定可靠主 API。</li>
+            <li><code>/rtc</code> → LiveKit；<code>/collab</code> → 文字稿协作服务。</li>
+          </ul>
+          <div class="callout"><strong>房间隔离</strong>数据库、Redis 频道、WebSocket 投影、语音任务和事件都以 room / match 标识隔离。任何跨房间状态串扰都是发布阻断问题。</div>
+        </section>
+
+        <section id="modules" class="noteable" data-block-id="modules">
+          <h2>3. 模块设计</h2>
+          <div class="table-wrap"><table><thead><tr><th>模块</th><th>位置</th><th>职责</th><th>不得承担</th></tr></thead><tbody>
+            <tr><td>Web</td><td><code>apps/web</code></td><td>交互、舞台、浏览器音频、可访问性</td><td>自行推进比赛或绕过服务端权限</td></tr>
+            <tr><td>API</td><td><code>apps/api/app/api</code></td><td>认证、房间操作、管理、实时入口</td><td>在请求线程中长时间生成语音</td></tr>
+            <tr><td>Engine</td><td><code>apps/api/app/services/match_engine.py</code></td><td>阶段、计时、Agent/TTS 调度、恢复</td><td>依赖某个浏览器保持在线</td></tr>
+            <tr><td>Worker</td><td><code>apps/worker</code></td><td>归档、裁判、可重试后台工作</td><td>决定真人能否发言</td></tr>
+            <tr><td>Room service</td><td><code>room_service.py</code></td><td>房间序列化、权限、事件、剩余时间</td><td>向匿名观众泄露文字稿</td></tr>
+            <tr><td>Realtime</td><td><code>realtime.py</code></td><td>Redis 广播、连接、在线和观众租约</td><td>在 Redis 异常时放宽观众上限</td></tr>
+            <tr><td>Voice runtime</td><td><code>services/voice_runtime</code></td><td>TTS、LiveKit、音色、归档与指标</td><td>在同一轮切换音色或拼接不连续音轨</td></tr>
+          </tbody></table></div>
+          <h3>前端页面</h3>
+          <p><code>/</code> 赛事大厅；<code>/competitions/:slug</code> 赛事详情；<code>/rooms/:code/lobby</code> 房间大厅；<code>/debate</code> 辩手比赛页；<code>/watch</code> 只读观战；<code>/control</code> 房主/管理员控制；<code>/result</code> 结果与记录；另有登录、注册、个人中心、排行榜和系统管理。</p>
+          <h3>核心数据对象</h3>
+          <p>User / UserSession、Season / Competition / Topic / AutomationTemplate、Room / RoomSeat、Match / MatchEvent / Speech / TranscriptSegment / CaptionSegment、JudgeScorecard / RatingChange、AgentProfile / ProviderConfig、AudioAsset / Archive。</p>
+        </section>
+
+        <section id="match-engine" class="noteable" data-block-id="match-engine">
+          <h2>4. 单场比赛状态机</h2>
+          <div class="flow">
+            <div class="flow-step"><small>ROOM</small><strong>创建房间<br>认领席位</strong></div>
+            <div class="flow-step"><small>LOCK</small><strong>房主开始<br>AI 自动补位</strong></div>
+            <div class="flow-step"><small>RUN</small><strong>规则播报<br>阶段发言</strong></div>
+            <div class="flow-step"><small>JUDGE</small><strong>生成评分<br>必要时复核</strong></div>
+            <div class="flow-step"><small>ARCHIVE</small><strong>结果、文字<br>事件归档</strong></div>
+          </div>
+          <h3>权威规则</h3>
+          <ul>
+            <li>创建比赛时固定自动流程模板版本；之后修改模板不改变本场流程。</li>
+            <li>开赛时锁定席位，空位由系统选择 AI 人设，普通用户不配置模型参数。</li>
+            <li>真人发言必须同时满足：比赛运行、轮到本席位、没有其他活跃发言、控制租约有效。</li>
+            <li>自由辩论单轮最多 30 秒并按真实发言时间计时；真人等待开始、AI 准备和换边申请窗口不消耗总时长或单轮时长。</li>
+            <li>每次状态变化写入追加式 MatchEvent；重复请求通过幂等键和事务锁防止重复执行。</li>
+            <li>外部服务连续失败时安全暂停，已有发言、计时和事件不得丢失。</li>
+          </ul>
+          <h3>提前生成策略</h3>
+          <p>若下一阶段由 AI 发言，当前阶段文字和历史已经固定后，Engine 可以提前生成下一位辩手正文；TTS 只按全局容量进入有界队列，不能抢占当前正式 MOSS context 或 LiveKit 发布轨。正式进入下一阶段时只采用房间、阶段、席位、模板和历史指纹完全一致的预生成正文，否则取消并重新生成；音频仍由该轮唯一的双向流式 context 连续产生。</p>
+          <div class="callout warning"><strong>预加载不能改变比赛语义</strong>暂停、跳过、设备控制权转移、文字校正或历史变化会使预生成内容失效。失效内容必须删除，不能“为了更快”继续播放。</div>
+          <h3>容量边界</h3>
+          <p>全站最多同时保留 5 个开放房间。所有房间合计最多 5 位匿名观众；参赛辩手、房主与系统管理员不占匿名观众名额。达到上限时必须给出明确拒绝，不进行无限重连。</p>
+        </section>
+
+        <section id="voice" class="noteable" data-block-id="voice">
+          <h2>5. 实时语音链路</h2>
+          <h3>AI 辩手：单一实时音轨</h3>
+          <div class="flow">
+            <div class="flow-step"><small>TEXT</small><strong>Agent 返回<br>发言正文</strong></div>
+            <div class="flow-step"><small>TTS</small><strong>同一 MOSS context<br>持续输入与输出</strong></div>
+            <div class="flow-step"><small>SPEED</small><strong>连续 PCM<br>约 1.1×</strong></div>
+            <div class="flow-step"><small>RTC</small><strong>连续 PCM<br>LiveKit Opus</strong></div>
+            <div class="flow-step"><small>PLAY</small><strong>浏览器单一<br>连续音轨</strong></div>
+          </div>
+          <p>LLM 文本持续送入同一个 MOSS 上下文，音频通过房间内唯一的 LiveKit 发布轨连续送达浏览器。浏览器只订阅这一条 WebRTC 音轨，由 jitter buffer 吸收网络抖动；不得按分片创建播放器或在同一次发言中切换播放方案。比赛结束后不保留音频文件，只保留确认后的文字、状态事件和语音性能遥测。</p>
+          <div class="callout warning"><strong>发布门禁</strong>从 Agent 首个可读文本到浏览器开始播放的正式目标不超过 3 秒。TTS 容量、已认证 WebSocket 与 LiveKit publisher 在正式调用 Agent 前准备就绪；未达到条件时保持“准备中”，不能先消耗比赛计时。</div>
+          <div class="callout danger"><strong>P0 判断</strong>比赛现场卡顿通常说明实时供给、发布或播放缓冲不足。不得通过逐段 <code>audio.play()</code>、更小零缓冲、完整 WAV 回退或重复建连掩盖问题。</div>
+          <h3>真人辩手</h3>
+          <p>浏览器通过单个 AudioWorklet 连续采集 16 kHz 单声道 PCM，经绑定 <code>speech_id + stage_key</code> 的鉴权 WebSocket 桥接到 FunASR；同一轮短暂重连复用原采集图并有界补发 PCM。服务端在同一上下文中同时上行 PCM、下行 partial/final；空 final 会立即进入文字核对，不等待完整超时。房间重连时清除旧连接的临时字幕，只接受新快照或新连接结果。识别结果写入单行字幕和文字记录，不上传或归档真人录音。</p>
+          <h3>打断与回溯</h3>
+          <p>暂停、跳过或终止必须同时取消 Agent/TTS 工作、停止 LiveKit 发布并清理未播放队列。归档只保留实际确认的文字、事件、语音阶段遥测和校验值；不能把用户未听到的生成内容当作完整已播发言。</p>
+        </section>
+
+        <section id="data" class="noteable" data-block-id="data">
+          <h2>6. 数据与权限</h2>
+          <div class="table-wrap"><table><thead><tr><th>角色</th><th>可见</th><th>可操作</th></tr></thead><tbody>
+            <tr><td>匿名观众</td><td>脱敏舞台、题目、阶段、席位状态、公开结果、比赛声音</td><td>开启本机声音、全屏；不可见任何文字稿</td></tr>
+            <tr><td>登录用户</td><td>赛事、可加入房间、本人历史</td><td>建房、认领席位、准备、参赛</td></tr>
+            <tr><td>参赛辩手</td><td>本人比赛现场与允许的比赛记录</td><td>仅在轮到本人时发言、结束发言、断线后返回原席位</td></tr>
+            <tr><td>房主</td><td>单场控制状态</td><td>开始、暂停、恢复、跳过、终止、移交控制</td></tr>
+            <tr><td>系统管理员</td><td>全局健康、用户、房间、服务、归档和审计</td><td>平台配置、异常处置、复核与数据治理</td></tr>
+          </tbody></table></div>
+          <h3>认证与敏感信息</h3>
+          <ul>
+            <li>密码使用 Argon2 哈希；登录会话使用 HttpOnly Cookie，写操作校验 CSRF。</li>
+            <li>Provider 密钥加密保存，API 和审计日志只返回“已配置”，不返回明文。</li>
+            <li>浏览器按钮只负责提示，所有写操作仍在服务端校验用户、房间、席位、阶段和幂等键。</li>
+            <li>匿名公开投影必须经过专用序列化，不得复用管理员/辩手完整 room snapshot。</li>
+          </ul>
+          <h3>数据生命周期</h3>
+          <p>进行中状态写 PostgreSQL；Redis 只承载可恢复的短期协调状态。比赛完成、终止、待复核或结果修正后生成 JSON 归档与 SHA-256 校验。评分修正新增事件和补偿记录，不覆盖原始记录。</p>
+        </section>
+
+        <section id="interfaces" class="noteable" data-block-id="interfaces">
+          <h2>7. 接口说明</h2>
+          <p class="muted">下表按用途列出稳定入口。具体字段以 <code>schemas/requests.py</code>、前端类型和自动化测试为准；新增接口必须补充本节。</p>
+          <h3>认证与公共数据</h3>
+          <div class="table-wrap"><table><thead><tr><th>接口</th><th>用途</th><th>权限</th></tr></thead><tbody>
+            <tr><td class="endpoint"><span class="method post">POST</span>/api/auth/register|login|logout</td><td>注册、登录、退出</td><td>公开 / 会话</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/auth/session</td><td>当前登录状态</td><td>公开返回脱敏状态</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/health/live|ready</td><td>进程存活与依赖就绪</td><td>公开，不含密钥</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/competitions</td><td>赛事、详情、赛季和排行榜</td><td>公开</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/live-rooms</td><td>可公开观战房间</td><td>公开脱敏</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/me</td><td>本人进行中比赛与历史</td><td>登录</td></tr>
+          </tbody></table></div>
+          <h3>房间与比赛</h3>
+          <div class="table-wrap"><table><thead><tr><th>接口</th><th>用途</th></tr></thead><tbody>
+            <tr><td class="endpoint"><span class="method post">POST</span>/api/rooms</td><td>创建房间；受全站 5 房间上限和幂等键保护</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/rooms/search?code=</td><td>按六位房间号搜索</td></tr>
+            <tr><td class="endpoint"><span class="method post">POST</span>/api/rooms/:code/claim-seat|release-seat|ready|start</td><td>认领、释放、准备、开始</td></tr>
+            <tr><td class="endpoint"><span class="method post">POST</span>/api/rooms/:code/speech/start|finish</td><td>真人发言开始/结束，服务端校验轮次</td></tr>
+            <tr><td class="endpoint"><span class="method post">POST</span>/api/rooms/:code/control/:action</td><td>pause / resume / retry / skip / terminate</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/api/rooms/:code/result</td><td>单场状态、结果与按角色过滤的记录</td></tr>
+            <tr><td class="endpoint"><span class="method post">POST</span>/api/rooms/:code/rtc-token</td><td>签发短期房间音频令牌</td></tr>
+          </tbody></table></div>
+          <h3>实时与媒体</h3>
+          <div class="table-wrap"><table><thead><tr><th>接口</th><th>协议与约束</th></tr></thead><tbody>
+            <tr><td class="endpoint"><span class="method ws">WS</span>/ws/rooms/:code</td><td>房间状态、事件与在线租约；匿名连接使用公开投影</td></tr>
+            <tr><td class="endpoint"><span class="method ws">WS</span>/ws/rooms/:code/audio</td><td>可靠 PCM 回退通道；不得绕过匿名观众租约</td></tr>
+            <tr><td class="endpoint"><span class="method ws">WS</span>/ws/rooms/:code/asr</td><td>单个真人 speech 的鉴权 PCM/ASR 桥接</td></tr>
+            <tr><td class="endpoint"><span class="method get">GET</span>/media/:code/:filename</td><td>只允许读取数据库引用且属于可见房间的音频</td></tr>
+            <tr><td class="endpoint"><span class="method post">POST</span>/debate/api/debate</td><td>平台到独立 Agent Gateway 的 REST/SSE 服务端调用</td></tr>
+          </tbody></table></div>
+          <h3>管理接口</h3>
+          <p><code>/api/admin/*</code> 仅系统管理员：总览、用户、赛事/赛季/题库、流程模板、房间、Agent/裁判、Provider、预设语音、媒体与归档、数据质量、复核、发言校正和审计。密钥字段永远脱敏。</p>
+        </section>
+
+        <section id="deployment" class="noteable" data-block-id="deployment">
+          <h2>8. 部署与发布</h2>
+          <p>生产根目录为 <code>/home/ubuntu/sunsq/phdebate</code>。Supervisor 管理 PostgreSQL、Redis、协作服务、双 API、Engine、Worker、Web、MOSS、Nginx 和备份任务。生产只对外暴露 HTTPS，不开放内部端口。</p>
+          <h3>标准发布顺序</h3>
+          <ol class="decision-list">
+            <li><strong>保存恢复点</strong>确认 Git 分支、数据库自定义格式备份、数据卷、私密配置和 GPU 语音运行时清单可验证。</li>
+            <li><strong>运行质量门禁</strong>执行 <code>./scripts/quality.sh</code>，至少覆盖本次改动对应的 API/Web/部署测试。</li>
+            <li><strong>先升级 API 候选</strong>使用版本化虚拟环境或双 worker 滚动发布，影子端口通过 live/ready 后再切换。</li>
+            <li><strong>再发布 Web</strong>通过 <code>build-web-release.sh</code> 创建不可变 release，健康后原子切换 <code>.web-current</code>。</li>
+            <li><strong>重启 Engine/Worker</strong>仅在代码或配置需要时执行；检查进行中房间可恢复。</li>
+            <li><strong>单场验收</strong>创建隔离比赛完成开始、AI/真人发言、语音、暂停恢复、结果和归档，再扩大验证。</li>
+          </ol>
+          <pre><code>sudo ./deploy/prepare-runtime.sh
+./scripts/quality.sh
+sudo PHDEBATE_SKIP_SWITCH=true ./deploy/upgrade-python-runtime.sh
+PHDEBATE_WEB_DEPLOYMENT_MODE=root ./deploy/build-web-release.sh
+./deploy/activate-web-release.sh &lt;release-name&gt;</code></pre>
+          <div class="callout danger"><strong>不要就地覆盖</strong>不直接覆盖当前虚拟环境、当前 Web release 或数据库。失败时回滚服务链接或反向代理，不删除新数据库，也不破坏旧恢复点。</div>
+        </section>
+
+        <section id="operations" class="noteable" data-block-id="operations">
+          <h2>9. 日常维护</h2>
+          <h3>每天检查</h3>
+          <ul class="checklist">
+            <li><code>/api/health/ready</code> 返回 200，数据库、Redis、磁盘、备份和外部服务状态可解释。</li>
+            <li>Supervisor 所有生产进程为 RUNNING，无持续重启或不断增长的错误日志。</li>
+            <li>03:17 数据库备份成功且未超过 36 小时；最近恢复演练可完成。</li>
+            <li>磁盘剩余空间高于安全线；音频、归档、release、源码归档按保留策略清理。</li>
+            <li>没有长期占用上限的废弃大厅或暂停房间；不得直接在数据库随意删除有效比赛。</li>
+          </ul>
+          <h3>备份与恢复</h3>
+          <pre><code>sudo ./deploy/backup-database.sh
+sudo ./deploy/verify-backup-restore.sh
+sudo ./deploy/verify-data-volume-backup.sh
+./deploy/verify-recovery-manifest.sh &lt;manifest&gt;</code></pre>
+          <p>完整恢复点至少绑定：代码 commit、平台数据库、Agent 数据库、音频/归档数据卷、私密配置和语音运行时。恢复演练使用隔离目录和临时数据库，不在生产实例上试恢复。</p>
+          <h3>日志与审计</h3>
+          <p>优先按房间号、match_id、speech_id、task_id 和时间窗口关联 API、Engine、Worker、Agent、MOSS 与浏览器诊断。日志不记录密码、会话 Cookie、Provider Key、完整私密 Prompt 或未脱敏请求头。</p>
+        </section>
+
+        <section id="incident" class="noteable" data-block-id="incident">
+          <h2>10. 单场故障处置</h2>
+          <p class="lead">先保护这场比赛，再排查平台。不得让学生反复新建房间来“绕过”故障。</p>
+          <ol class="decision-list">
+            <li><strong>确认唯一状态</strong>以房间 REST snapshot、最新 MatchEvent 和 Engine 日志判断是 preparing、running、paused、judging 还是 terminal；页面文案不能互相矛盾。</li>
+            <li><strong>安全暂停</strong>若当前音频、Agent、ASR 或计时不可控，由房主/管理员在控制台暂停。保留阶段、剩余时间、当前 speech 和事件。</li>
+            <li><strong>定位单一链路</strong>按“连接 → Agent 正文 → MOSS 连续 PCM → LiveKit 发布 → 浏览器可听”或“麦克风 → AudioWorklet PCM → ASR WS → transcript”逐段核对，不同时修改多个变量。</li>
+            <li><strong>原房间恢复</strong>优先 retry / resume；真人持续断线达到 60 秒时冻结计时并暂停整场，保留真人席位。全部真人重新连接后再由房主或管理员继续；只有数据已无法一致恢复时才终止。</li>
+            <li><strong>完成后复盘</strong>导出房间事件、相关日志、语音性能遥测和浏览器诊断，建立可重复测试；修复后用同一场景回归。</li>
+          </ol>
+          <div class="table-wrap"><table><thead><tr><th>现象</th><th>先检查</th><th>安全动作</th></tr></thead><tbody>
+            <tr><td>AI 长时间无声</td><td>Agent 正文、MOSS 首帧、audio.rtc.started、LiveKit 订阅</td><td>暂停；清空当前 generation 和未播放队列后重置本次发言</td></tr>
+            <tr><td>现场卡顿/撕裂</td><td>生成 RTF、发布起点、丢包、concealed samples、浏览器缓冲</td><td>暂停并重置本次发言；不得临时切换 WAV 或其他播放器</td></tr>
+            <tr><td>真人按钮一直禁用</td><td>比赛状态、当前席位、在线状态、active speech、控制设备租约</td><td>刷新 snapshot；确认所有真人已返回，必要时结束残留 speech 后恢复比赛</td></tr>
+            <tr><td>字幕不更新</td><td>麦克风授权、AudioWorklet、ASR 鉴权、单流租约</td><td>保留已识别片段，重建本次 ASR 连接</td></tr>
+            <tr><td>“服务异常，已暂停”</td><td>最新 provider.failed / engine.quarantined 事件及 provider health</td><td>修复依赖后 retry，再 resume；不要跳过关键评分</td></tr>
+            <tr><td>观众反复重连</td><td>全站 5 人租约、Redis 状态、关闭码</td><td>达到容量时停止自动重连并显示明确原因</td></tr>
+          </tbody></table></div>
+          <div class="callout warning"><strong>终止是最后手段</strong>终止后保留归档与审计，但不应把未完成比赛当作正常赛果计分。若裁判失败，进入待复核而不是伪造结果。</div>
+        </section>
+
+        <section id="quality" class="noteable" data-block-id="quality">
+          <h2>11. 测试与发布门禁</h2>
+          <h3>P0：先完成一场</h3>
+          <ul class="checklist">
+            <li>注册/登录 → 创建 1v1 或 4v4 房间 → 认领/准备 → AI 补位 → 开始。</li>
+            <li>每个阶段按模板推进；只有正确辩手能发言；暂停、恢复和重连不丢状态。</li>
+            <li>AI 发言声音连续、无撕裂、音色一致、约 1.1×；真人 ASR 最终文字、修正记录和事件可回溯。</li>
+            <li>比赛进入 judging / completed 或明确 review_required，结果与事件一致。</li>
+            <li>结果页可按权限查看评分、积分和历史文字记录；匿名观众看不到文字稿。</li>
+          </ul>
+          <h3>随后扩大</h3>
+          <p>再验证 4v4、多人抢座、多设备接管、最多 5 房间、全站 5 观众、跨房间隔离、Redis/数据库短暂故障、Engine 重启恢复、Agent/TTS/ASR 超时、移动端和无障碍。</p>
+          <h3>证据要求</h3>
+          <p>测试报告必须写明环境、代码 commit、数据是否临时、步骤、期望、实际、截图/事件/日志位置和清理结果。通过测试不等于没有风险；未覆盖范围要明确列出。</p>
+        </section>
+
+        <section id="change" class="noteable" data-block-id="change">
+          <h2>12. 变更约定</h2>
+          <ul>
+            <li>任何架构、路由、权限、容量、语音链路、部署或故障流程变化，都必须同步修改本文件。</li>
+            <li>任何用户可见流程、按钮名称、限制或错误处理变化，都必须同步修改《用户使用说明》。</li>
+            <li>新建 QA/方案文档前先判断能否写入这两份官方文档；临时报告必须标注日期和非规范性。</li>
+            <li>备注是本机个人工作区，不构成官方内容。采纳备注时必须通过代码评审正式写入正文。</li>
+          </ul>
+          <p class="footer">维护位置：<code>platform/docs/official/system.html</code> · 对应用户文档：<a href="user.html">用户使用说明</a></p>
+        </section>
+      </article>
+    </main>
+  </div>
+
+  <aside id="notes-drawer" class="notes-drawer" aria-hidden="true" aria-label="本机文档备注">
+    <div class="drawer-head"><div><h2>本机备注</h2><p>仅保存在当前浏览器，不上传服务器</p></div><button id="close-notes" class="drawer-button" type="button" aria-label="关闭备注">关闭</button></div>
+    <div class="drawer-actions"><button id="export-notes" class="drawer-button" type="button">导出 JSON</button><button id="clear-notes" class="drawer-button" type="button">清空全部</button></div>
+    <div id="note-list" class="note-list"></div>
+  </aside>
+</body>
+</html>

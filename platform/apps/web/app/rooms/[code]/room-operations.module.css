@@ -1,0 +1,547 @@
+.lobbyPage,
+.controlPage {
+  --room-ink: #18324f;
+  --room-muted: #6e7f96;
+  --room-line: #dde6f0;
+  --room-blue: #1677ff;
+  --room-blue-soft: #edf5ff;
+  --room-green: #138a5b;
+  --room-green-soft: #edf9f3;
+  --room-amber: #9a6817;
+  --room-amber-soft: #fff8e8;
+}
+
+.lobbyPage {
+  padding-bottom: 150px !important;
+}
+
+.setupSteps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 18px;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--room-line);
+  border-radius: 15px;
+  background: #fff;
+  box-shadow: 0 7px 22px rgba(38, 69, 107, 0.05);
+  overflow: hidden;
+}
+
+.setupSteps li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 74px;
+  padding: 13px 17px;
+}
+
+.setupSteps li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 16px;
+  right: 0;
+  bottom: 16px;
+  width: 1px;
+  background: var(--room-line);
+}
+
+.setupSteps li > span:last-child {
+  min-width: 0;
+}
+
+.setupSteps strong,
+.setupSteps small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setupSteps strong {
+  color: var(--room-ink);
+  font-size: 13px;
+}
+
+.setupSteps small {
+  margin-top: 3px;
+  color: var(--room-muted);
+  font-size: 11px;
+}
+
+.stepMarker {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d6e0ec;
+  border-radius: 50%;
+  background: #f6f8fb;
+  color: #8391a5;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.done .stepMarker {
+  border-color: #bfe6d4;
+  background: var(--room-green-soft);
+  color: var(--room-green);
+}
+
+.current {
+  background: linear-gradient(
+    90deg,
+    rgba(237, 245, 255, 0.92),
+    rgba(255, 255, 255, 0)
+  );
+}
+
+.current .stepMarker {
+  border-color: #95c3fb;
+  background: var(--room-blue);
+  color: #fff;
+  box-shadow: 0 5px 13px rgba(22, 119, 255, 0.2);
+}
+
+.upcoming {
+  opacity: 0.68;
+}
+
+.seatPanel:focus {
+  outline: 3px solid rgba(22, 119, 255, 0.15);
+  outline-offset: 3px;
+}
+
+.nextAction {
+  display: grid;
+  gap: 5px;
+  padding: 15px;
+  border: 1px solid #cfe2fb;
+  border-radius: 13px;
+  background: var(--room-blue-soft);
+}
+
+.nextAction > span {
+  color: #5d7797;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.nextAction strong {
+  color: #164f91;
+  font-size: 16px;
+}
+
+.nextAction small {
+  color: #627b99;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.copyButton {
+  flex: 0 0 auto;
+}
+
+.secondaryActions {
+  border-top: 1px solid var(--room-line);
+  border-bottom: 1px solid var(--room-line);
+}
+
+.secondaryActions summary {
+  padding: 12px 0;
+  color: #4f6581;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.secondaryActions[open] summary {
+  color: var(--room-blue);
+}
+
+.secondaryActionsList {
+  display: grid;
+  gap: 9px;
+}
+
+.dangerDisclosure {
+  border-bottom-color: #f0d5d1;
+}
+
+.dangerAction {
+  display: grid;
+  gap: 10px;
+  padding: 2px 0 13px;
+}
+
+.dangerAction span,
+.dangerAction strong,
+.dangerAction small {
+  display: block;
+}
+
+.dangerAction strong {
+  color: #8e493f;
+  font-size: 12px;
+}
+
+.dangerAction small {
+  margin-top: 3px;
+  color: #90756f;
+  font-size: 11px;
+}
+
+.lobbyDock,
+.controlDock {
+  position: fixed;
+  z-index: 70;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  width: min(1240px, calc(100% - 40px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 14px;
+  border: 1px solid #d4e0ed;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 17px 48px rgba(40, 67, 105, 0.17);
+  backdrop-filter: blur(18px);
+}
+
+.dockSummary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--room-green);
+}
+
+.dockSummary > span {
+  min-width: 0;
+}
+
+.dockSummary strong,
+.dockSummary small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dockSummary strong {
+  color: var(--room-ink);
+  font-size: 13px;
+}
+
+.dockSummary small {
+  margin-top: 2px;
+  color: var(--room-muted);
+  font-size: 11px;
+}
+
+.lobbyDock > button,
+.controlDock > button {
+  flex: 0 0 auto;
+  min-width: 190px;
+}
+
+/* The control page is intentionally quieter than the debate stage. The room
+   owner is an exception handler here, not a live-show operator. */
+.controlPage {
+  padding-bottom: 145px !important;
+  color: var(--room-ink);
+}
+
+.controlHero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  margin: 28px 0 18px;
+  padding: 22px 24px;
+  border: 1px solid var(--room-line);
+  border-radius: 17px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(40, 67, 105, 0.06);
+}
+
+.controlHero h1 {
+  margin: 5px 0 6px;
+  color: #172c49;
+  font-size: 28px;
+  line-height: 1.25;
+}
+
+.controlHero p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--room-muted);
+  line-height: 1.65;
+}
+
+.heroActions {
+  display: flex;
+  gap: 8px;
+}
+
+.healthBanner {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid #bfe6d4;
+  border-radius: 14px;
+  background: var(--room-green-soft);
+}
+
+.healthBanner > svg {
+  width: 34px;
+  height: 34px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #dff4e9;
+  color: var(--room-green);
+}
+
+.healthBanner strong,
+.healthBanner span {
+  display: block;
+}
+
+.healthBanner strong {
+  color: #176343;
+  font-size: 14px;
+}
+
+.healthBanner span {
+  margin-top: 3px;
+  color: #537a68;
+  font-size: 12px;
+}
+
+.healthBannerAttention {
+  border-color: #f0d39c;
+  background: var(--room-amber-soft);
+}
+
+.healthBannerAttention > svg {
+  background: #fff0ce;
+  color: var(--room-amber);
+}
+
+.healthBannerAttention strong {
+  color: #7e5818;
+}
+
+.healthBannerAttention span {
+  color: #806b47;
+}
+
+.controlMain {
+  display: grid;
+  grid-template-columns: minmax(0, 1.22fr) minmax(310px, 0.78fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.controlSide {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+}
+
+.recoveryPanel {
+  border-color: #ead7b5 !important;
+}
+
+.recoveryActions {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.recoveryActions button {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.controlActionItem {
+  display: grid;
+  gap: 5px;
+}
+
+.controlActionItem small,
+.inlineActionReason,
+.dangerActionReason {
+  color: var(--room-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.controlActionItem small {
+  padding: 0 4px;
+}
+
+.inlineActionReason {
+  grid-column: 1 / -1;
+  padding: 0 2px 2px 25px;
+}
+
+.dangerActionReason {
+  display: block;
+  margin-top: 8px;
+  color: #8a716d;
+}
+
+.operationHint {
+  display: grid;
+  gap: 5px;
+  padding: 13px;
+  border: 1px solid #e2e9f2;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.operationHint strong {
+  color: #294664;
+  font-size: 13px;
+}
+
+.operationHint span {
+  color: var(--room-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.dangerZone {
+  border-color: #efd7d3 !important;
+  background: #fffafa !important;
+}
+
+.dangerZone h2 {
+  color: #8d493f !important;
+}
+
+.dangerZone p {
+  margin: 4px 0 14px;
+  color: #8a716d;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.controlDock .dockSummary {
+  color: var(--room-blue);
+}
+
+@media (max-width: 900px) {
+  .setupSteps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setupSteps li:nth-child(2)::after {
+    display: none;
+  }
+
+  .setupSteps li:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--room-line);
+  }
+
+  .controlMain {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .lobbyPage,
+  .controlPage {
+    width: min(100% - 24px, 1240px) !important;
+    padding-top: 28px !important;
+    padding-bottom: 172px !important;
+  }
+
+  .setupSteps li {
+    min-height: 66px;
+    padding: 10px 11px;
+  }
+
+  .setupSteps strong {
+    font-size: 12px;
+  }
+
+  .setupSteps small {
+    font-size: 10px;
+  }
+
+  .stepMarker {
+    width: 26px;
+    height: 26px;
+  }
+
+  .lobbyDock,
+  .controlDock {
+    left: 12px;
+    right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    transform: none;
+    width: auto;
+    display: grid;
+    gap: 9px;
+    padding: 10px;
+    border-radius: 15px;
+  }
+
+  .dockSummary {
+    padding: 0 3px;
+  }
+
+  .dockSummary small {
+    max-width: calc(100vw - 70px);
+  }
+
+  .lobbyDock > button,
+  .controlDock > button {
+    width: 100%;
+    min-width: 0;
+    min-height: 48px;
+  }
+
+  .controlHero {
+    grid-template-columns: 1fr;
+    gap: 15px;
+    margin-top: 14px;
+    padding: 18px;
+  }
+
+  .controlHero h1 {
+    font-size: 24px;
+  }
+
+  .heroActions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .heroActions a {
+    width: 100%;
+    padding-inline: 10px;
+  }
+
+  .healthBanner {
+    grid-template-columns: 32px minmax(0, 1fr);
+    padding: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seatPanel {
+    scroll-behavior: auto;
+  }
+}

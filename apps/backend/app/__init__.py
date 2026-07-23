@@ -1,2 +1,0 @@
-"""Phdebate backend package."""
-

@@ -1,0 +1,313 @@
+.queue {
+  position: fixed;
+  /* .stage-page is its own z-index:80 stacking context. Keep the queue above
+     the stage, otherwise the detached module can disappear behind the arena
+     even though the action is still available in the DOM. */
+  z-index: 91;
+  left: 50%;
+  bottom: calc(118px + env(safe-area-inset-bottom));
+  width: min(430px, calc(100vw - 40px));
+  padding: 10px;
+  transform: translateX(-50%);
+  border: 1px solid #cbdced;
+  border-radius: 16px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 16px 45px rgb(32 62 99 / 20%);
+  color: #203754;
+  backdrop-filter: blur(18px);
+}
+
+.header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: #eaf3ff;
+  color: #1677ff;
+}
+
+.heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.heading h2 {
+  margin: 0;
+  color: #203754;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.heading small {
+  overflow: hidden;
+  color: #72839a;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.countdown {
+  min-width: 42px;
+  padding: 5px 7px;
+  border-radius: 999px;
+  background: #edf8f4;
+  color: #168b57;
+  font: 750 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+
+.urgent {
+  background: #fff2dc;
+  color: #a5640b;
+}
+
+.disclosure {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #dce5ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #60738e;
+  cursor: pointer;
+}
+
+.disclosure[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.disclosure:focus-visible,
+.actionButton:focus-visible {
+  outline: 3px solid rgb(22 119 255 / 28%);
+  outline-offset: 2px;
+}
+
+.detail {
+  display: grid;
+  gap: 8px;
+  padding-top: 9px;
+}
+
+.selected {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 9px;
+  border: 1px solid #bfe6d4;
+  border-radius: 10px;
+  background: #effbf5;
+  color: #28634c;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.selected svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.list {
+  max-height: 124px;
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.list li {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 23px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 1px solid #e4ebf3;
+  border-radius: 9px;
+  background: #fafbfd;
+  font-size: 11px;
+}
+
+.list li strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list li time {
+  color: #8492a6;
+  font-size: 9px;
+}
+
+.list .mine {
+  border-color: #9bc9ff;
+  background: #f1f7ff;
+}
+
+.order {
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: #eaf2ff;
+  color: #2768b4;
+  font-weight: 800;
+}
+
+.list .empty {
+  display: flex;
+  justify-content: center;
+  border-style: dashed;
+  color: #7b8ba1;
+}
+
+.action {
+  display: grid;
+  gap: 4px;
+  padding-top: 9px;
+}
+
+.actionButton {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  font: 750 13px/1.2 inherit;
+  cursor: pointer;
+}
+
+.actionButton:disabled {
+  border-color: #dfe6ef;
+  background: #eef2f6;
+  color: #8b99aa;
+  cursor: not-allowed;
+}
+
+.requestButton:not(:disabled) {
+  background: #168f5d;
+  color: #fff;
+  box-shadow: 0 8px 20px rgb(22 143 93 / 24%);
+}
+
+.requestButton:not(:disabled):hover {
+  background: #117d50;
+}
+
+.cancelButton:not(:disabled) {
+  border-color: #d5e0ec;
+  background: #f7f9fc;
+  color: #35577d;
+}
+
+.action small,
+.watchNote {
+  color: #74859c;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.watchNote {
+  display: block;
+  padding-top: 8px;
+}
+
+.error {
+  margin-top: 7px;
+  padding: 7px 8px;
+  border-radius: 9px;
+  background: #fff3f2;
+  color: #a44c42;
+  font-size: 11px;
+}
+
+.spinner {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 720px) {
+  .queue {
+    bottom: calc(166px + env(safe-area-inset-bottom));
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 260px - env(safe-area-inset-bottom));
+    padding: 9px;
+    overflow: auto;
+    border-radius: 15px;
+  }
+
+  .heading h2 { font-size: 12px; }
+  .heading small { font-size: 10px; }
+  .actionButton { min-height: 44px; }
+  .list { max-height: 96px; }
+
+  /* The three-second hand window is a primary action, not a second card to
+     read. Keep its default mobile state to one line so all four seats remain
+     visible; the disclosure still opens the full queue when someone needs to
+     inspect the order. */
+  .queue:not(:has(.detail)) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    max-height: none;
+    padding: 8px;
+    overflow: visible;
+  }
+
+  .queue:not(:has(.detail)) .header {
+    grid-column: 2;
+    grid-row: 1;
+    grid-template-columns: auto auto;
+    gap: 6px;
+  }
+
+  .queue:not(:has(.detail)) .icon,
+  .queue:not(:has(.detail)) .heading {
+    display: none;
+  }
+
+  .queue:not(:has(.detail)) .action {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 0;
+  }
+
+  .queue:not(:has(.detail)) .action small {
+    display: none;
+  }
+
+  .queue:not(:has(.detail)) .actionButton {
+    width: 100%;
+  }
+
+  /* During the short actionable window, the hand action temporarily occupies
+     the upper row of the fixed stage dock. This keeps it reachable without
+     covering any debater seat; the main speech button remains visible below.
+     Opening the disclosure restores the full queue above the dock. */
+  .queue[data-actionable="true"]:not(:has(.detail)) {
+    bottom: calc(80px + env(safe-area-inset-bottom));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disclosure svg,
+  .spinner { transition: none; animation: none; }
+}

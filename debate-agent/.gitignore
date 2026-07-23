@@ -1,0 +1,15 @@
+.env
+apps/web/node_modules/
+apps/web/.next/
+apps/api/storage/
+backups/
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+*.egg-info/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.DS_Store

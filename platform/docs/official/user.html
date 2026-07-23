@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN" data-document-id="user">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="稷下辩论平台唯一官方用户使用说明：注册、建房、参赛、观战、结果与异常恢复。">
+  <title>用户使用说明｜稷下辩论平台</title>
+  <link rel="stylesheet" href="official-docs.css">
+  <script src="official-docs.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#top"><span class="brand-mark">辩</span><strong>稷下辩论平台 · 官方文档</strong></a>
+    <nav class="doc-switch" aria-label="官方文档切换">
+      <a href="system.html">系统文档</a>
+      <a href="user.html" aria-current="page">用户使用说明</a>
+    </nav>
+    <div class="top-actions">
+      <input id="doc-search" class="search" type="search" placeholder="搜索本页" aria-label="搜索用户使用说明">
+      <button id="open-notes" class="plain-button" type="button"><span class="button-label">备注</span><span class="note-count" data-note-count>0</span></button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="用户使用说明目录">
+      <p class="sidebar-label">用户使用说明</p>
+      <nav class="toc">
+        <a href="#quick-start">一分钟上手</a>
+        <a href="#roles">角色与权限</a>
+        <a href="#account">注册与登录</a>
+        <a href="#competition">选择赛事</a>
+        <a href="#create-room">创建房间</a>
+        <a href="#join-room">加入与准备</a>
+        <a href="#debate">完成一场比赛</a>
+        <a href="#voice">声音与麦克风</a>
+        <a href="#watch">公开观战</a>
+        <a href="#result">结果与历史</a>
+        <a href="#recovery">掉线与异常恢复</a>
+        <a href="#faq">常见问题</a>
+        <a href="#privacy">数据与使用约定</a>
+      </nav>
+      <div class="sidebar-meta"><strong>文档版本 2026.07</strong>适用于当前根路径唯一版本<br>桌面端与手机端</div>
+    </aside>
+
+    <main id="top">
+      <article class="document">
+        <header class="hero">
+          <span class="hero-kicker">唯一官方用户使用说明</span>
+          <h1>从选择席位，到完成一场完整辩论</h1>
+          <p class="hero-copy">这是一套自动推进的人机辩论平台。参赛者自己组房、选择真人席位；房主开始后，空席由 AI 补齐，系统完成阶段播报、计时、发言和裁判，无需主持人。</p>
+          <div class="status-strip">
+            <span class="status-chip strong">参赛必须登录</span>
+            <span class="status-chip">公开观战可匿名</span>
+            <span class="status-chip">六位房间号</span>
+            <span class="status-chip">全站最多 5 位观众</span>
+            <span class="status-chip">观众不可见文字稿</span>
+          </div>
+        </header>
+
+        <div class="local-note-notice"><span>✦</span><div><strong>这份说明支持个人高亮备注。</strong>选中文字后点章节右上角“高亮备注”。备注只保存在当前浏览器，不会上传或同步；更换设备、浏览器或清除网站数据后可能丢失。</div></div>
+        <div id="search-empty" class="search-empty">没有找到匹配章节。请换一个更短的关键词。</div>
+
+        <section id="quick-start" class="noteable" data-block-id="quick-start">
+          <h2>1. 一分钟上手</h2>
+          <div class="flow">
+            <div class="flow-step"><small>01</small><strong>注册并登录<br>使用真实姓名</strong></div>
+            <div class="flow-step"><small>02</small><strong>选择赛事<br>创建或搜房</strong></div>
+            <div class="flow-step"><small>03</small><strong>选择真人席位<br>完成准备</strong></div>
+            <div class="flow-step"><small>04</small><strong>房主开始<br>AI 自动补位</strong></div>
+            <div class="flow-step"><small>05</small><strong>按按钮发言<br>查看结果历史</strong></div>
+          </div>
+          <div class="callout success"><strong>第一次使用建议</strong>先完成一场 1v1 训练赛，熟悉麦克风检查、轮次提示、结束发言和断线恢复，再参加 4v4 正式赛。</div>
+          <p>比赛期间不要同时在多个设备上控制同一席位，也不要频繁刷新页面。若页面提示正在重连，先等待状态恢复；系统会保留已完成的发言和比赛进度。</p>
+        </section>
+
+        <section id="roles" class="noteable" data-block-id="roles">
+          <h2>2. 角色与权限</h2>
+          <div class="table-wrap"><table><thead><tr><th>你是谁</th><th>能做什么</th><th>不能做什么</th></tr></thead><tbody>
+            <tr><td>匿名观众</td><td>观看公开舞台、听比赛声音、看公开结果</td><td>看文字稿、占席、发言、控制比赛</td></tr>
+            <tr><td>登录用户</td><td>创建/加入房间、认领席位、查看本人历史</td><td>冒用别人的姓名或控制别人的席位</td></tr>
+            <tr><td>真人辩手</td><td>轮到本人时开启和结束发言</td><td>未轮到时抢麦、修改 AI 参数</td></tr>
+            <tr><td>房主</td><td>开始比赛、应急暂停/恢复/跳过/终止、移交房主</td><td>在正常流程中随意替代状态机</td></tr>
+            <tr><td>系统管理员</td><td>管理全站赛事、用户、房间、服务和异常复核</td><td>从公开页面泄露密钥或私人记录</td></tr>
+          </tbody></table></div>
+          <p>平台没有“主持人”角色。正常比赛由预设流程自动推进；房主的控制台只用于开赛和异常处理。</p>
+        </section>
+
+        <section id="account" class="noteable" data-block-id="account">
+          <h2>3. 注册与登录</h2>
+          <h3>注册</h3>
+          <ol>
+            <li>打开首页，选择“注册”。</li>
+            <li>填写唯一登录账号、真实姓名、密码和确认密码。</li>
+            <li>提交后进入平台。当前不要求邮箱、手机号或验证码。</li>
+          </ol>
+          <div class="callout"><strong>账号与姓名不同</strong>登录账号用于登录，真实姓名用于房间、比赛结果和排行榜展示。真实姓名可以重名，系统通过用户 ID 区分身份。</div>
+          <h3>登录与账号安全</h3>
+          <p>使用登录账号和密码登录。连续多次输错会触发短时保护。个人中心可以修改密码并撤销其他设备会话；在公共电脑使用后请主动退出。</p>
+          <h3>暂时无法登录</h3>
+          <p>先确认输入的是“登录账号”而不是姓名。若仍失败，记录错误提示和发生时间，联系系统管理员处理；不要连续尝试大量密码。</p>
+        </section>
+
+        <section id="competition" class="noteable" data-block-id="competition">
+          <h2>4. 选择赛事</h2>
+          <p>首页展示赛事、公开比赛和排行榜摘要。进入赛事详情后可以查看介绍、规则、赛季排行和可观战房间。</p>
+          <div class="fact-grid">
+            <div class="fact"><strong>4v4 日常赛</strong><span>空席 AI 补齐，按配置计入赛季</span></div>
+            <div class="fact"><strong>1v1 训练赛</strong><span>适合练习，可支持自定义辩题</span></div>
+            <div class="fact"><strong>其他赛事</strong><span>由管理员配置席位、题库和流程</span></div>
+          </div>
+          <h3>“立即参赛”后的选择</h3>
+          <ul>
+            <li><strong>创建房间：</strong>你成为房主，选择辩题和自己的真人席位。</li>
+            <li><strong>搜索房间：</strong>输入别人分享的六位房间号，进入该房间大厅。</li>
+          </ul>
+          <p>若赛事赛季未开放、可用辩题不足或全站已有 5 个开放房间，系统会阻止新建，但仍可能允许加入已有房间。</p>
+        </section>
+
+        <section id="create-room" class="noteable" data-block-id="create-room">
+          <h2>5. 创建房间</h2>
+          <ol class="decision-list">
+            <li><strong>选择辩题</strong>正式赛从题库选择或随机；训练赛在赛事允许时可填写自定义辩题。</li>
+            <li><strong>选择立场与席位</strong>例如“正方一辩”。你的显示姓名自动使用账号真实姓名。</li>
+            <li><strong>选择公开范围</strong>公开房间可被匿名观战；受限房间只允许有权限的人查看。</li>
+            <li><strong>确认创建</strong>系统生成永久不复用的六位房间号，把房间号或邀请链接分享给队友。</li>
+          </ol>
+          <div class="callout warning"><strong>不用设置 AI</strong>不要为每个空位选择 AI 名字、模型或参数。房主开始比赛时，系统会按赛事配置自动填满全部空席。</div>
+          <p>重复点击创建不会产生多场相同比赛；页面会使用请求编号确认结果。若出现“正在处理其他操作”，等待数秒后刷新房间状态。</p>
+        </section>
+
+        <section id="join-room" class="noteable" data-block-id="join-room">
+          <h2>6. 加入房间与赛前准备</h2>
+          <h3>加入房间</h3>
+          <ol>
+            <li>在首页或赛事详情选择搜索房间。</li>
+            <li>输入六位数字房间号。</li>
+            <li>查看赛事、辩题和席位图，认领一个空闲真人席位。</li>
+            <li>完成麦克风检查后点击准备。</li>
+          </ol>
+          <h3>席位规则</h3>
+          <ul>
+            <li>同一席位只能由一个账号认领；并发抢座时，以服务端最先确认者为准。</li>
+            <li>开赛前可以释放自己的席位。长时间离线的未锁定席位可能被自动释放。</li>
+            <li>开赛后席位锁定；真人断线 60 秒内保留比赛进度，持续离线达到 60 秒时整场自动暂停，不会由 AI 接替真人席位。</li>
+            <li>同一席位只有一个设备拥有控制权；新设备接管后，旧设备转为只读。</li>
+          </ul>
+          <h3>房主开始前检查</h3>
+          <ul class="checklist">
+            <li>辩题和赛事正确。</li>
+            <li>真人辩手已认领正确立场和辩位。</li>
+            <li>真人辩手已允许麦克风并完成测试。</li>
+            <li>所有人知道房间号，网络连接稳定。</li>
+            <li>确认后点击开始，接受空席由 AI 补齐。</li>
+          </ul>
+        </section>
+
+        <section id="debate" class="noteable" data-block-id="debate">
+          <h2>7. 完成一场比赛</h2>
+          <p>比赛页中央显示辩题、当前阶段、当前发言人、计时和双方席位。桌面端控制栏位于底部；手机端是上方比赛舞台、下方固定控制面板。</p>
+          <h3>轮到你发言</h3>
+          <ol class="decision-list">
+            <li><strong>看清提示</strong>按钮变为可用，并显示当前阶段和剩余时间。未轮到时按钮为灰色，旁边说明原因。</li>
+            <li><strong>开启发言</strong>点击发言按钮，浏览器开始采集麦克风；只在系统确认后开始讲话。</li>
+            <li><strong>正常完成</strong>保持与麦克风合适距离，避免敲桌和多人同时说话。说完点击“结束发言”。</li>
+            <li><strong>核对异常识别</strong>若没有识别到有效文字，页面会立即打开文字核对，不会长时间停在“正在整理发言”。补充确认后再提交。</li>
+            <li><strong>等待推进</strong>系统只保存确认后的文字记录和比赛事件，随后自动进入下一阶段；不保留比赛音频文件。</li>
+          </ol>
+          <div class="callout"><strong>按钮灰色不是故障的常见情况</strong>比赛尚未开始、当前为 AI 发言、轮到另一席位、比赛已暂停、已有其他人发言，或当前设备没有席位控制权。</div>
+          <h3>自由辩论</h3>
+          <p>根据赛事规则申请或进入发言队列。只有获得当前发言权的人可以开启麦克风；不要通过多设备或快速点击抢占队列。每次发言最多 30 秒。自由辩论只计算真实发言时间：真人点击“开始发言”前、AI 准备中和三秒申请窗口内，总计时与单轮计时都会冻结。</p>
+          <h3>房主应急控制</h3>
+          <p>正常比赛不要频繁进入控制台。只有发生服务异常、发言卡住或人员退出时，才使用暂停、恢复、重试当前步骤、跳过或终止。优先恢复原房间，终止比赛是最后选择。</p>
+        </section>
+
+        <section id="voice" class="noteable" data-block-id="voice">
+          <h2>8. 声音与麦克风</h2>
+          <h3>听 AI 发言</h3>
+          <ul>
+            <li>首次进入比赛或观战页，点击“开启比赛声音”。浏览器通常不允许网页自动播放有声内容。</li>
+            <li>保持页面前台运行，确认系统音量、输出设备和耳机连接正确。</li>
+            <li>AI 语音按约 1.1× 播放，整段音色应保持一致，不应出现分片空隙、明显杂音或撕裂。</li>
+          </ul>
+          <h3>使用麦克风</h3>
+          <ul>
+            <li>优先使用有线耳机或稳定的 USB 麦克风，避免扬声器声音回灌。</li>
+            <li>在房间大厅完成麦克风预检；若浏览器弹出授权，选择允许。</li>
+            <li>说话时距离麦克风约 15–25 厘米，避免遮挡、摩擦线材或突然大声喊叫。</li>
+            <li>手机端关闭省电模式和会自动占用麦克风的通话/录音应用。</li>
+          </ul>
+          <div class="callout danger"><strong>现场声音卡顿时</strong>先暂停比赛并记录房间号、阶段、发言人和发生时间。不要连续刷新或反复点击播放；系统不保存比赛音频文件，管理员将依据语音性能遥测、房间事件和浏览器诊断定位问题。</div>
+          <h3>如何判断已经恢复</h3>
+          <p>页面连接状态恢复、当前发言人和计时一致、声音连续播放至少一个完整发言、下一阶段正常进入，才算恢复。仅“听到一下声音”不代表问题已经解决。</p>
+        </section>
+
+        <section id="watch" class="noteable" data-block-id="watch">
+          <h2>9. 公开观战</h2>
+          <p>从首页公开比赛列表或赛事详情进入 <code>/rooms/:code/watch</code>。观战页复用比赛舞台，但没有麦克风和比赛控制。</p>
+          <div class="fact-grid">
+            <div class="fact"><strong>可以看</strong><span>题目、阶段、席位、当前发言人、计时</span></div>
+            <div class="fact"><strong>可以听</strong><span>手动开启后的比赛现场声音</span></div>
+            <div class="fact"><strong>不可见</strong><span>实时文字稿、完整逐字稿与敏感配置</span></div>
+          </div>
+          <p>全站所有房间合计最多 5 位匿名观众在线，不是每个房间 5 位。达到上限时，页面应明确提示名额已满并停止自动重连；可以稍后再试。参赛辩手、房主和管理员不占匿名观众名额。</p>
+          <div class="callout warning"><strong>隐私边界</strong>观众不应看到“发言将在这里实时呈现”等文字稿区域，也不能通过结果接口、WebSocket 或媒体链接获得文字内容。发现泄露请立即报告管理员。</div>
+        </section>
+
+        <section id="result" class="noteable" data-block-id="result">
+          <h2>10. 结果与个人历史</h2>
+          <h3>结果页状态</h3>
+          <ul>
+            <li><strong>比赛进行中/暂停：</strong>显示当前记录，不是最终成绩。应返回比赛现场继续原房间。</li>
+            <li><strong>裁判处理中：</strong>等待系统完成评分；不要重复创建同题房间代替结果。</li>
+            <li><strong>待人工复核：</strong>本场记录已保存，但管理员确认前不更新排行榜。</li>
+            <li><strong>比赛完成：</strong>显示胜负、评分、比赛摘要、积分变化和允许查看的文字记录。</li>
+            <li><strong>比赛终止：</strong>保留排障记录，不应当作正常胜负结算。</li>
+          </ul>
+          <h3>个人中心</h3>
+          <p><code>/me</code> 展示可以返回的进行中比赛、历史比赛、个人成绩和积分变化。遇到页面关闭或网络中断，登录同一账号后从这里返回，不要直接占用新席位。</p>
+          <h3>赛后记录</h3>
+          <p>参赛者按权限查看自己的确认文字、评分和比赛事件；系统不保存比赛音频文件。匿名观众仍不可见文字稿。若现场声音存在问题，请在比赛当时记录房间号、阶段和时间并报告管理员。</p>
+        </section>
+
+        <section id="recovery" class="noteable" data-block-id="recovery">
+          <h2>11. 掉线与异常恢复</h2>
+          <p class="lead">恢复原则：回到原房间、确认当前状态、再继续比赛。</p>
+          <div class="table-wrap"><table><thead><tr><th>情况</th><th>你应该做什么</th><th>不要做什么</th></tr></thead><tbody>
+            <tr><td>页面显示“重连中”</td><td>保持页面打开，等待自动同步；必要时点一次“立即重连”</td><td>连续刷新、反复点击发言</td></tr>
+            <tr><td>浏览器意外关闭</td><td>重新登录，从个人中心返回进行中比赛</td><td>用另一个账号抢回席位</td></tr>
+            <tr><td>新设备取得控制权</td><td>在新设备确认控制权，旧设备保持只读；真人席位身份不变</td><td>两个设备同时操作</td></tr>
+            <tr><td>真人断线未满 60 秒</td><td>保持原页面或从个人中心返回原房间；系统继续保留真人席位</td><td>创建新比赛或让其他账号冒用席位</td></tr>
+            <tr><td>真人断线达到 60 秒</td><td>系统自动暂停整场；全部真人返回后，由房主或管理员显式继续比赛</td><td>让 AI 接替真人、绕过页面直接恢复计时</td></tr>
+            <tr><td>比赛因服务异常安全暂停</td><td>房主打开控制台查看原因；修复后重试当前步骤，再恢复比赛</td><td>立即终止或新建多场比赛</td></tr>
+            <tr><td>观战名额已满</td><td>关闭当前页面，稍后重新进入</td><td>开多个窗口持续重连</td></tr>
+          </tbody></table></div>
+          <h3>报告问题时提供</h3>
+          <ul class="checklist">
+            <li>六位房间号、赛事名称和辩题。</li>
+            <li>发生时间、当前阶段、发言人和使用的设备/浏览器。</li>
+            <li>页面完整错误提示；若涉及声音，说明是无声、卡顿、杂音、撕裂、变声还是中途结束。</li>
+            <li>问题是否可重复、刷新或重连后是否恢复，以及现场声音问题持续了多久。</li>
+          </ul>
+        </section>
+
+        <section id="faq" class="noteable" data-block-id="faq">
+          <h2>12. 常见问题</h2>
+          <h3>为什么我不能创建房间？</h3>
+          <p>可能是赛季未开放、题库不可用、登录状态失效，或全站已有 5 个开放房间。阅读页面给出的具体原因；你仍可尝试加入已有房间。</p>
+          <h3>为什么房间里的空位没有 AI？</h3>
+          <p>房间大厅阶段空位会保持空白。房主点击开始后，系统才会锁定真人席位并自动补齐 AI。</p>
+          <h3>为什么我的发言按钮不亮？</h3>
+          <p>检查是否轮到本席位、比赛是否运行、是否已有其他人发言、当前设备是否拥有控制权。按钮旁应显示具体原因。</p>
+          <h3>为什么没有声音？</h3>
+          <p>先点击“开启比赛声音”，再检查浏览器标签页、系统音量和输出设备。若所有设置正常仍无声，房主应暂停并报告管理员。</p>
+          <h3>可以自己选择 AI 模型或音色吗？</h3>
+          <p>普通用户不能。AI 人设、模型、Prompt、Memory、参数和音色由管理员统一配置，保证正式比赛一致。</p>
+          <h3>观众为什么不能看文字稿？</h3>
+          <p>这是平台的数据与比赛隐私规则。匿名观众只看脱敏舞台和公开结果，不提供实时或赛后逐字稿。</p>
+          <h3>比赛暂停后结果页为什么不是胜负？</h3>
+          <p>暂停只是保留现场，不等于结束。返回原比赛继续；只有完成裁判或明确进入复核后才形成有效结果。</p>
+        </section>
+
+        <section id="privacy" class="noteable" data-block-id="privacy">
+          <h2>13. 数据与使用约定</h2>
+          <ul>
+            <li>使用真实姓名参赛，不冒用身份，不共享账号，不绕过席位和发言权限。</li>
+            <li>平台会保存比赛事件、确认后的识别文字、修正记录、结果和必要的脱敏语音性能数据；不保存比赛音频文件。</li>
+            <li>公开观战不公开文字稿；管理后台和 Agent 密钥仅系统管理员可见。</li>
+            <li>不得在人身攻击、违法内容或未经同意的语音采集场景中使用平台。</li>
+            <li>发现错误文字、音频质量或评分问题，按页面提供的校正/复核流程提交，不私自篡改记录。</li>
+          </ul>
+          <div class="callout"><strong>关于文档备注</strong>你在本文添加的高亮和备注只存在当前浏览器，不进入比赛数据，也不代表平台官方结论。可使用右上角备注面板导出 JSON。</div>
+          <p class="footer">维护位置：<code>platform/docs/official/user.html</code> · 技术与运维说明：<a href="system.html">系统文档</a></p>
+        </section>
+      </article>
+    </main>
+  </div>
+
+  <aside id="notes-drawer" class="notes-drawer" aria-hidden="true" aria-label="本机文档备注">
+    <div class="drawer-head"><div><h2>本机备注</h2><p>仅保存在当前浏览器，不上传服务器</p></div><button id="close-notes" class="drawer-button" type="button" aria-label="关闭备注">关闭</button></div>
+    <div class="drawer-actions"><button id="export-notes" class="drawer-button" type="button">导出 JSON</button><button id="clear-notes" class="drawer-button" type="button">清空全部</button></div>
+    <div id="note-list" class="note-list"></div>
+  </aside>
+</body>
+</html>
