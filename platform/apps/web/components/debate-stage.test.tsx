@@ -340,9 +340,10 @@ describe("DebateStage", () => {
     expect(screen.getByRole("heading", { name: "比赛准备中" })).toBeInTheDocument();
     expect(screen.getByText(/正在建立实时语音.*不会开始比赛计时.*自动进入第一阶段/)).toBeInTheDocument();
     expect(screen.getByRole("timer", { name: "比赛准备中，完成后自动开场" })).toHaveTextContent("准备中完成后自动开场");
-    const control = await screen.findByRole("button", { name: /等待轮次/ });
+    const control = await screen.findByRole("button", { name: /比赛准备中/ });
     expect(control).toHaveAttribute("data-state", "blocked");
-    expect(control).toHaveAttribute("title", "等待所有辩手准备完成");
+    expect(control).toHaveAttribute("title", "系统完成语音连接与预设提示后会自动开场");
+    expect(screen.queryByRole("button", { name: "暂停比赛" })).not.toBeInTheDocument();
   });
 
   it("presents an automatic stage cue as a system prompt instead of a host speech timer", async () => {
@@ -361,8 +362,77 @@ describe("DebateStage", () => {
 
     expect(screen.getAllByText("系统正在播放阶段提示")).toHaveLength(2);
     expect(screen.getByRole("timer", { name: "系统阶段提示还剩 00:06" })).toHaveTextContent("阶段提示音");
-    await waitFor(() => expect(screen.getByTitle("系统正在播放阶段提示")).toHaveTextContent("等待轮次"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /系统提示播放中/ })).toHaveTextContent("提示播放完成后会自动进入下一项"));
     expect(document.body).not.toHaveTextContent("主持人");
+  });
+
+  it.each([
+    [
+      "AI preparation",
+      room({
+        can_control: false,
+        current_stage: { key: "neg_case", name: "反方立论", kind: "speech", duration: 120, seat: "neg_1", ai_preparing: true },
+        active_speech: { id: "ai-preparing", seat_key: "neg_1", speaker_type: "ai", status: "synthesizing", content: "" },
+      }),
+      /AI 正在准备/,
+      /正在生成本轮内容和语音/,
+    ],
+    [
+      "AI playback",
+      room({
+        can_control: false,
+        current_stage: { key: "neg_case", name: "反方立论", kind: "speech", duration: 120, seat: "neg_1" },
+        active_speech: { id: "ai-playing", seat_key: "neg_1", speaker_type: "ai", status: "playing", content: "" },
+      }),
+      /AI 正在发言/,
+      /语音播放结束后系统会自动推进/,
+    ],
+    [
+      "another human speech",
+      room({
+        can_control: false,
+        seats: room().seats.map((seat) => seat.seat_key === "neg_1" ? { ...seat, occupant_type: "human", display_name: "李同学" } : seat),
+        current_stage: { key: "neg_case", name: "反方立论", kind: "speech", duration: 120, seat: "neg_1" },
+        active_speech: { id: "human-playing", seat_key: "neg_1", speaker_type: "human", status: "speaking", content: "" },
+      }),
+      /李同学正在发言/,
+      /当前发言结束后系统会显示下一步/,
+    ],
+    [
+      "paused match",
+      room({ status: "paused", can_control: false, speak_reason: "比赛已暂停" }),
+      /比赛已暂停/,
+      /比赛进度已保存/,
+    ],
+    [
+      "judging",
+      room({ status: "judging", can_control: false, current_stage: null, active_speech: null }),
+      /正在评审/,
+      /结果生成后自动跳转/,
+    ],
+    [
+      "completed match",
+      room({ status: "completed", can_control: false, current_stage: null, active_speech: null, remaining_seconds: 0 }),
+      /比赛已结束/,
+      /不能继续发言/,
+    ],
+  ] as const)("shows a concrete non-action state during %s", async (_label, targetRoom, buttonName, detail) => {
+    render(<DebateStage room={targetRoom} connected mode="debate" />);
+    const control = await screen.findByRole("button", { name: buttonName });
+    expect(control).toBeDisabled();
+    expect(control).toHaveTextContent(detail);
+    expect(control).not.toHaveTextContent("等待轮次");
+  });
+
+  it("hides the owner pause shortcut while a human speech is in progress", async () => {
+    render(<DebateStage room={room({
+      seats: room().seats.map((seat) => seat.seat_key === "neg_1" ? { ...seat, occupant_type: "human", display_name: "李同学" } : seat),
+      current_stage: { key: "neg_case", name: "反方立论", kind: "speech", duration: 120, seat: "neg_1" },
+      active_speech: { id: "human-playing", seat_key: "neg_1", speaker_type: "human", status: "speaking", content: "" },
+    })} connected mode="debate" />);
+
+    await screen.findByRole("button", { name: /李同学正在发言/ });
+    expect(screen.queryByRole("button", { name: "暂停比赛" })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -1269,8 +1339,11 @@ describe("DebateStage", () => {
     expect(subtitle.closest(".subtitle-stage")).toHaveAttribute("data-caption-line", "single");
 
     await act(async () => {
-      FakeSocket.latest?.onmessage?.({ data: JSON.stringify({ type: "asr", text: "第一句。", is_final: true }) } as MessageEvent);
-      FakeSocket.latest?.onmessage?.({ data: JSON.stringify({ type: "asr", text: "第一句。第二句正在说，而且舞台只显示最新短句", is_final: false }) } as MessageEvent);
+      FakeSocket.latest?.onmessage?.({ data: JSON.stringify({
+        type: "asr",
+        text: "第一句。第二句正在说，而且舞台只显示最新短句",
+        is_final: true,
+      }) } as MessageEvent);
     });
     expect(subtitle).toHaveTextContent("而且舞台只显示最新短句");
     expect(subtitle).not.toHaveTextContent("第一句。");
@@ -1335,13 +1408,13 @@ describe("DebateStage", () => {
   });
 
   it("keeps one AudioWorklet graph across ASR reconnect and preserves the interrupted partial for review", async () => {
-    const { FakeSocket, process, stop } = await renderAsrHarness();
+    const { FakeSocket, container, process, stop } = await renderAsrHarness();
     const first = FakeSocket.latest!;
     markAsrReady(first);
     process(0.1, 4_096);
     await act(async () => {
       first.onmessage?.({
-        data: JSON.stringify({ type: "asr", text: "断线前已经说出的半句话", is_final: false }),
+        data: JSON.stringify({ type: "asr", text: "第一句已经确认。第二句", is_final: false }),
       } as MessageEvent);
       first.onclose?.({ code: 1006 } as CloseEvent);
       // Capture must continue while the replacement WebSocket is opening.
@@ -1352,6 +1425,8 @@ describe("DebateStage", () => {
     const second = FakeSocket.latest!;
     expect(second).not.toBe(first);
     expect(FakeAsrCaptureNode.instances).toHaveLength(1);
+    expect(container.querySelector(".subtitle-stage p")).toHaveTextContent("正在聆听你的发言");
+    expect(container.querySelector(".subtitle-stage p")).not.toHaveTextContent("第二句");
     markAsrReady(second);
     expect(second.send.mock.calls.some(([payload]) => payload instanceof ArrayBuffer)).toBe(true);
     process(0.1, 4_096);
@@ -1359,13 +1434,31 @@ describe("DebateStage", () => {
     await waitFor(() => expect(second.send).toHaveBeenCalledWith(JSON.stringify({ type: "finish" })));
     await act(async () => {
       second.onmessage?.({
-        data: JSON.stringify({ type: "asr", text: "，重连后继续完成。", is_final: true }),
+        data: JSON.stringify({ type: "asr", text: "第一句已经确认。第二句继续完成。", is_final: true }),
       } as MessageEvent);
     });
 
     const review = await screen.findByRole("dialog", { name: "提交前核对发言文字" });
     expect(review).toHaveTextContent("字幕连接已恢复");
-    expect(screen.getByLabelText("发言文字")).toHaveValue("断线前已经说出的半句话，重连后继续完成。");
+    expect(screen.getByLabelText("发言文字")).toHaveValue("第一句已经确认。第二句继续完成。");
+  });
+
+  it("keeps the authoritative final subtitle when a stale partial arrives out of order", async () => {
+    const { FakeSocket, container } = await renderAsrHarness();
+    const socket = FakeSocket.latest!;
+    markAsrReady(socket);
+
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({ type: "asr", text: "最终确认的字幕。", is_final: true }),
+      } as MessageEvent);
+      socket.onmessage?.({
+        data: JSON.stringify({ type: "asr", text: "迟到的旧临时字幕", is_final: false }),
+      } as MessageEvent);
+    });
+
+    expect(container.querySelector(".subtitle-stage p")).toHaveTextContent("最终确认的字幕");
+    expect(container.querySelector(".subtitle-stage p")).not.toHaveTextContent("迟到的旧临时字幕");
   });
 
   it("surfaces a bounded reconnect failure instead of leaving an endless reconnect notice", async () => {
@@ -1474,7 +1567,7 @@ describe("DebateStage", () => {
     expect(screen.getByText("该席位正在另一设备发言")).toBeInTheDocument();
   });
 
-  it("keeps the capped free-debate turn visible until the selected human starts", () => {
+  it("keeps the capped free-debate turn visible until the selected human starts", async () => {
     vi.useFakeTimers();
     render(<DebateStage room={room({
       can_speak: true,
@@ -1490,6 +1583,7 @@ describe("DebateStage", () => {
       },
       turn_remaining_seconds: 40,
     })} connected mode="debate" />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     const button = screen.getByRole("button", { name: /点击开始发言后计时.*单轮时长 00:30/ });
     expect(button).toHaveTextContent("点击开始发言后计时 · 单轮时长 00:30");
 

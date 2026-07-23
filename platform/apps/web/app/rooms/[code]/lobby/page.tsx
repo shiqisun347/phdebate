@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import {
   Bot,
   Check,
+  Clock3,
   DoorOpen,
   Eye,
   Play,
@@ -43,7 +44,8 @@ function lobbyActionApplied(
   if (action.path === "claim-seat")
     return room.my_seat === action.body.seat_key;
   if (action.path === "release-seat") return !room.my_seat;
-  if (action.path === "ready") return Boolean(me?.is_ready);
+  if (action.path === "ready")
+    return Boolean(me?.is_ready) === Boolean(action.body.ready);
   if (action.path === "start") return room.status !== "lobby";
   if (action.path === "cancel") return room.status === "cancelled";
   const removedSeat = action.path.match(/^seats\/([^/]+)\/remove$/)?.[1];
@@ -339,7 +341,7 @@ export default function LobbyPage() {
             : {
                 title: "你已准备",
                 detail:
-                  "请保持本页打开。房主开始后会自动进入比赛舞台；如需换位，可在底部取消准备。",
+                  "请保持本页打开。房主开始后会自动进入比赛舞台；如需调整，可先在房间信息区取消准备。",
               };
   const setupSteps = [
     {
@@ -383,7 +385,7 @@ export default function LobbyPage() {
     ? me.is_ready
       ? room.can_control
         ? startDisabled
-        : Boolean(busy) || !deviceCanWrite
+        : true
       : Boolean(busy) || !deviceCanWrite || Boolean(seasonBlockedReason)
     : false;
   const primaryLabel = !me
@@ -406,7 +408,7 @@ export default function LobbyPage() {
             : "开始比赛"
         : busy === "ready"
           ? "正在取消准备…"
-          : "取消准备";
+          : "等待房主开始";
   function runPrimaryAction() {
     if (!me) {
       if (!user) {
@@ -424,10 +426,6 @@ export default function LobbyPage() {
     }
     if (!me.is_ready) {
       void action("ready", { ready: true });
-      return;
-    }
-    if (!room?.can_control) {
-      void action("ready", { ready: false });
       return;
     }
     if (room?.can_control && !startDisabled) setConfirmingStart(true);
@@ -504,7 +502,13 @@ export default function LobbyPage() {
           <div className="panel-title">
             <h2>选择与确认席位</h2>
             <span className="muted">
-              {seasonBlockedReason ? "当前赛季不可继续加入" : "点击空席加入"}
+              {seasonBlockedReason
+                ? "当前赛季不可继续加入"
+                : me
+                  ? room.can_control
+                    ? "确认双方人员与准备状态"
+                    : "查看双方席位与准备状态"
+                  : "点击空席加入"}
             </span>
           </div>
           <div className="lobby-teams">
@@ -578,11 +582,6 @@ export default function LobbyPage() {
           </div>
         </section>
         <aside className="panel lobby-sidebar">
-          <div className={styles.nextAction} role="status" aria-live="polite">
-            <span>现在要做</span>
-            <strong>{nextStep.title.replace("下一步：", "")}</strong>
-            <small>{nextStep.detail}</small>
-          </div>
           <div className="panel-title">
             <h3>邀请与房间信息</h3>
           </div>
@@ -706,13 +705,13 @@ export default function LobbyPage() {
           )}
           {me && (
             <div className={styles.secondaryActionsList}>
-              {me.is_ready && room.can_control && (
+              {me.is_ready && (
                 <button
                   className="button button-secondary"
                   disabled={Boolean(busy) || !deviceCanWrite}
                   onClick={() => action("ready", { ready: false })}
                 >
-                  取消准备并调整
+                  {room.can_control ? "取消准备并调整" : "取消准备"}
                 </button>
               )}
               {!room.can_control && (
@@ -810,6 +809,8 @@ export default function LobbyPage() {
         >
           {me?.is_ready && room.can_control ? (
             <Play size={17} />
+          ) : me?.is_ready ? (
+            <Clock3 size={17} />
           ) : me ? (
             <Check size={17} />
           ) : (

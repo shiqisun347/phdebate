@@ -4,12 +4,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { Room } from "@/lib/types";
 
 const mocks = vi.hoisted(() => {
+  let prepareResult = true;
+  let disabled = false;
   const liveKitInstances: Array<{
     callbacks: Record<string, (...args: unknown[]) => void>;
     reconnect: ReturnType<typeof vi.fn>;
     setMuted: ReturnType<typeof vi.fn>;
     activateGeneration: ReturnType<typeof vi.fn>;
     flush: ReturnType<typeof vi.fn>;
+    isDisabled: () => boolean;
   }> = [];
   class FakeLiveKitRoomAudio {
     callbacks: Record<string, (...args: unknown[]) => void> = {};
@@ -19,13 +22,21 @@ const mocks = vi.hoisted(() => {
     flush = vi.fn();
     unlock = vi.fn().mockResolvedValue(undefined);
     dispose = vi.fn().mockResolvedValue(undefined);
+    isDisabled = () => disabled;
     constructor() { liveKitInstances.push(this); }
     prepare(_roomCode: string, callbacks: Record<string, (...args: unknown[]) => void>) {
       this.callbacks = callbacks;
-      return Promise.resolve(true);
+      return Promise.resolve(prepareResult);
     }
   }
-  return { FakeLiveKitRoomAudio, liveKitInstances };
+  return {
+    FakeLiveKitRoomAudio,
+    liveKitInstances,
+    setAvailability: (result: boolean, isDisabled: boolean) => {
+      prepareResult = result;
+      disabled = isDisabled;
+    },
+  };
 });
 
 vi.mock("@/lib/audio/livekit-room-audio", async (importOriginal) => {
@@ -89,6 +100,18 @@ describe("DebateStage RTC recovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mocks.liveKitInstances.length = 0;
+    mocks.setAvailability(true, false);
+  });
+
+  it("does not create a reconnect storm when the server explicitly disables RTC", async () => {
+    mocks.setAvailability(false, true);
+    render(<DebateStage room={activeRoom(new Date().toISOString())} connected mode="debate" />);
+    await act(async () => undefined);
+    const rtc = mocks.liveKitInstances[0];
+
+    expect(screen.getByText("实时比赛声音未启用，请联系系统管理员。")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(rtc.reconnect).not.toHaveBeenCalled();
   });
 
   it("keeps the single WebRTC path after recovery exhaustion and never falls back to PCM/WAV", async () => {

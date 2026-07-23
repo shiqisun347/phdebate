@@ -246,7 +246,7 @@ describe("room lobby", () => {
     expect(within(mainActions).getAllByRole("button")).toHaveLength(1);
   });
 
-  it("keeps a ready participant's only fixed action relevant to their own seat", async () => {
+  it("keeps a ready participant waiting forward while cancellation remains secondary", async () => {
     const participantRoom = lobbyRoom({
       competition: { ...lobbyRoom().competition, ranked: false },
       season: null,
@@ -291,13 +291,17 @@ describe("room lobby", () => {
     render(<LobbyPage />);
 
     const dock = screen.getByRole("navigation", { name: "赛前主要操作" });
-    const cancelReady = await within(dock).findByRole("button", {
-      name: "取消准备",
+    const waitForOwner = await within(dock).findByRole("button", {
+      name: "等待房主开始",
     });
-    await waitFor(() => expect(cancelReady).toBeEnabled());
+    expect(waitForOwner).toBeDisabled();
     expect(within(dock).getAllByRole("button")).toHaveLength(1);
+    expect(screen.getByText("查看双方席位与准备状态")).toBeInTheDocument();
+    expect(screen.queryByText("点击空席加入")).not.toBeInTheDocument();
     expect(screen.queryByText("调整已加入的席位")).not.toBeInTheDocument();
     expect(screen.queryByText("房间设置")).not.toBeInTheDocument();
+    const cancelReady = screen.getByRole("button", { name: "取消准备" });
+    await waitFor(() => expect(cancelReady).toBeEnabled());
     expect(screen.getByRole("button", { name: "退出当前席位" })).toBeEnabled();
 
     fireEvent.click(cancelReady);

@@ -8,6 +8,7 @@ import { apiFetch, apiOrigin, websocketUrl } from "@/lib/api";
 import { BoundedRtcRecovery, LiveKitRoomAudio } from "@/lib/audio/livekit-room-audio";
 import { installVoiceTelemetryReporter } from "@/lib/audio/voice-telemetry";
 import { compactCaptionLine } from "@/lib/caption-line";
+import { mergeAsrText } from "@/lib/asr-text";
 import { acquireControlLease, controlLeaseFor, isControlLeaseConflict } from "@/lib/control-lease";
 import { StageSubtitle } from "@/components/stage-caption-projection";
 import { TranscriptDrawer } from "@/components/transcript-drawer";
@@ -550,7 +551,13 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     }).then((connected) => {
       if (disposed) return;
       if (connected) restoreRtc();
-      else recovery.start("WebRTC 实时音频初始化失败");
+      else if (client.isDisabled()) {
+        recovery.cancel();
+        setRtcAudioConnected(false);
+        setPlaybackPending(false);
+        setPlaybackNotice("实时比赛声音未启用，请联系系统管理员。");
+        setPlaybackError("");
+      } else recovery.start("WebRTC 实时音频初始化失败");
     });
     return () => {
       disposed = true;
@@ -1304,14 +1311,17 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
             rejectAsr("语音识别音频发送失败；请在结束后核对并补充发言文字。");
           }
         } else if (data.type === "asr") {
+          // A provider or browser event queue may deliver a partial after the
+          // authoritative final. Never let that stale hypothesis replace the
+          // final subtitle or enter the submitted transcript.
+          if (session.finalCompleted) return;
           const recognized = data.text || "";
           if (data.is_final) {
             // The bridge defines one authoritative final per ASR context.
             // Ignore a duplicated delivery instead of appending the same
             // sentence twice to the submitted transcript.
-            if (session.finalCompleted) return;
             session.finalCompleted = true;
-            transcriptRef.current = `${transcriptRef.current}${recognized}`;
+            transcriptRef.current = mergeAsrText(transcriptRef.current, recognized);
             partialRef.current = "";
             setAsrCaption(recognized.trim() ? compactCaptionLine(recognized) : "");
             setPartial("");
@@ -1361,11 +1371,12 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
           session.ready = false;
           resetAsrReadyBarrier(session);
           const interruptedPartial = partialRef.current.trim();
-          if (interruptedPartial && !transcriptRef.current.endsWith(interruptedPartial)) {
-            transcriptRef.current = `${transcriptRef.current}${interruptedPartial}`;
+          if (interruptedPartial) {
+            transcriptRef.current = mergeAsrText(transcriptRef.current, interruptedPartial);
             recoveredTranscriptBaseline.current = transcriptRef.current;
           }
           partialRef.current = "";
+          setAsrCaption("");
           setPartial("");
           asrRejectionMessage.current = ASR_RECONNECTED_REVIEW_MESSAGE;
           setCaptureError(ASR_RECONNECTED_REVIEW_MESSAGE);
@@ -1909,6 +1920,61 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
           ? "比赛暂停中"
           : "等待下一位辩手";
   const preparingMessage = "正在建立实时语音并加载预设开场提示；此时不会开始比赛计时，也不需要点击发言，完成后会自动进入第一阶段。";
+  const blockedSpeakLabel = !connected
+    ? "等待实时连接"
+    : terminal
+      ? "比赛已结束"
+      : room.status === "preparing"
+        ? "比赛准备中"
+        : room.status === "paused"
+          ? "比赛已暂停"
+          : announcementActive
+            ? "系统提示播放中"
+            : aiPreparing
+              ? "AI 正在准备"
+              : room.active_speech?.speaker_type === "ai"
+                ? "AI 正在发言"
+                : room.active_speech?.speaker_type === "human"
+                  ? `${currentSpeaker?.display_name || "其他辩手"}正在发言`
+                  : room.status === "judging"
+                    ? "正在评审"
+                    : deviceControl === "acquiring"
+                      ? "绑定设备中"
+                      : deviceControl === "lost"
+                        ? "其他设备已接管"
+                        : deviceControl === "unavailable" && room.my_seat
+                          ? "设备绑定失败"
+                          : !room.my_seat
+                            ? "当前为只读状态"
+                            : "等待轮次";
+  const blockedSpeakDetail = !connected
+    ? readyReason
+    : terminal
+      ? "比赛流程已经停止，不能继续发言"
+      : room.status === "preparing"
+        ? "系统完成语音连接与预设提示后会自动开场"
+        : room.status === "paused"
+          ? serviceFailurePaused
+            ? "比赛进度已保存，请等待房主处理异常"
+            : "比赛进度已保存，继续后仍从当前环节开始"
+          : announcementActive
+            ? "提示播放完成后会自动进入下一项"
+            : aiPreparing
+              ? `正在生成本轮内容和语音，无需手动操作${turnRemaining === null ? "" : ` · 本轮剩余 ${formatTime(turnRemaining)}`}`
+              : room.active_speech?.speaker_type === "ai"
+                ? `语音播放结束后系统会自动推进${turnRemaining === null ? "" : ` · 本轮剩余 ${formatTime(turnRemaining)}`}`
+                : room.active_speech?.speaker_type === "human"
+                  ? `当前发言结束后系统会显示下一步${turnRemaining === null ? "" : ` · 本轮剩余 ${formatTime(turnRemaining)}`}`
+                  : room.status === "judging"
+                    ? "比赛发言已结束，结果生成后自动跳转"
+                    : deviceControl === "acquiring"
+                      ? "正在确认本浏览器的席位控制权，完成后自动更新可用操作"
+                      : deviceControl === "lost" || (deviceControl === "unavailable" && room.my_seat)
+                        ? deviceReason
+                        : readyReason;
+  const showOwnerQuickControl = room.can_control
+    && !terminal
+    && (room.status === "paused" || canPauseMatch);
   const quickControlReason = roomActionBusy
     ? "正在处理上一项比赛操作"
     : hasLocalSpeechWork
@@ -2031,8 +2097,8 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       </section>
       <footer className="stage-controls">
         <div className="control-info"><span className="seat-avatar">{room.my_seat ? mySeat?.display_name.slice(0,1) : <Users size={18}/>}</span><span><strong>{mode === "watch" ? room.can_control ? "房主观战 · 只读" : "观战模式" : mySeat?.display_name || "未绑定席位"}</strong><small>{mode === "watch" ? room.can_control ? "需要操作时请进入比赛控制页" : "公开只读画面" : deviceReason}</small></span></div>
-        {mode === "debate" && <button type="button" title={readyReason} data-state={capturing ? "speaking" : starting ? "starting" : pendingFinish ? "review" : canStartSpeaking ? "ready" : "blocked"} className={`speak-button ${starting || capturing || pendingFinish || finishing ? "recording" : canStartSpeaking ? "ready" : ""}`} disabled={pendingFinishMustDiscard || starting || finishing || (pendingFinish ? !pendingFinish.content.trim() : !capturing && !canStartSpeaking)} onClick={pendingFinishMustDiscard ? undefined : pendingFinish ? () => void submitFinish(pendingFinish) : capturing ? () => void stopSpeaking(false) : () => void startSpeaking()}>{pendingFinishMustDiscard ? <><MicOff size={24}/><span>本次发言无法提交<small>请处理本页尚未提交的内容</small></span></> : starting ? <><Mic size={24}/><span>正在启动麦克风<small>请确认浏览器权限提示…</small></span></> : finishing ? <><MicOff size={24}/><span>正在整理发言<small>等待最终字幕并安全提交…</small></span></> : pendingFinish ? <><MicOff size={24}/><span>提交保留的发言<small>{pendingFinish.content.trim() ? "识别文字已保留在本页" : "请先补充发言文字"}</small></span></> : capturing ? <><MicOff size={24}/><span>结束发言<small>{turnRemaining === null ? "正在识别发言" : `本轮剩余 ${formatTime(turnRemaining)}`}</small></span></> : <><Mic size={24}/><span>{!connected ? "等待实时连接" : canRecoverSpeaking ? "恢复发言" : canStartSpeaking ? "开始发言" : deviceControl === "acquiring" ? "绑定设备中" : deviceControl === "lost" ? "其他设备已接管" : deviceControl === "unavailable" && room.my_seat ? "设备绑定失败" : "等待轮次"}<small>{!connected ? readyReason : canRecoverSpeaking ? "恢复同一设备的进行中发言" : deviceControl === "unavailable" && room.my_seat ? deviceReason : readyReason}</small></span></>}</button>}
-        <div className="control-tools">{mode === "debate" && <TranscriptDrawer room={room} liveEvent={liveEvent} />}{mode === "debate" && room.can_control && !terminal && <button type="button" className="owner-quick-control" title={quickControlReason} aria-label={quickControlReason} aria-busy={roomActionBusy === (room.status === "paused" ? "resume" : "pause")} disabled={Boolean(roomActionBusy) || (room.status === "paused" ? !canResumeMatch : !canPauseMatch)} onClick={() => void controlMatch(room.status === "paused" ? "resume" : "pause")}>{room.status === "paused" ? <Play/> : <Pause/>}<small>{room.status === "paused" ? "继续" : "暂停"}</small></button>}<button type="button" aria-label={muted ? "开启比赛声音" : playbackNeedsGesture ? "播放比赛声音" : playbackError ? "重试比赛声音" : "关闭比赛声音"} aria-pressed={!muted && !playbackNeedsGesture && !playbackError} aria-busy={playbackPending} disabled={playbackPending} onClick={togglePlaybackSound}>{muted || playbackNeedsGesture || playbackError ? <VolumeX/> : <Volume2/>}<small>{muted ? "开启声音" : playbackNeedsGesture ? "点击播放" : playbackError ? "重试声音" : "声音"}</small></button>{mode === "watch" && room.my_seat && <Link href={`/rooms/${room.code}/debate`} className="stage-tool-link" aria-label="返回辩手页面"><Mic/><small>参赛</small></Link>}{mode === "watch" && room.can_control && <Link href={`/rooms/${room.code}/control`} className="stage-tool-link" aria-label="打开比赛控制台"><Settings/><small>控制台</small></Link>}<button type="button" aria-label="切换全屏" onClick={fullscreen}><Maximize/><small>全屏</small></button><button ref={settingsButton} type="button" title={mode === "watch" ? "声音与观看设置" : room.can_control ? "暂停、继续或提前结束比赛" : "退出页面与设备状态"} aria-label={settingsLabel} aria-controls="stage-settings-dialog" aria-expanded={showSettings} onClick={() => setShowSettings((value) => !value)}><Settings/><small>{mode === "watch" ? "设置" : room.can_control ? "控制" : "更多"}</small></button></div>
+        {mode === "debate" && <button type="button" title={canStartSpeaking || (connected && canRecoverSpeaking) ? readyReason : blockedSpeakDetail} data-state={capturing ? "speaking" : starting ? "starting" : pendingFinish ? "review" : canStartSpeaking ? "ready" : "blocked"} className={`speak-button ${starting || capturing || pendingFinish || finishing ? "recording" : canStartSpeaking ? "ready" : ""}`} disabled={pendingFinishMustDiscard || starting || finishing || (pendingFinish ? !pendingFinish.content.trim() : !capturing && !canStartSpeaking)} onClick={pendingFinishMustDiscard ? undefined : pendingFinish ? () => void submitFinish(pendingFinish) : capturing ? () => void stopSpeaking(false) : () => void startSpeaking()}>{pendingFinishMustDiscard ? <><MicOff size={24}/><span>本次发言无法提交<small>请处理本页尚未提交的内容</small></span></> : starting ? <><Mic size={24}/><span>正在启动麦克风<small>请确认浏览器权限提示…</small></span></> : finishing ? <><MicOff size={24}/><span>正在整理发言<small>等待最终字幕并安全提交…</small></span></> : pendingFinish ? <><MicOff size={24}/><span>提交保留的发言<small>{pendingFinish.content.trim() ? "识别文字已保留在本页" : "请先补充发言文字"}</small></span></> : capturing ? <><MicOff size={24}/><span>结束发言<small>{turnRemaining === null ? "正在识别发言" : `本轮剩余 ${formatTime(turnRemaining)}`}</small></span></> : <><Mic size={24}/><span>{!connected ? blockedSpeakLabel : canRecoverSpeaking ? "恢复发言" : canStartSpeaking ? "开始发言" : blockedSpeakLabel}<small>{!connected ? blockedSpeakDetail : canRecoverSpeaking ? "恢复同一设备的进行中发言" : canStartSpeaking ? readyReason : blockedSpeakDetail}</small></span></>}</button>}
+        <div className="control-tools">{mode === "debate" && <TranscriptDrawer room={room} liveEvent={liveEvent} />}{mode === "debate" && showOwnerQuickControl && <button type="button" className="owner-quick-control" title={quickControlReason} aria-label={quickControlReason} aria-busy={roomActionBusy === (room.status === "paused" ? "resume" : "pause")} disabled={Boolean(roomActionBusy) || (room.status === "paused" ? !canResumeMatch : !canPauseMatch)} onClick={() => void controlMatch(room.status === "paused" ? "resume" : "pause")}>{room.status === "paused" ? <Play/> : <Pause/>}<small>{room.status === "paused" ? "继续" : "暂停"}</small></button>}<button type="button" aria-label={muted ? "开启比赛声音" : playbackNeedsGesture ? "播放比赛声音" : playbackError ? "重试比赛声音" : "关闭比赛声音"} aria-pressed={!muted && !playbackNeedsGesture && !playbackError} aria-busy={playbackPending} disabled={playbackPending} onClick={togglePlaybackSound}>{muted || playbackNeedsGesture || playbackError ? <VolumeX/> : <Volume2/>}<small>{muted ? "开启声音" : playbackNeedsGesture ? "点击播放" : playbackError ? "重试声音" : "声音"}</small></button>{mode === "watch" && room.my_seat && <Link href={`/rooms/${room.code}/debate`} className="stage-tool-link" aria-label="返回辩手页面"><Mic/><small>参赛</small></Link>}{mode === "watch" && room.can_control && <Link href={`/rooms/${room.code}/control`} className="stage-tool-link" aria-label="打开比赛控制台"><Settings/><small>控制台</small></Link>}<button type="button" aria-label="切换全屏" onClick={fullscreen}><Maximize/><small>全屏</small></button><button ref={settingsButton} type="button" title={mode === "watch" ? "声音与观看设置" : room.can_control ? "暂停、继续或提前结束比赛" : "退出页面与设备状态"} aria-label={settingsLabel} aria-controls="stage-settings-dialog" aria-expanded={showSettings} onClick={() => setShowSettings((value) => !value)}><Settings/><small>{mode === "watch" ? "设置" : room.can_control ? "控制" : "更多"}</small></button></div>
       </footer>
       {(room.failure_reason || disconnectGraceActive || (connectionError && !connected)) && <div className="stage-notice-stack">
         {serviceFailurePaused && <div className="stage-failure-warning" role="alert" aria-live="assertive"><AlertTriangle size={18}/><span><strong>{participantDisconnectAndFailurePaused ? "比赛同时遇到服务异常和真人断线。" : "比赛因临时服务异常暂停。"}</strong><small>{recoveryBlockedByDisconnect ? `请先等待 ${disconnectedHumanNames} 重新连接，人员齐全后再重试当前步骤。` : mode === "debate" && room.can_control ? "比赛进度已保存，确认后可重试当前步骤。" : "比赛进度已保存，请等待房主在比赛控制页处理；恢复后页面会自动同步。"}</small>{retryFailureError && <small className="stage-failure-error">{retryFailureError}</small>}</span>{mode === "debate" && room.can_control && <button type="button" aria-busy={retryingFailure} disabled={retryingFailure || hasLocalSpeechWork || recoveryBlockedByDisconnect} title={hasLocalSpeechWork ? "请先处理本页保留的发言文字" : recoveryBlockedByDisconnect ? "等待全部真人重新连接" : undefined} onClick={requestRetry}><RotateCcw size={15}/>{retryingFailure ? "正在重试…" : recoveryBlockedByDisconnect ? "等待真人重连" : "重试异常步骤"}</button>}</div>}

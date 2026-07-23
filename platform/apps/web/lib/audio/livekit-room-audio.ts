@@ -97,6 +97,7 @@ export class LiveKitRoomAudio {
   private track: RemoteAudioTrack | null = null;
   private roomCode = "";
   private preparing: Promise<boolean> | null = null;
+  private serviceEnabled: boolean | null = null;
   private callbacks: LiveKitAudioCallbacks = {};
   private unlocked = false;
   private muted = false;
@@ -145,6 +146,10 @@ export class LiveKitRoomAudio {
     return preparing;
   }
 
+  isDisabled() {
+    return this.serviceEnabled === false;
+  }
+
   reconnect() {
     const roomCode = this.roomCode;
     if (!roomCode) return Promise.resolve(false);
@@ -163,6 +168,7 @@ export class LiveKitRoomAudio {
 
   private async connect(roomCode: string, reportConnectionFailure = true) {
     try {
+      this.serviceEnabled = null;
       // Create the AudioContext before the first network await.  A user can
       // click "enable sound" while the RTC token or LiveKit connection is
       // still pending; the trusted gesture must be able to resume this
@@ -192,7 +198,13 @@ export class LiveKitRoomAudio {
         liveKitModule,
         credentialsRequest,
       ]);
-      if (!credentials.enabled || !credentials.url || !credentials.token || this.roomCode !== roomCode) return false;
+      if (!credentials.enabled) {
+        this.serviceEnabled = false;
+        await this.disconnectRoom();
+        return false;
+      }
+      this.serviceEnabled = true;
+      if (!credentials.url || !credentials.token || this.roomCode !== roomCode) return false;
       const gateReady = await gatePreparation;
       this.emitDiagnostic("rtc-gate-prepared", { gateReady });
       if (this.roomCode !== roomCode) return false;

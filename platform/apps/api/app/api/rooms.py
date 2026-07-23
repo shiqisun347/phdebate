@@ -1309,9 +1309,14 @@ async def acquire_control_lease(
             "same_device_recovery": same_device_recovery,
         }
     active = active_speech(db, room)
-    if active and active.seat_key == seat.seat_key and seat.control_lease and not same_session:
+    # A login session proves who the user is, not which browser/device is in
+    # control. Multiple tabs and copied cookies can share the same session, so
+    # only the exact high-entropy lease above is safe to replay silently.
+    # Every different lease follows the explicit takeover path, and an active
+    # human speech can never be transferred mid-sentence.
+    if active and active.seat_key == seat.seat_key and seat.control_lease:
         raise HTTPException(status_code=409, detail="该席位正在另一设备发言，结束后才能接管。")
-    if seat.control_lease and not force and not same_session and previous_session_active:
+    if seat.control_lease and not force and previous_session_active:
         raise HTTPException(status_code=409, detail="该席位已由另一设备控制，如需切换请确认接管。")
     event_type = "seat.control_taken_over" if seat.control_lease else "seat.control_acquired"
     seat.control_lease = lease
@@ -1555,8 +1560,10 @@ async def control(
         )
     )
     if action in {"pause", "safe-pause"}:
-        if room.status not in {"running", "judging"}:
+        if room.status not in {"preparing", "running", "judging"}:
             raise HTTPException(status_code=409, detail="当前状态不能暂停。")
+        if room.status == "preparing" and action == "safe-pause":
+            raise HTTPException(status_code=409, detail="比赛仍在开赛准备中，当前没有需要紧急处置的真人发言。")
         if speaking_human and action == "pause":
             raise HTTPException(status_code=409, detail="真人正在发言，请先结束发言再暂停比赛。")
         if action == "safe-pause" and not speaking_human:
@@ -1578,7 +1585,15 @@ async def control(
             match_engine.close_active_speeches(db, room, status="interrupted", reason="emergency_human_pause")
         match_engine.interrupt_inflight_ai_speeches(db, room, reason="manual_pause")
         match_engine.interrupt_inflight_judging(db, room, reason="manual_pause")
-        room.paused_remaining_seconds = 1 if stage_remaining is None else stage_remaining
+        # Before the first stage is entered there is no countdown to freeze.
+        # Persisting a synthetic one-second remainder would make a later
+        # resume look like a running stage even though current_stage_index is
+        # still -1.  The resume branch restores this exact state to
+        # ``preparing`` so cue readiness and the opening stage remain the sole
+        # authoritative start boundary.
+        room.paused_remaining_seconds = (
+            None if room.status == "preparing" else 1 if stage_remaining is None else stage_remaining
+        )
         current = stage(room)
         updated_current = dict(current) if current else None
         if updated_current and host_announcement_ms is not None:
@@ -1633,13 +1648,13 @@ async def control(
         if (room.failure_reason and not participant_disconnect_pause) or failed_speech:
             raise HTTPException(status_code=409, detail="当前因服务异常暂停，请使用重试当前步骤。")
         resumed_at = now()
-        # A disconnect can expire while the room is still preparing cues and
-        # before the first stage is entered.  Resuming that state as
+        # A manual pause or disconnect can occur while the room is preparing
+        # cues and before the first stage is entered. Resuming that state as
         # ``running`` would leave ``current_stage_index == -1`` with no stage;
-        # the engine would then treat the match as finished.  Return to the
-        # idempotent preparation path instead, so cue preparation and the
-        # first stage start continue normally after every human reconnects.
-        if participant_disconnect_pause and room.current_stage_index < 0 and current is None:
+        # the engine would then treat the match as finished. Return to the
+        # idempotent preparation path so cue preparation and opening continue
+        # normally after either recovery path.
+        if room.current_stage_index < 0 and current is None:
             room.status = "preparing"
             room.stage_started_at = None
             room.stage_deadline_at = None

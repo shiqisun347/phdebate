@@ -74,7 +74,11 @@ export function FreeTurnQueue({
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState<"request" | "cancel" | "">("");
   const [error, setError] = useState("");
-  const [expanded, setExpanded] = useState(!interactive);
+  // Keep the arena readable on first load for every role.  The seat badges
+  // already expose the current hand order, while the full queue is secondary
+  // detail.  Expanding it by default for spectators covered the timer and up
+  // to half of the seats on common laptop and phone viewports.
+  const [expanded, setExpanded] = useState(false);
   const deadline = queue?.window_deadline_at ? Date.parse(queue.window_deadline_at) : Number.NaN;
   // The engine contract caps intermissions at three seconds. Clamp a skewed
   // browser clock instead of ever showing an impossible multi-minute window.

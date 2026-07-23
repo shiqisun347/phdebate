@@ -114,33 +114,6 @@
   outline-offset: 3px;
 }
 
-.nextAction {
-  display: grid;
-  gap: 5px;
-  padding: 15px;
-  border: 1px solid #cfe2fb;
-  border-radius: 13px;
-  background: var(--room-blue-soft);
-}
-
-.nextAction > span {
-  color: #5d7797;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.nextAction strong {
-  color: #164f91;
-  font-size: 16px;
-}
-
-.nextAction small {
-  color: #627b99;
-  font-size: 12px;
-  line-height: 1.55;
-}
-
 .copyButton {
   flex: 0 0 auto;
 }
@@ -212,6 +185,14 @@
   background: rgba(255, 255, 255, 0.97);
   box-shadow: 0 17px 48px rgba(40, 67, 105, 0.17);
   backdrop-filter: blur(18px);
+}
+
+.lobbyDock {
+  bottom: 0;
+  width: min(1280px, 100%);
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -10px 34px rgba(40, 67, 105, 0.13);
 }
 
 .dockSummary {
@@ -496,6 +477,17 @@
     gap: 9px;
     padding: 10px;
     border-radius: 15px;
+  }
+
+  .lobbyDock {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 11px 12px calc(11px + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 16px 16px 0 0;
   }
 
   .dockSummary {

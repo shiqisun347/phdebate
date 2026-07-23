@@ -47,9 +47,12 @@ describe("FreeTurnQueue", () => {
   it("renders only in free debate and keeps watch mode read-only", async () => {
     const view = render(<FreeTurnQueue room={room()} interactive={false} />);
     expect(screen.getByRole("heading", { name: "自由辩论举手队列" })).toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "当前举手顺序" })).toHaveTextContent("李同学");
+    expect(screen.queryByRole("list", { name: "当前举手顺序" })).not.toBeInTheDocument();
     expect(screen.getByText("观战模式仅展示队列，不能申请发言。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /举手申请|取消举手/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看举手队列" }));
+    expect(screen.getByRole("list", { name: "当前举手顺序" })).toHaveTextContent("李同学");
     expect((await axe.run(view.container, { rules: { "color-contrast": { enabled: false } } })).violations).toEqual([]);
 
     view.rerender(<FreeTurnQueue room={room({ current_stage: { key: "case", name: "立论", kind: "speech", duration: 120 } })} interactive={false} />);
@@ -210,6 +213,7 @@ describe("FreeTurnQueue", () => {
       </>,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "查看举手队列" }));
     expect(screen.getByRole("status")).toHaveTextContent("李同学 已获得下一轮发言权，其余辩手可等待下次申请");
     expect(view.container.querySelector('[data-free-turn-seat-badge="neg_1"]')).toHaveTextContent("已选中");
     expect(view.container.querySelector('[data-free-turn-seat-badge="neg_2"]')).toHaveTextContent("第 2 位");

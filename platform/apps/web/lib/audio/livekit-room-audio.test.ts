@@ -182,6 +182,18 @@ it("reconnects LiveKit with fresh credentials while preserving the room callback
   await client.dispose();
 });
 
+it("marks an intentionally disabled RTC service without constructing a retryable room", async () => {
+  mocks.apiFetchMock.mockResolvedValueOnce({ enabled: false });
+  const client = new LiveKitRoomAudio();
+
+  await expect(client.prepare("123456")).resolves.toBe(false);
+
+  expect(client.isDisabled()).toBe(true);
+  expect(mocks.roomInstances).toHaveLength(0);
+  expect(mocks.apiFetchMock).toHaveBeenCalledTimes(1);
+  await client.dispose();
+});
+
 it("preconnects once, subscribes only the agent track, unlocks, and flushes on interrupt", async () => {
   const needsGesture = vi.fn();
   const ready = vi.fn();

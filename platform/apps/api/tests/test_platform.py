@@ -5793,7 +5793,9 @@ def test_lobby_mutations_follow_the_authoritative_device_lease(client: TestClien
     second_device.__exit__(None, None, None)
 
 
-def test_same_login_session_recovers_control_lease_without_confirmation(client: TestClient, register_user) -> None:
+def test_same_login_session_still_requires_confirmation_for_a_different_device_lease(
+    client: TestClient, register_user
+) -> None:
     owner = register_user("same_session_lease")
     room = create_training_room(owner, "同一浏览器刷新自动恢复席位控制")
     code = room["code"]
@@ -5813,10 +5815,17 @@ def test_same_login_session_recovers_control_lease_without_confirmation(client: 
         json={},
     )
     assert first.status_code == 200 and first.json()["same_session_recovery"] is False
-    recovered = owner.post(
+    blocked = owner.post(
         f"/api/rooms/{code}/control-lease",
         headers=csrf(owner) | {"X-Control-Lease": "after-refresh"},
         json={},
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert "确认接管" in blocked.json()["detail"]
+    recovered = owner.post(
+        f"/api/rooms/{code}/control-lease",
+        headers=csrf(owner) | {"X-Control-Lease": "after-refresh"},
+        json={"force": True},
     )
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["same_session_recovery"] is True
@@ -5836,6 +5845,51 @@ def test_same_login_session_recovers_control_lease_without_confirmation(client: 
         ).status_code
         == 200
     )
+
+
+def test_same_login_session_cannot_take_over_a_different_lease_during_active_speech(
+    client: TestClient, register_user
+) -> None:
+    owner = register_user("same_session_active_lease")
+    room = create_training_room(owner, "同一登录的其他页面不能抢走发言控制")
+    code = room["code"]
+    owner.post(f"/api/rooms/{code}/ready", headers=csrf(owner), json={"ready": True})
+    owner.post(f"/api/rooms/{code}/start", headers=csrf(owner), json={})
+    with SessionLocal() as db:
+        stored = load_room(db, code, lock=True)
+        stored.status = "running"
+        stored.current_stage_index = 1
+        stored.stage_started_at = now()
+        stored.stage_deadline_at = now() + timedelta(seconds=180)
+        db.commit()
+
+    acquired = owner.post(
+        f"/api/rooms/{code}/control-lease",
+        headers=csrf(owner) | {"X-Control-Lease": "speaking-tab"},
+        json={},
+    )
+    assert acquired.status_code == 200
+    started = owner.post(
+        f"/api/rooms/{code}/speech/start",
+        headers=csrf(owner) | {"X-Control-Lease": "speaking-tab"},
+        json={},
+    )
+    assert started.status_code == 200
+
+    takeover = owner.post(
+        f"/api/rooms/{code}/control-lease",
+        headers=csrf(owner) | {"X-Control-Lease": "other-tab"},
+        json={"force": True},
+    )
+    assert takeover.status_code == 409
+    assert "正在另一设备发言" in takeover.json()["detail"]
+
+    original_tab_can_finish = owner.post(
+        f"/api/rooms/{code}/speech/finish",
+        headers=csrf(owner) | {"X-Control-Lease": "speaking-tab"},
+        json={"speech_id": started.json()["speech_id"], "content": "原页面完成本次发言。"},
+    )
+    assert original_tab_can_finish.status_code == 200
 
 
 def test_same_browser_lease_rebinds_after_login_session_rotation(client: TestClient, register_user) -> None:

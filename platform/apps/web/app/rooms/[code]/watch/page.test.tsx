@@ -136,6 +136,7 @@ describe("watch result redirect", () => {
     expect(screen.getByText(/当前可发言阵营/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "自由辩论举手队列" })).toBeInTheDocument();
     expect(screen.getByText("观战模式仅展示队列，不能申请发言。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看举手队列" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("returns a cancelled room to the public lobby", async () => {

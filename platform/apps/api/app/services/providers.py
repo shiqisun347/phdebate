@@ -1301,7 +1301,12 @@ class LightTTSProvider:
             read_timeout, speed = 180, 1.0
         prompt_path = self.prompt_path(voice)
         default_prompt_path = Path(settings.lighttts_prompt_wav_path)
-        if not prompt_path.exists() or not default_prompt_path.exists():
+        # ``Path("")`` resolves to the working directory.  Checking only
+        # ``exists`` therefore let an empty or directory-valued prompt setting
+        # reach ``Path.open`` and escape as IsADirectoryError.  Treat every
+        # non-regular prompt as a provider configuration failure so the match
+        # engine can safely pause with an actionable, bounded error.
+        if not prompt_path.is_file() or not default_prompt_path.is_file():
             raise ProviderError(f"LightTTS prompt 音频不存在：{prompt_path}")
         target_dir = settings.media_path / room_code
         target_dir.mkdir(parents=True, exist_ok=True)

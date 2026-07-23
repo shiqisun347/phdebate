@@ -1626,17 +1626,7 @@ class MatchEngine:
         room.current_stage_index = index
         current = dict(room.template_snapshot[index])
         started_at = now()
-        hosted = current.get("kind") != "announcement" and bool(str(current.get("cue") or "").strip())
-        if current.get("kind") == "free" and not hosted:
-            current["turn_seq"] = max(0, int(current.get("turn_seq", 0)))
-            current["free_stage_remaining_seconds"] = max(1, int(current.get("duration", 30)))
-            current.pop("turn_started_at", None)
-            side = str(current.get("side") or "aff")
-            if any(item.side == side and item.occupant_type == "human" for item in room.seats):
-                current["awaiting_human_start"] = True
-            snapshot = list(room.template_snapshot)
-            snapshot[index] = current
-            room.template_snapshot = snapshot
+        hostable = current.get("kind") != "announcement" and bool(str(current.get("cue") or "").strip())
         duration = max(1, int(current.get("duration", 30)))
         if str(current.get("cue") or "").strip():
             asset_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"phdebate:{room.id}:cue:{current['key']}"))
@@ -1650,7 +1640,7 @@ class MatchEngine:
                 cue_duration = max(1, math.ceil(audio_duration + 0.75))
                 if current.get("kind") == "announcement":
                     duration = cue_duration
-                elif hosted:
+                elif hostable:
                     current["host_announcement_pending"] = True
                     current["host_target_kind"] = current.get("kind")
                     current["kind"] = "announcement"
@@ -1660,12 +1650,27 @@ class MatchEngine:
                     snapshot[index] = current
                     room.template_snapshot = snapshot
                     duration = cue_duration
+        # A cue string only makes a stage *eligible* for hosting. If its
+        # prepared audio is missing or invalid, the stage opens directly. A
+        # free-debate stage still needs both of its frozen clocks initialized;
+        # otherwise the first completed human turn sees no total deadline and
+        # is mistaken for the end of the entire free-debate stage.
+        if current.get("kind") == "free":
+            current["turn_seq"] = max(0, int(current.get("turn_seq", 0)))
+            current["free_stage_remaining_seconds"] = max(1, int(current.get("duration", 30)))
+            current.pop("turn_started_at", None)
+            side = str(current.get("side") or "aff")
+            if any(item.side == side and item.occupant_type == "human" for item in room.seats):
+                current["awaiting_human_start"] = True
+            snapshot = list(room.template_snapshot)
+            snapshot[index] = current
+            room.template_snapshot = snapshot
         current, awaiting_human_start = self._arm_human_stage_clock(room, current, duration)
         freeze_free_start = current.get("kind") == "free"
         room.stage_started_at = None if awaiting_human_start or freeze_free_start else started_at
         room.stage_deadline_at = None if awaiting_human_start or freeze_free_start else started_at + timedelta(seconds=duration)
         room.paused_remaining_seconds = None
-        room.status = "judging" if current.get("kind") == "judging" and not hosted else "running"
+        room.status = "judging" if current.get("kind") == "judging" else "running"
         append_event(
             db,
             room,

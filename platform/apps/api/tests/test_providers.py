@@ -726,6 +726,18 @@ async def test_lighttts_wraps_pcm_as_playable_wav(tmp_path: Path, monkeypatch) -
     assert target.read_bytes().startswith(b"RIFF")
 
 
+async def test_lighttts_rejects_empty_or_directory_prompt_as_configuration_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "lighttts_prompt_wav_path", str(tmp_path))
+    monkeypatch.setattr(settings, "media_root", str(tmp_path / "media"))
+
+    provider = LightTTSProvider(httpx.MockTransport(lambda _request: httpx.Response(500)))
+    with pytest.raises(ProviderError, match="prompt 音频不存在"):
+        await provider.synthesize("测试语音", room_code="missing-prompt", speech_id="speech")
+
+
 class FakeBiStreamWebSocket:
     def __init__(self, incoming: list[bytes | str | None]) -> None:
         self.incoming = list(incoming)
