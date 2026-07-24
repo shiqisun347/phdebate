@@ -43,7 +43,20 @@ def test_nginx_balances_rest_and_state_ws_but_not_audio_or_asr() -> None:
     # prefix, preserving the reliable voice transport.
     assert "location /ws/" in config
     assert "/v2" not in config
+    assert '(admin|control)' in config
+    assert '(admin|host|control)' not in config
     assert config.count("proxy_pass http://127.0.0.1:12340/ws/;") == 1
+
+
+def test_all_tracked_nginx_entries_keep_retired_product_routes_unreachable() -> None:
+    for filename in ("jixia-nginx-root.conf", "nginx-root.locations.conf"):
+        config = read(filename)
+        assert "/v2" not in config
+        assert "|host" not in config
+        assert "/teacher" not in config
+        assert "/classroom" not in config
+        assert "6016" not in config
+        assert "Qwen3-8B" not in config
 
 
 def test_nginx_supervisor_uses_the_tracked_production_config() -> None:

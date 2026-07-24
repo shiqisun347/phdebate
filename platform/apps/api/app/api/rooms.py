@@ -1571,6 +1571,15 @@ async def control(
         current = stage(room)
         stage_remaining = remaining_seconds(room)
         host_announcement_ms = None
+        human_start_remaining_ms = None
+        if current and current.get("awaiting_human_start"):
+            try:
+                human_start_deadline = datetime.fromisoformat(str(current.get("human_start_deadline_at")))
+                if human_start_deadline.tzinfo is None:
+                    human_start_deadline = human_start_deadline.replace(tzinfo=now().tzinfo)
+                human_start_remaining_ms = max(0, round((human_start_deadline - now()).total_seconds() * 1000))
+            except (TypeError, ValueError):
+                human_start_remaining_ms = settings.human_start_timeout_seconds * 1000
         if current and current.get("host_announcement_pending"):
             try:
                 host_deadline = datetime.fromisoformat(str(current.get("host_announcement_deadline_at")))
@@ -1599,6 +1608,9 @@ async def control(
         if updated_current and host_announcement_ms is not None:
             updated_current["paused_host_announcement_remaining_ms"] = host_announcement_ms
             updated_current.pop("host_announcement_deadline_at", None)
+        if updated_current and human_start_remaining_ms is not None:
+            updated_current["paused_human_start_remaining_ms"] = human_start_remaining_ms
+            updated_current.pop("human_start_deadline_at", None)
         if updated_current and updated_current.get("kind") == "free":
             updated_current["paused_turn_remaining_seconds"] = turn_remaining or 0
             if intermission_ms is not None:
@@ -1634,6 +1646,7 @@ async def control(
                 detail=f"以下真人辩手尚未重新连接或账号不可用：{'、'.join(unavailable_humans)}。全部恢复后再继续比赛。",
             )
         current = stage(room)
+        human_start_timeout_pause = bool(current and current.get("human_start_timeout_paused"))
         failed_speech = (
             db.scalar(
                 select(Speech.id).where(
@@ -1645,7 +1658,7 @@ async def control(
             if current
             else None
         )
-        if (room.failure_reason and not participant_disconnect_pause) or failed_speech:
+        if (room.failure_reason and not participant_disconnect_pause and not human_start_timeout_pause) or failed_speech:
             raise HTTPException(status_code=409, detail="当前因服务异常暂停，请使用重试当前步骤。")
         resumed_at = now()
         # A manual pause or disconnect can occur while the room is preparing
@@ -1693,6 +1706,22 @@ async def control(
                 elif updated_current.get("awaiting_human_start"):
                     updated_current.pop("paused_turn_remaining_seconds", None)
                     updated_current.pop("turn_started_at", None)
+                    paused_human_start_ms = updated_current.pop("paused_human_start_remaining_ms", None)
+                    if updated_current.pop("human_start_timeout_paused", False):
+                        paused_human_start_ms = settings.human_start_timeout_seconds * 1000
+                    updated_current["human_start_deadline_at"] = (
+                        resumed_at
+                        + timedelta(
+                            milliseconds=max(
+                                0,
+                                int(
+                                    paused_human_start_ms
+                                    if paused_human_start_ms is not None
+                                    else settings.human_start_timeout_seconds * 1000
+                                ),
+                            )
+                        )
+                    ).isoformat()
                     room.stage_deadline_at = None
                 else:
                     turn_duration = free_turn_duration(updated_current)
@@ -1708,6 +1737,29 @@ async def control(
                 snapshot = list(room.template_snapshot)
                 snapshot[room.current_stage_index] = updated_current
                 room.template_snapshot = snapshot
+                current = updated_current
+            elif current and current.get("awaiting_human_start"):
+                updated_current = dict(current)
+                paused_human_start_ms = updated_current.pop("paused_human_start_remaining_ms", None)
+                if updated_current.pop("human_start_timeout_paused", False):
+                    paused_human_start_ms = settings.human_start_timeout_seconds * 1000
+                updated_current["human_start_deadline_at"] = (
+                    resumed_at
+                    + timedelta(
+                        milliseconds=max(
+                            0,
+                            int(
+                                paused_human_start_ms
+                                if paused_human_start_ms is not None
+                                else settings.human_start_timeout_seconds * 1000
+                            ),
+                        )
+                    )
+                ).isoformat()
+                snapshot = list(room.template_snapshot)
+                snapshot[room.current_stage_index] = updated_current
+                room.template_snapshot = snapshot
+                room.stage_deadline_at = None
                 current = updated_current
             playing = db.scalar(select(Speech).where(Speech.room_id == room.id, Speech.status == "playing"))
             if playing:
@@ -1820,6 +1872,9 @@ async def control(
             )
         if participant_disconnect_pause:
             raise HTTPException(status_code=409, detail="当前因真人断线暂停；全部真人重新连接后请使用继续比赛。")
+        retry_stage = stage(room)
+        if retry_stage and retry_stage.get("human_start_timeout_paused"):
+            raise HTTPException(status_code=409, detail="当前因真人长时间未开始发言而暂停；确认选手准备后请使用继续比赛。")
         match = db.scalar(select(Match).where(Match.room_id == room.id))
         if settings.app_env == "production" and match and not match.service_snapshot:
             raise HTTPException(
@@ -1867,6 +1922,11 @@ async def control(
             if updated_current.get("awaiting_human_start"):
                 updated_current.pop("paused_turn_remaining_seconds", None)
                 updated_current.pop("turn_started_at", None)
+                updated_current.pop("human_start_timeout_paused", None)
+                updated_current.pop("paused_human_start_remaining_ms", None)
+                updated_current["human_start_deadline_at"] = (
+                    retried_at + timedelta(seconds=settings.human_start_timeout_seconds)
+                ).isoformat()
                 room.stage_deadline_at = None
             else:
                 turn_duration = free_turn_duration(updated_current)

@@ -120,6 +120,7 @@ type Stage = {
   preparing_stage_remaining_seconds?: number;
   preparing_turn_remaining_seconds?: number;
   awaiting_human_start?: boolean;
+  human_start_deadline_at?: string;
   human_speech_duration_seconds?: number;
 };
 
@@ -170,7 +171,7 @@ export type Room = {
     paused_duration_seconds: number;
     is_stale: boolean;
     capacity_consuming: boolean;
-    reason_code: "participant_disconnected" | "service_failure_and_participant_disconnected" | "service_or_manual_pause";
+    reason_code: "participant_disconnected" | "participant_start_timeout" | "service_failure_and_participant_disconnected" | "service_or_manual_pause";
     recommended_action: "resume" | "retry";
     can_terminate_to_release_capacity: boolean;
   } | null;

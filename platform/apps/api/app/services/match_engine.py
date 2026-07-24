@@ -1359,6 +1359,79 @@ class MatchEngine:
                 await self._open_hosted_stage(db, room, current)
                 return
 
+            if current.get("awaiting_human_start"):
+                # A recovered legacy/interrupted turn can legitimately have
+                # no debate time left.  The readiness grace must never revive
+                # an already-expired stage; advance before arming its separate
+                # human-start deadline.
+                if remaining_seconds(room) == 0:
+                    self._advance(
+                        db,
+                        room,
+                        reason="free_turn_completed" if current.get("kind") == "free" else "timer_elapsed",
+                    )
+                    db.commit()
+                    await self._broadcast(db, room, "stage.advanced")
+                    return
+                raw_deadline = current.get("human_start_deadline_at")
+                try:
+                    human_start_deadline = datetime.fromisoformat(str(raw_deadline))
+                    if human_start_deadline.tzinfo is None:
+                        human_start_deadline = human_start_deadline.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    human_start_deadline = now() + timedelta(seconds=settings.human_start_timeout_seconds)
+                    updated_current = dict(current)
+                    updated_current["human_start_deadline_at"] = human_start_deadline.isoformat()
+                    snapshot = list(room.template_snapshot)
+                    snapshot[room.current_stage_index] = updated_current
+                    room.template_snapshot = snapshot
+                    current = updated_current
+                    db.commit()
+                if now() < human_start_deadline:
+                    return
+
+                stage_remaining = remaining_seconds(room)
+                updated_current = dict(current)
+                updated_current.pop("human_start_deadline_at", None)
+                updated_current.pop("paused_human_start_remaining_ms", None)
+                updated_current["human_start_timeout_paused"] = True
+                if updated_current.get("kind") == "free":
+                    updated_current["paused_turn_remaining_seconds"] = (
+                        free_turn_remaining_seconds(room, current) or free_turn_duration(updated_current)
+                    )
+                snapshot = list(room.template_snapshot)
+                snapshot[room.current_stage_index] = updated_current
+                room.template_snapshot = snapshot
+                room.status = "paused"
+                room.stage_started_at = None
+                room.stage_deadline_at = None
+                room.paused_remaining_seconds = stage_remaining
+                selected_seat = str(updated_current.get("selected_human_seat") or updated_current.get("seat") or "")
+                room.failure_reason = (
+                    f"真人辩手获得发言轮次后超过 {settings.human_start_timeout_seconds} 秒未开始，比赛已安全暂停。"
+                    "确认选手已经准备后，由房主或管理员继续比赛。"
+                )
+                append_event(
+                    db,
+                    room,
+                    "participant.start_timeout",
+                    {
+                        "seat_key": selected_seat or None,
+                        "stage_key": updated_current.get("key"),
+                        "turn_seq": updated_current.get("turn_seq"),
+                        "timeout_seconds": settings.human_start_timeout_seconds,
+                    },
+                )
+                append_event(
+                    db,
+                    room,
+                    "match.paused",
+                    {"reason": "participant_start_timeout", "seat_key": selected_seat or None},
+                )
+                db.commit()
+                await self._broadcast(db, room, "participant.start_timeout")
+                return
+
             if current.get("kind") == "judging":
                 self._invalidate_agent_prefetch(room.code)
                 await self.invalidate_free_agent_speculation(room.code)
@@ -1533,6 +1606,10 @@ class MatchEngine:
         updated = dict(current)
         updated["awaiting_human_start"] = True
         updated["human_speech_duration_seconds"] = max(1, duration)
+        updated["human_start_deadline_at"] = (
+            now() + timedelta(seconds=settings.human_start_timeout_seconds)
+        ).isoformat()
+        updated.pop("human_start_timeout_paused", None)
         snapshot = list(room.template_snapshot)
         snapshot[room.current_stage_index] = updated
         room.template_snapshot = snapshot
@@ -1563,6 +1640,9 @@ class MatchEngine:
                 int(updated.pop("human_speech_duration_seconds", updated.get("duration", 30))),
             )
         updated.pop("awaiting_human_start", None)
+        updated.pop("human_start_deadline_at", None)
+        updated.pop("paused_human_start_remaining_ms", None)
+        updated.pop("human_start_timeout_paused", None)
         snapshot = list(room.template_snapshot)
         snapshot[room.current_stage_index] = updated
         room.template_snapshot = snapshot
@@ -1598,6 +1678,11 @@ class MatchEngine:
         remaining = max(0, int(stage_remaining or 0))
         updated = dict(current)
         updated["awaiting_human_start"] = True
+        updated["human_start_deadline_at"] = (
+            now() + timedelta(seconds=settings.human_start_timeout_seconds)
+        ).isoformat()
+        updated.pop("paused_human_start_remaining_ms", None)
+        updated.pop("human_start_timeout_paused", None)
         if updated.get("kind") == "free":
             turn_duration = free_turn_duration(updated)
             updated["free_stage_remaining_seconds"] = remaining
@@ -1662,6 +1747,9 @@ class MatchEngine:
             side = str(current.get("side") or "aff")
             if any(item.side == side and item.occupant_type == "human" for item in room.seats):
                 current["awaiting_human_start"] = True
+                current["human_start_deadline_at"] = (
+                    started_at + timedelta(seconds=settings.human_start_timeout_seconds)
+                ).isoformat()
             snapshot = list(room.template_snapshot)
             snapshot[index] = current
             room.template_snapshot = snapshot
@@ -1710,6 +1798,9 @@ class MatchEngine:
             side = str(updated.get("side") or "aff")
             if any(item.side == side and item.occupant_type == "human" for item in room.seats):
                 updated["awaiting_human_start"] = True
+                updated["human_start_deadline_at"] = (
+                    opened_at + timedelta(seconds=settings.human_start_timeout_seconds)
+                ).isoformat()
         snapshot = list(room.template_snapshot)
         snapshot[room.current_stage_index] = updated
         room.template_snapshot = snapshot

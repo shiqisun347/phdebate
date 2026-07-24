@@ -118,7 +118,7 @@ export default function AgentsModule({
         <table><thead><tr><th>名称</th><th>远程人设</th><th>音色</th><th>状态</th><th>操作</th></tr></thead><tbody>{agents.map((item) => <tr key={item.id}><td>{item.name}</td><td><code>{item.profile_key}</code></td><td>{item.voice_id}</td><td>{item.is_active ? "启用" : "停用"}</td><td><button className="text-button" disabled={saving} onClick={() => onPatchAgent(item.id, { is_active: !item.is_active })}>{item.is_active ? "停用" : "启用"}</button></td></tr>)}</tbody></table>
       </div>
       <div className="panel-title" style={{ marginTop: 30 }}><h3><Volume2 size={18} />阶段预设语音</h3><span className="badge">{audioCues.filter((item) => item.is_active).length} 条启用</span></div>
-      <p className="muted">key 必须与自动流程阶段 key 完全一致。新比赛准备阶段会优先复制预设 WAV；未配置、停用或文件缺失时自动回退 MOSS 实时 TTS。</p>
+      <p className="muted">key 必须与自动流程阶段 key 完全一致。正式比赛只复用管理员提前制作的系统预设语音；未配置、已停用或文件缺失时将安全暂停，不会在比赛中临时合成另一种音色。</p>
       <form className="form-stack panel-subsection" onSubmit={onCreateAudioCue}>
         <div className="form-grid"><div className="field"><label htmlFor="audio-cue-key">阶段 key</label><input id="audio-cue-key" name="key" className="input" required minLength={2} maxLength={80} pattern="[a-z][a-z0-9_]{1,79}" placeholder="opening" /></div><div className="field"><label htmlFor="audio-cue-name">显示名称</label><input id="audio-cue-name" name="name" className="input" required maxLength={120} placeholder="开场规则播报" /></div></div>
         <div className="field"><label htmlFor="audio-cue-text">对应播报文本</label><textarea id="audio-cue-text" name="text" className="textarea" maxLength={2000} placeholder="用于核对预设音频内容；实际播放上传的 WAV。" /></div>

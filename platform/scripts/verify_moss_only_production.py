@@ -33,6 +33,10 @@ REQUIRED_FLAGS = {
     # Match audio is transport data. Persist text only so a hidden file player
     # cannot become a second AI playback path after WebRTC is interrupted.
     "MATCH_AUDIO_ARCHIVE_ENABLED": "false",
+    # Stage announcements are one administrator-authored female voice reused
+    # by every room. Production must never synthesize an ad-hoc cue while a
+    # match is already running.
+    "HOST_CUES_PRESET_ONLY": "true",
     "LIGHTTTS_STREAMING_ENABLED": "false",
     "LIGHTTTS_BISTREAM_ENABLED": "false",
 }
@@ -44,6 +48,26 @@ LEGACY_SETTING_PREFIXES = (
 )
 
 LEGACY_SERVICE_PATTERN = re.compile(r"light[\s_-]*tts|cosy[\s_-]*voice|volcengine.*tts", re.IGNORECASE)
+RETIRED_PORT_PATTERN = re.compile(r":6016(?:[/\s?#]|$)")
+
+
+def verify_retired_values(values: dict[str, str]) -> None:
+    """Reject retired deployment/model selections without exposing values."""
+
+    retired_port_keys = sorted(key for key, value in values.items() if RETIRED_PORT_PATTERN.search(value))
+    retired_model_keys = sorted(
+        key
+        for key, value in values.items()
+        if "model" in key.lower()
+        and "qwen38b" in re.sub(r"[^a-z0-9]", "", value.lower())
+    )
+    errors: list[str] = []
+    if retired_port_keys:
+        errors.append(f"retired port 6016 is configured by: {', '.join(retired_port_keys)}")
+    if retired_model_keys:
+        errors.append(f"forbidden Qwen3 8B model is configured by: {', '.join(retired_model_keys)}")
+    if errors:
+        raise VerificationError("; ".join(errors))
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -112,6 +136,7 @@ def verify(env_file: Path, supervisor_dir: Path) -> dict[str, object]:
     if not supervisor_dir.is_dir():
         raise VerificationError(f"supervisor directory does not exist: {supervisor_dir}")
     values = parse_env(env_file)
+    verify_retired_values(values)
     flags = verify_flags(values)
     programs, legacy_programs = active_supervisor_programs(supervisor_dir)
     if legacy_programs:

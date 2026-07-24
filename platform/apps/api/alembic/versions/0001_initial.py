@@ -1,4 +1,4 @@
-"""Initial V2 schema.
+"""Initial platform schema.
 
 Revision ID: 0001_initial
 Revises:

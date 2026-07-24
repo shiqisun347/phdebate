@@ -257,22 +257,27 @@ export default function ControlPage() {
   const participantDisconnectAndFailurePaused =
     room.status === "paused" &&
     pauseReasonCode === "service_failure_and_participant_disconnected";
+  const participantStartTimeoutPaused =
+    room.status === "paused" &&
+    pauseReasonCode === "participant_start_timeout";
   const participantDisconnectInvolved =
     participantDisconnectPaused || participantDisconnectAndFailurePaused;
   const failurePaused =
     room.status === "paused" &&
     Boolean(room.failure_reason) &&
-    !participantDisconnectPaused;
+    !participantDisconnectPaused &&
+    !participantStartTimeoutPaused;
   const needsAttention =
     failurePaused ||
     participantDisconnectPaused ||
+    participantStartTimeoutPaused ||
     disconnectGraceActive ||
     room.status === "paused";
   const recoveryBlockedByDisconnect =
     participantDisconnectInvolved && disconnectedHumans.length > 0;
   const isTerminal = TERMINAL_ROOM_STATUSES.has(room.status);
   const canPause =
-    ["running", "judging"].includes(room.status) &&
+    ["preparing", "running", "judging"].includes(room.status) &&
     !humanSpeaking &&
     !disconnectPausePending;
   const canSafePause =
@@ -281,6 +286,7 @@ export default function ControlPage() {
     ["running", "paused", "judging"].includes(room.status) &&
     !failurePaused &&
     !participantDisconnectInvolved &&
+    !participantStartTimeoutPaused &&
     !humanSpeaking &&
     !disconnectPausePending &&
     disconnectedHumans.length === 0;
@@ -289,7 +295,7 @@ export default function ControlPage() {
   );
   const canResume =
     room.status === "paused" &&
-    (!room.failure_reason || participantDisconnectPaused) &&
+    (!room.failure_reason || participantDisconnectPaused || participantStartTimeoutPaused) &&
     disconnectedHumans.length === 0;
   const currentSpeaker = room.active_speech
     ? room.seats.find((seat) => seat.seat_key === room.active_speech?.seat_key)
@@ -317,6 +323,8 @@ export default function ControlPage() {
               ? `当前步骤存在服务异常，请先${failureRetryLabel(room)}，不能用跳过掩盖异常。`
               : participantDisconnectInvolved
                 ? "比赛因真人断线暂停，请先恢复比赛，再决定是否跳过阶段。"
+                : participantStartTimeoutPaused
+                  ? "当前阶段需要由真人完成；请确认准备后继续比赛，不能直接跳过。"
             : isTerminal
               ? "比赛已经结束，不能再跳过阶段。"
               : room.status === "preparing"
@@ -334,7 +342,7 @@ export default function ControlPage() {
     ? "retry"
     : room.status === "paused"
       ? "resume"
-      : ["running", "judging"].includes(room.status)
+      : ["preparing", "running", "judging"].includes(room.status)
         ? humanSpeaking
           ? "safe-pause"
           : "pause"
@@ -352,13 +360,17 @@ export default function ControlPage() {
           ? disconnectPausePending
             ? "正在自动暂停"
             : canPause
-            ? "暂停比赛"
+            ? room.status === "preparing"
+              ? "暂停准备流程"
+              : "暂停比赛"
             : "真人发言中，结束后可暂停"
           : room.status === "preparing"
             ? "比赛准备中"
             : "比赛已结束";
   const controlGuidance = isTerminal
     ? "本场比赛已经结束，控制操作已关闭。"
+    : participantStartTimeoutPaused
+      ? "当前阶段已暂停，等待真人辩手准备。"
     : participantDisconnectAndFailurePaused
       ? disconnectedHumans.length
         ? `比赛同时遇到服务异常和真人断线。请先等待${disconnectedHumanNames}重新连接，人员齐全后再${retryLabel}。`
@@ -384,6 +396,8 @@ export default function ControlPage() {
                   : "正常流程由系统自动推进，仅在异常或应急情况下操作。";
   const automaticStep = isTerminal
     ? "自动流程已结束。比赛记录和结果均已保存。"
+    : participantStartTimeoutPaused
+      ? `“${room.current_stage?.name || "当前步骤"}”已保留，发言计时尚未开始。`
     : participantDisconnectAndFailurePaused
       ? disconnectedHumans.length
         ? `流程已冻结在“${room.current_stage?.name || "当前步骤"}”，正在等待全部真人重新连接。`
@@ -415,6 +429,8 @@ export default function ControlPage() {
                           : `正在执行“${room.current_stage?.name || "下一阶段"}”，完成后自动推进。`;
   const dockDetail = busy
     ? "正在安全提交操作，请勿重复点击。"
+    : participantStartTimeoutPaused
+      ? "确认辩手和麦克风就绪后继续比赛。"
     : disconnectGraceActive
       ? `${disconnectedHumanNames}已断线；${disconnectPauseTiming}。倒计时内返回无需房主操作，超时后比赛会自动暂停。`
       : participantDisconnectAndFailurePaused
@@ -463,7 +479,7 @@ export default function ControlPage() {
         </div>
       </header>
 
-      {room.failure_reason && !participantDisconnectPaused && (
+      {room.failure_reason && !participantDisconnectPaused && !participantStartTimeoutPaused && (
         <div className="error-box" role="alert">
           <AlertTriangle size={16} />
           {room.failure_reason}
@@ -478,6 +494,15 @@ export default function ControlPage() {
               ? `仍在等待：${disconnectedHumanNames}。`
               : "全部真人已重新连接。"}{" "}
             真人席位和身份保持不变；全部人员就绪后由房主继续比赛。
+          </span>
+        </div>
+      )}
+      {participantStartTimeoutPaused && (
+        <div className="warning-box" role="status">
+          <Clock3 size={16} />
+          <span>
+            <strong>真人长时间未开始发言，比赛已安全暂停。</strong>{" "}
+            发言时间尚未消耗；请确认当前辩手和麦克风均已准备，再继续比赛。
           </span>
         </div>
       )}
@@ -533,7 +558,7 @@ export default function ControlPage() {
         {needsAttention ? <AlertTriangle /> : <ShieldCheck />}
         <span>
           <strong>
-            {failurePaused || participantDisconnectPaused
+            {failurePaused || participantDisconnectPaused || participantStartTimeoutPaused
               ? "比赛需要房主确认"
               : disconnectGraceActive
                 ? disconnectPausePending
@@ -547,7 +572,9 @@ export default function ControlPage() {
           </strong>
           <span>
             {needsAttention
-              ? controlGuidance
+              ? participantStartTimeoutPaused
+                ? "当前阶段和发言计时均已保留。"
+                : controlGuidance
               : isTerminal
                 ? "本场记录已保存，可返回结果或观战页面查看。"
                 : "阶段、计时和发言会自动推进。除非现场出现异常，否则不需要操作。"}
@@ -634,11 +661,15 @@ export default function ControlPage() {
             </div>
             <div className={styles.operationHint} aria-live="polite">
               <strong>
-                {failurePaused || participantDisconnectPaused
+                {failurePaused || participantDisconnectPaused || participantStartTimeoutPaused
                   ? "当前需要处理"
                   : "仅在比赛无法继续时使用"}
               </strong>
-              <span>{controlGuidance}</span>
+              <span>
+                {participantStartTimeoutPaused
+                  ? "确认辩手和麦克风就绪后，从底部继续比赛。"
+                  : controlGuidance}
+              </span>
             </div>
             <div className={styles.recoveryActions}>
               {aiSpeechActive && (
@@ -742,13 +773,15 @@ export default function ControlPage() {
       <nav className={styles.controlDock} aria-label="比赛主要控制">
         <div className={styles.dockSummary}>
           <span
-            className={`control-dock-dot ${failurePaused || participantDisconnectPaused ? "attention" : isTerminal ? "done" : ""}`}
+            className={`control-dock-dot ${failurePaused || participantDisconnectPaused || participantStartTimeoutPaused ? "attention" : isTerminal ? "done" : ""}`}
             aria-hidden="true"
           />
           <span>
             <strong>
               {failurePaused
                 ? "需要处理当前步骤"
+                : participantStartTimeoutPaused
+                  ? "等待真人确认准备"
                 : participantDisconnectPaused
                   ? "真人断线，比赛已暂停"
                   : isTerminal

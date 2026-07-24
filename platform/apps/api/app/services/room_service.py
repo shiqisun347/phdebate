@@ -306,6 +306,9 @@ def speaking_permission(
     if seat.occupant_type != "human":
         return False, "AI 席位由系统控制"
     if room.status == "paused":
+        current = stage(room)
+        if current and current.get("human_start_timeout_paused"):
+            return False, "真人辩手长时间未开始发言，比赛已安全暂停；确认准备后由房主或管理员继续"
         if (room.failure_reason or "").startswith("真人辩手断线超过 60 秒"):
             return False, "真人辩手断线，比赛已安全暂停；等待全部真人重新连接后由房主或管理员继续"
         return False, "比赛已暂停"
@@ -606,6 +609,10 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
     viewer_can_control = bool(user and can_control(db, room, user))
     viewer_is_participant = bool(user and user_seat(room, user))
     participant_disconnect_pending, participant_disconnect_pause = participant_disconnect_pause_context(db, room)
+    current_stage = stage(room)
+    human_start_timeout_pause = bool(
+        room.status == "paused" and current_stage and current_stage.get("human_start_timeout_paused")
+    )
     disconnect_pending = []
     if room.status in {"preparing", "running", "paused", "judging"}:
         snapshot_time = now()
@@ -656,11 +663,19 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
             "reason_code": (
                 "participant_disconnected"
                 if participant_disconnect_pause
+                else "participant_start_timeout"
+                if human_start_timeout_pause
                 else "service_failure_and_participant_disconnected"
                 if participant_disconnect_pending
                 else "service_or_manual_pause"
             ),
-            "recommended_action": ("resume" if participant_disconnect_pause else "retry" if room.failure_reason else "resume"),
+            "recommended_action": (
+                "resume"
+                if participant_disconnect_pause or human_start_timeout_pause
+                else "retry"
+                if room.failure_reason
+                else "resume"
+            ),
             "can_terminate_to_release_capacity": True,
         }
     return {
@@ -747,7 +762,7 @@ def serialize_room(db: Session, room: Room, user: User | None = None, *, public:
         "free_turn_queue": free_turn_queue,
         "failure_reason": (
             room.failure_reason
-            if expose_internal_details or participant_disconnect_pause
+            if expose_internal_details or participant_disconnect_pause or human_start_timeout_pause
             else "服务暂时异常，比赛已安全暂停。"
             if room.failure_reason
             else ""

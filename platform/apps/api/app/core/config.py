@@ -176,6 +176,11 @@ class Settings(BaseSettings):
     # At the enforced five-room capacity, a 250 ms authority tick keeps stage
     # transitions responsive without creating meaningful database pressure.
     engine_poll_seconds: float = Field(default=0.25, ge=0.1, le=2.0)
+    # A human turn clock starts only after the participant explicitly opens
+    # their microphone.  This separate readiness deadline prevents an online
+    # but inactive participant from occupying a running room indefinitely;
+    # expiry pauses the same turn and never substitutes an AI.
+    human_start_timeout_seconds: int = Field(default=120, ge=30, le=900)
     # A paused room is never deleted automatically.  After this interval with
     # no connected human it is projected as stale so the owner/admin can make
     # an explicit, auditable decision to retry or terminate it and release a

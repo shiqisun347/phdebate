@@ -17,6 +17,7 @@ def write_env(path: Path, **overrides: str) -> None:
         "WEBRTC_AUDIO_ENABLED": "true",
         "WEBRTC_AUDIO_BACKEND": "livekit",
         "MATCH_AUDIO_ARCHIVE_ENABLED": "false",
+        "HOST_CUES_PRESET_ONLY": "true",
         "LIGHTTTS_STREAMING_ENABLED": "false",
         "LIGHTTTS_BISTREAM_ENABLED": "false",
         "LIGHTTTS_URL": "http://127.0.0.1:8080/inference_zero_shot",
@@ -59,6 +60,7 @@ def test_rejects_reenabled_lighttts_streaming(tmp_path: Path) -> None:
     [
         ("MOSS_TTS_STABLE_PLAYBACK_ENABLED", "true"),
         ("MATCH_AUDIO_ARCHIVE_ENABLED", "true"),
+        ("HOST_CUES_PRESET_ONLY", "false"),
     ],
 )
 def test_rejects_complete_file_or_archived_audio_paths(
@@ -73,6 +75,38 @@ def test_rejects_complete_file_or_archived_audio_paths(
 
     with pytest.raises(VerificationError, match=flag):
         verify(env_file, supervisor_dir)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("UNUSED_TTS_ENDPOINT", "http://127.0.0.1:6016/tts", "retired port 6016"),
+        ("AGENT_MODEL_NAME", "Qwen3-8B-Instruct", "forbidden Qwen3 8B"),
+    ],
+)
+def test_rejects_retired_port_or_model_without_echoing_the_value(
+    tmp_path: Path,
+    key: str,
+    value: str,
+    message: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    supervisor_dir = tmp_path / "supervisor"
+    supervisor_dir.mkdir()
+    write_env(env_file, **{key: value})
+
+    with pytest.raises(VerificationError, match=message) as rejected:
+        verify(env_file, supervisor_dir)
+    assert value not in str(rejected.value)
+
+
+def test_retired_port_check_does_not_inspect_unrelated_secret_digits(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    supervisor_dir = tmp_path / "supervisor"
+    supervisor_dir.mkdir()
+    write_env(env_file, MOSS_TTS_REALTIME_API_KEY="opaque-6016-secret")
+
+    assert verify(env_file, supervisor_dir)["ok"] is True
 
 
 @pytest.mark.parametrize(

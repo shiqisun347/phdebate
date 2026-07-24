@@ -340,10 +340,12 @@ describe("DebateStage", () => {
     expect(screen.getByRole("heading", { name: "比赛准备中" })).toBeInTheDocument();
     expect(screen.getByText(/正在建立实时语音.*不会开始比赛计时.*自动进入第一阶段/)).toBeInTheDocument();
     expect(screen.getByRole("timer", { name: "比赛准备中，完成后自动开场" })).toHaveTextContent("准备中完成后自动开场");
+    expect(screen.getByText(/系统正在连接比赛声音并加载开场提示.*自动开场/)).toBeInTheDocument();
+    expect(screen.queryByText("等待下一位辩手开始发言。")).not.toBeInTheDocument();
     const control = await screen.findByRole("button", { name: /比赛准备中/ });
     expect(control).toHaveAttribute("data-state", "blocked");
     expect(control).toHaveAttribute("title", "系统完成语音连接与预设提示后会自动开场");
-    expect(screen.queryByRole("button", { name: "暂停比赛" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停准备流程" })).toBeEnabled();
   });
 
   it("presents an automatic stage cue as a system prompt instead of a host speech timer", async () => {
@@ -720,6 +722,7 @@ describe("DebateStage", () => {
 
   it("keeps the full human speaking time frozen until the speaker starts", () => {
     vi.useFakeTimers();
+    const humanStartDeadlineAt = new Date(Date.now() + 120_000).toISOString();
     const waitingStage = {
       key: "aff_case",
       name: "正方立论",
@@ -727,6 +730,7 @@ describe("DebateStage", () => {
       duration: 120,
       seat: "aff_1",
       awaiting_human_start: true,
+      human_start_deadline_at: humanStartDeadlineAt,
       human_speech_duration_seconds: 120,
     };
     const { rerender } = render(<DebateStage room={room({
@@ -739,9 +743,11 @@ describe("DebateStage", () => {
     const frozen = screen.getByRole("timer", { name: "完整发言时间 02:00，点击开始发言后计时" });
     expect(frozen).toHaveTextContent("02:00开始发言后计时");
     expect(frozen).not.toHaveTextContent("本环节剩余");
-    expect(screen.getAllByText("张三点击“开始发言”后正式计时")).toHaveLength(2);
+    expect(screen.getAllByText(/张三点击“开始发言”后正式计时/)).toHaveLength(2);
+    expect(screen.getAllByText(/请在 02:00 内开始，超时将安全暂停比赛/)).toHaveLength(2);
     act(() => { vi.advanceTimersByTime(8_000); });
     expect(screen.getByRole("timer")).toHaveAccessibleName("完整发言时间 02:00，点击开始发言后计时");
+    expect(screen.getAllByText(/请在 01:52 内开始，超时将安全暂停比赛/)).toHaveLength(2);
 
     rerender(<DebateStage room={room({
       seq: 5,
@@ -1155,6 +1161,39 @@ describe("DebateStage", () => {
     fireEvent.click(screen.getByRole("button", { name: "比赛控制" }));
     expect(screen.getByRole("button", { name: "继续比赛" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: /异常暂停，请先重试/ })).not.toBeInTheDocument();
+  });
+
+  it("treats a human start timeout as a resumeable personnel pause instead of a service failure", () => {
+    render(<DebateStage room={room({
+      status: "paused",
+      failure_reason: "真人获得轮次后长时间未开始发言，比赛已安全暂停。",
+      current_stage: {
+        key: "aff_case",
+        name: "正方立论",
+        kind: "speech",
+        duration: 120,
+        seat: "aff_1",
+        awaiting_human_start: true,
+        human_speech_duration_seconds: 120,
+      },
+      remaining_seconds: 120,
+      pause_health: {
+        paused_at: new Date().toISOString(),
+        paused_duration_seconds: 2,
+        is_stale: false,
+        capacity_consuming: true,
+        reason_code: "participant_start_timeout",
+        recommended_action: "resume",
+        can_terminate_to_release_capacity: true,
+      },
+    })} connected mode="debate" onLeave={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "真人长时间未开始发言" })).toBeInTheDocument();
+    expect(screen.getByText("真人长时间未开始发言，比赛已安全暂停。")).toBeInTheDocument();
+    expect(screen.getByText(/发言时间尚未消耗.*确认当前辩手和麦克风均已准备/)).toBeInTheDocument();
+    expect(screen.queryByText("比赛因临时服务异常暂停。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试异常步骤" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "继续比赛" })).toBeEnabled();
   });
 
   it("describes a participant-disconnect pause accurately to anonymous watchers", () => {

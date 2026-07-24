@@ -232,6 +232,48 @@ describe("room control console", () => {
     expect(
       screen.getByText(/完成后会自动进入第一阶段/),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "暂停准备流程" }),
+    ).toBeEnabled();
+  });
+
+  it("lets the owner pause the automatic opening preparation and resume it from the saved position", async () => {
+    mocks.room = {
+      ...runningRoom,
+      status: "preparing",
+      current_stage: null,
+      current_stage_index: -1,
+      remaining_seconds: null,
+    } as Room;
+    const paused = {
+      ...mocks.room,
+      status: "paused",
+      seq: 2,
+    } as Room;
+    mocks.apiFetch
+      .mockResolvedValueOnce({ room: paused })
+      .mockResolvedValueOnce({ room: mocks.room });
+
+    const view = render(<ControlPage />);
+    fireEvent.click(screen.getByRole("button", { name: "暂停准备流程" }));
+
+    await waitFor(() =>
+      expect(mocks.apiFetch).toHaveBeenCalledWith(
+        "/api/rooms/123456/control/pause",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(mocks.setRoom).toHaveBeenCalledOnce();
+
+    mocks.room = paused;
+    view.rerender(<ControlPage />);
+    fireEvent.click(screen.getByRole("button", { name: "继续比赛" }));
+    await waitFor(() =>
+      expect(mocks.apiFetch).toHaveBeenLastCalledWith(
+        "/api/rooms/123456/control/resume",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
   });
 
   it("explains which human action the automatic flow is waiting for", () => {
@@ -614,6 +656,58 @@ describe("room control console", () => {
     expect(
       screen.queryByRole("button", { name: /重试当前步骤|重置当前发言/ }),
     ).not.toBeInTheDocument();
+    const resume = screen.getByRole("button", { name: "继续比赛" });
+    expect(resume).toBeEnabled();
+    fireEvent.click(resume);
+    await waitFor(() =>
+      expect(mocks.apiFetch).toHaveBeenCalledWith(
+        "/api/rooms/123456/control/resume",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+  });
+
+  it("treats a human start timeout as a resumeable personnel pause rather than a service retry", async () => {
+    const paused = {
+      ...runningRoom,
+      status: "paused",
+      seq: 10,
+      current_stage: {
+        ...runningRoom.current_stage!,
+        awaiting_human_start: true,
+        human_speech_duration_seconds: 120,
+      },
+      remaining_seconds: 120,
+      failure_reason: "真人获得轮次后长时间未开始发言，比赛已安全暂停。",
+      pause_health: {
+        paused_at: new Date().toISOString(),
+        paused_duration_seconds: 3,
+        is_stale: false,
+        capacity_consuming: true,
+        reason_code: "participant_start_timeout" as const,
+        recommended_action: "resume" as const,
+        can_terminate_to_release_capacity: true,
+      },
+    } as Room;
+    mocks.room = paused;
+    mocks.apiFetch.mockResolvedValueOnce({
+      room: {
+        ...paused,
+        status: "running",
+        failure_reason: "",
+        pause_health: null,
+      },
+    });
+
+    render(<ControlPage />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "真人长时间未开始发言，比赛已安全暂停",
+    );
+    expect(screen.getAllByText(/发言时间尚未消耗/).length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("button", { name: /重试当前步骤|重置当前发言/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "跳过当前阶段" })).toBeDisabled();
     const resume = screen.getByRole("button", { name: "继续比赛" });
     expect(resume).toBeEnabled();
     fireEvent.click(resume);

@@ -103,6 +103,21 @@ describe("DebateStage RTC recovery", () => {
     mocks.setAvailability(true, false);
   });
 
+  it("waits for the room WebSocket before requesting spectator RTC credentials", async () => {
+    const current = activeRoom(new Date().toISOString());
+    const { rerender } = render(
+      <DebateStage room={current} connected={false} mode="watch" />,
+    );
+    await act(async () => undefined);
+
+    expect(mocks.liveKitInstances).toHaveLength(0);
+
+    rerender(<DebateStage room={current} connected mode="watch" />);
+    await act(async () => undefined);
+
+    expect(mocks.liveKitInstances).toHaveLength(1);
+  });
+
   it("does not create a reconnect storm when the server explicitly disables RTC", async () => {
     mocks.setAvailability(false, true);
     render(<DebateStage room={activeRoom(new Date().toISOString())} connected mode="debate" />);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta, timezone
 
+from app.core.config import settings
 from app.core.database import acquire_transaction_locks
 from app.models.entities import FreeTurnRequest, Match, Room, RoomSeat, Speech, User
 from app.services.room_service import append_event, free_turn_duration, now, remaining_seconds, stage
@@ -287,6 +288,10 @@ def resolve_intermission(db: Session, room: Room, current: dict) -> tuple[dict, 
     if winner:
         updated["selected_human_seat"] = winner.seat_key
         updated["awaiting_human_start"] = True
+        updated["human_start_deadline_at"] = (
+            now() + timedelta(seconds=settings.human_start_timeout_seconds)
+        ).isoformat()
+        updated.pop("human_start_timeout_paused", None)
         updated.pop("force_ai_fallback", None)
         updated.pop("ai_preparing", None)
         updated.pop("preparing_stage_remaining_seconds", None)
@@ -327,6 +332,10 @@ def resolve_intermission(db: Session, room: Room, current: dict) -> tuple[dict, 
             updated.pop("preparing_stage_remaining_seconds", None)
             updated.pop("preparing_turn_remaining_seconds", None)
             updated["awaiting_human_start"] = True
+            updated["human_start_deadline_at"] = (
+                now() + timedelta(seconds=settings.human_start_timeout_seconds)
+            ).isoformat()
+            updated.pop("human_start_timeout_paused", None)
     snapshot = list(room.template_snapshot)
     snapshot[room.current_stage_index] = updated
     room.template_snapshot = snapshot

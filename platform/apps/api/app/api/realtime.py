@@ -1390,7 +1390,7 @@ async def asr_websocket(websocket: WebSocket, code: str) -> None:
                     # previous implementation ignored the empty payload and
                     # left both sides waiting for the full 30-second final
                     # timeout, which made "结束发言" look frozen in a quiet
-                    # classroom or after a very short utterance.
+                    # noisy venue or after a very short utterance.
                     if is_final and not text:
                         await send_json(
                             {

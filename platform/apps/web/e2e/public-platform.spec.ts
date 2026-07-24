@@ -12,6 +12,13 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
 function watchRuntimeErrors(page: Page) {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      errors.push(
+        `http ${response.status()}: ${response.request().method()} ${response.url()}`,
+      );
+    }
+  });
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(`console: ${message.text()}`);
   });
@@ -91,7 +98,7 @@ test("匿名参赛先校验房间号，并可直接进入公开观战", async ({
   await expect(enterRoom).toBeEnabled();
   await enterRoom.click();
   await expect(page.locator(".participate-dialog .error-box[role='alert']")).toContainText(
-    "房间不存在",
+    /房间不存在|没有找到房间/,
   );
   await expect(page).toHaveURL(/\/$/);
   // The public room preflight intentionally returns 404 for an unknown code.

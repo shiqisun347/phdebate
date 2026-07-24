@@ -264,6 +264,22 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   const terminal = TERMINAL_ROOM_STATUSES.has(room.status);
   const stagePreparing = Boolean(room.current_stage?.ai_preparing);
   const awaitingHumanStart = !terminal && Boolean(room.current_stage?.awaiting_human_start);
+  const humanStartDeadlineAt = room.current_stage?.human_start_deadline_at || "";
+  const initialHumanStartRemaining = useMemo(() => {
+    // A new authoritative snapshot may keep the same deadline string. Re-read
+    // the wall clock for that snapshot instead of resetting the local timer
+    // from the older memoized value.
+    if (!Number.isSafeInteger(room.seq)) return null;
+    if (!humanStartDeadlineAt) return null;
+    const deadline = Date.parse(humanStartDeadlineAt);
+    if (!Number.isFinite(deadline)) return null;
+    return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+  }, [humanStartDeadlineAt, room.seq]);
+  const humanStartRemaining = useCountdown(
+    initialHumanStartRemaining,
+    room.seq,
+    room.status === "running" && awaitingHumanStart,
+  );
   const clockRunning = room.status === "running" || room.status === "judging";
   const remaining = useCountdown(room.remaining_seconds, room.seq, clockRunning && !stagePreparing && !awaitingHumanStart);
   // A free-debate turn is authoritative only after the server has opened its
@@ -483,6 +499,13 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   }, [prepareAsrAudioGraph, room.code]);
 
   useEffect(() => {
+    // Anonymous spectators receive their signed admission ticket from the
+    // room WebSocket handshake. Requesting an RTC token before that socket's
+    // first authoritative snapshot races the Set-Cookie header and produces a
+    // visible 403 even though the watch page itself is healthy. Waiting for
+    // the room channel also gives authenticated participants one consistent
+    // identity/presence boundary before the audio subscription is created.
+    if (!connected) return;
     const client = new LiveKitRoomAudio();
     rtcAudio.current = client;
     let disposed = false;
@@ -565,7 +588,7 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       if (rtcAudio.current === client) rtcAudio.current = null;
       void client.dispose();
     };
-  }, [room.code]);
+  }, [connected, room.code]);
 
   const retryFailedStep = useCallback(async () => {
     if (mode !== "debate" || retryingFailure || !room.failure_reason || !room.can_control) return;
@@ -1822,13 +1845,22 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       && !room.current_stage.turn_started_at
       && !room.active_speech,
   );
+  const humanStartSafetyDetail = !awaitingHumanStart
+    ? ""
+    : humanStartRemaining === null
+      ? "长时间未开始将安全暂停比赛"
+      : humanStartRemaining <= 0
+        ? "准备时间已到，系统正在安全暂停比赛"
+        : `请在 ${formatTime(humanStartRemaining)} 内开始，超时将安全暂停比赛`;
   const readyReason = !connected
     ? "实时连接已断开，请等待重连后再发言"
     : room.current_stage?.kind === "free" && turnRemaining !== null
     ? freeTurnWaitingToStart
-      ? `${deviceReason} · ${room.can_speak ? "点击开始发言后计时" : "本轮尚未开始"} · 单轮时长 ${formatTime(turnRemaining)}`
+      ? `${deviceReason} · ${room.can_speak ? "点击开始发言后计时" : "本轮尚未开始"} · 单轮时长 ${formatTime(turnRemaining)}${humanStartSafetyDetail ? ` · ${humanStartSafetyDetail}` : ""}`
       : `${deviceReason} · 本轮剩余 ${formatTime(turnRemaining)}`
-    : deviceReason;
+    : awaitingHumanStart
+      ? `${deviceReason} · ${humanStartSafetyDetail}`
+      : deviceReason;
   const hasLocalSpeechWork = starting || capturing || finishing || Boolean(pendingFinish);
   const humanSpeaking = room.active_speech?.speaker_type === "human";
   const disconnectedHumans = room.seats.filter((seat) => seat.occupant_type === "human" && !seat.connected);
@@ -1837,6 +1869,7 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   const disconnectPauseTiming = disconnectGraceTimingLabel(disconnectGraceRemaining);
   const participantDisconnectPaused = !terminal && room.status === "paused" && room.pause_health?.reason_code === "participant_disconnected";
   const participantDisconnectAndFailurePaused = !terminal && room.status === "paused" && room.pause_health?.reason_code === "service_failure_and_participant_disconnected";
+  const participantStartTimeoutPaused = !terminal && room.status === "paused" && room.pause_health?.reason_code === "participant_start_timeout";
   const participantDisconnectInvolved = participantDisconnectPaused || participantDisconnectAndFailurePaused;
   const recoveryBlockedByDisconnect = participantDisconnectInvolved && disconnectedHumans.length > 0;
   const settingsLabel = mode === "watch"
@@ -1844,20 +1877,29 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     : room.can_control
       ? "比赛控制"
       : "更多操作";
-  const canPauseMatch = room.can_control && ["running", "judging"].includes(room.status) && !humanSpeaking && !hasLocalSpeechWork;
-  const canResumeMatch = room.can_control && room.status === "paused" && (!room.failure_reason || participantDisconnectPaused) && disconnectedHumans.length === 0 && !hasLocalSpeechWork;
+  // Opening preparation is already a live, server-owned workflow: realtime
+  // audio is being established and the preset opening cue is being loaded.
+  // The API deliberately allows the owner to pause here, so the stage must
+  // not strand the owner with only a passive “preparing” screen when the
+  // venue needs a last-minute device or personnel check.
+  const canPauseMatch = room.can_control && ["preparing", "running", "judging"].includes(room.status) && !humanSpeaking && !hasLocalSpeechWork;
+  const canResumeMatch = room.can_control && room.status === "paused" && (!room.failure_reason || participantDisconnectPaused || participantStartTimeoutPaused) && disconnectedHumans.length === 0 && !hasLocalSpeechWork;
   const canTerminateMatch = room.can_control && ["preparing", "running", "paused", "judging"].includes(room.status) && !hasLocalSpeechWork;
-  const serviceFailurePaused = !terminal && Boolean(room.failure_reason) && !participantDisconnectPaused;
+  const serviceFailurePaused = !terminal && Boolean(room.failure_reason) && !participantDisconnectPaused && !participantStartTimeoutPaused;
   const announcementActive = room.status === "running" && room.current_stage?.kind === "announcement";
-  const stageStatusLabel = participantDisconnectPaused
-    ? "真人断线暂停"
+  const stageStatusLabel = participantStartTimeoutPaused
+    ? "等待真人确认"
+    : participantDisconnectPaused
+      ? "真人断线暂停"
     : serviceFailurePaused
     ? "服务异常暂停"
     : roomStatusLabel[room.status] || room.status;
-  const stageHeading = participantDisconnectPaused
-    ? disconnectedHumans.length
-      ? "等待真人辩手重新连接"
-      : "全部真人已重新连接"
+  const stageHeading = participantStartTimeoutPaused
+    ? "真人长时间未开始发言"
+    : participantDisconnectPaused
+      ? disconnectedHumans.length
+        ? "等待真人辩手重新连接"
+        : "全部真人已重新连接"
     : serviceFailurePaused
     ? room.current_stage?.name
       ? `${room.current_stage.name} · 等待恢复`
@@ -1873,8 +1915,12 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
   // A paused state must take precedence over a stage cue. Otherwise a cue
   // left on the current stage can look like a live caption after a disconnect
   // or service pause, which is confusing and visually resembles stale ASR.
-  const idleSubtitleText = room.status === "paused"
-    ? "比赛已暂停，恢复后将从当前进度继续。"
+  const idleSubtitleText = participantStartTimeoutPaused
+    ? "比赛已安全暂停，请确认准备后继续当前发言。"
+    : room.status === "paused"
+      ? "比赛已暂停，恢复后将从当前进度继续。"
+    : room.status === "preparing"
+      ? "系统正在连接比赛声音并加载开场提示，完成后自动开场。"
     : ["completed", "review_required", "terminated", "cancelled"].includes(room.status)
       ? "比赛已经结束，发言和实时字幕已停止。"
     : systemFacingCopy(room.current_stage?.cue)
@@ -1894,10 +1940,12 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       : currentSpeaker
         ? `${currentSpeaker.display_name} · 待发言`
         : "自动赛程";
-  const watchFocusLabel = participantDisconnectPaused
-    ? disconnectedHumans.length
-      ? "比赛进度已保存，等待全部真人返回"
-      : "比赛进度已保存，等待房主继续"
+  const watchFocusLabel = participantStartTimeoutPaused
+    ? "真人长时间未开始发言，比赛已安全暂停；确认准备后继续"
+    : participantDisconnectPaused
+      ? disconnectedHumans.length
+        ? "比赛进度已保存，等待全部真人返回"
+        : "比赛进度已保存，等待房主继续"
     : serviceFailurePaused
     ? "比赛进度已保存，恢复后将自动继续"
     : terminal
@@ -1911,7 +1959,7 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
     : announcementActive
       ? "系统正在播放阶段提示"
     : awaitingHumanStart
-      ? `${currentSpeaker?.display_name || "当前辩手"}点击“开始发言”后正式计时`
+      ? `${currentSpeaker?.display_name || "当前辩手"}点击“开始发言”后正式计时 · ${humanStartSafetyDetail}`
     : aiPreparing
       ? "AI 正在准备本轮发言"
       : room.active_speech
@@ -1954,9 +2002,11 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
       : room.status === "preparing"
         ? "系统完成语音连接与预设提示后会自动开场"
         : room.status === "paused"
-          ? serviceFailurePaused
-            ? "比赛进度已保存，请等待房主处理异常"
-            : "比赛进度已保存，继续后仍从当前环节开始"
+          ? participantStartTimeoutPaused
+            ? "真人长时间未开始发言，比赛已安全暂停；确认准备后由房主继续"
+            : serviceFailurePaused
+              ? "比赛进度已保存，请等待房主处理异常"
+              : "比赛进度已保存，继续后仍从当前环节开始"
           : announcementActive
             ? "提示播放完成后会自动进入下一项"
             : aiPreparing
@@ -1987,6 +2037,8 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
           : disconnectedHumans.length
             ? "等待全部真人重新连接"
             : "继续比赛"
+        : room.status === "preparing"
+          ? "暂停准备流程"
         : humanSpeaking
           ? "真人发言结束后可暂停"
           : "暂停比赛";
@@ -2100,8 +2152,9 @@ export function DebateStage({ room, connected, mode, liveEvent, connectionError 
         {mode === "debate" && <button type="button" title={canStartSpeaking || (connected && canRecoverSpeaking) ? readyReason : blockedSpeakDetail} data-state={capturing ? "speaking" : starting ? "starting" : pendingFinish ? "review" : canStartSpeaking ? "ready" : "blocked"} className={`speak-button ${starting || capturing || pendingFinish || finishing ? "recording" : canStartSpeaking ? "ready" : ""}`} disabled={pendingFinishMustDiscard || starting || finishing || (pendingFinish ? !pendingFinish.content.trim() : !capturing && !canStartSpeaking)} onClick={pendingFinishMustDiscard ? undefined : pendingFinish ? () => void submitFinish(pendingFinish) : capturing ? () => void stopSpeaking(false) : () => void startSpeaking()}>{pendingFinishMustDiscard ? <><MicOff size={24}/><span>本次发言无法提交<small>请处理本页尚未提交的内容</small></span></> : starting ? <><Mic size={24}/><span>正在启动麦克风<small>请确认浏览器权限提示…</small></span></> : finishing ? <><MicOff size={24}/><span>正在整理发言<small>等待最终字幕并安全提交…</small></span></> : pendingFinish ? <><MicOff size={24}/><span>提交保留的发言<small>{pendingFinish.content.trim() ? "识别文字已保留在本页" : "请先补充发言文字"}</small></span></> : capturing ? <><MicOff size={24}/><span>结束发言<small>{turnRemaining === null ? "正在识别发言" : `本轮剩余 ${formatTime(turnRemaining)}`}</small></span></> : <><Mic size={24}/><span>{!connected ? blockedSpeakLabel : canRecoverSpeaking ? "恢复发言" : canStartSpeaking ? "开始发言" : blockedSpeakLabel}<small>{!connected ? blockedSpeakDetail : canRecoverSpeaking ? "恢复同一设备的进行中发言" : canStartSpeaking ? readyReason : blockedSpeakDetail}</small></span></>}</button>}
         <div className="control-tools">{mode === "debate" && <TranscriptDrawer room={room} liveEvent={liveEvent} />}{mode === "debate" && showOwnerQuickControl && <button type="button" className="owner-quick-control" title={quickControlReason} aria-label={quickControlReason} aria-busy={roomActionBusy === (room.status === "paused" ? "resume" : "pause")} disabled={Boolean(roomActionBusy) || (room.status === "paused" ? !canResumeMatch : !canPauseMatch)} onClick={() => void controlMatch(room.status === "paused" ? "resume" : "pause")}>{room.status === "paused" ? <Play/> : <Pause/>}<small>{room.status === "paused" ? "继续" : "暂停"}</small></button>}<button type="button" aria-label={muted ? "开启比赛声音" : playbackNeedsGesture ? "播放比赛声音" : playbackError ? "重试比赛声音" : "关闭比赛声音"} aria-pressed={!muted && !playbackNeedsGesture && !playbackError} aria-busy={playbackPending} disabled={playbackPending} onClick={togglePlaybackSound}>{muted || playbackNeedsGesture || playbackError ? <VolumeX/> : <Volume2/>}<small>{muted ? "开启声音" : playbackNeedsGesture ? "点击播放" : playbackError ? "重试声音" : "声音"}</small></button>{mode === "watch" && room.my_seat && <Link href={`/rooms/${room.code}/debate`} className="stage-tool-link" aria-label="返回辩手页面"><Mic/><small>参赛</small></Link>}{mode === "watch" && room.can_control && <Link href={`/rooms/${room.code}/control`} className="stage-tool-link" aria-label="打开比赛控制台"><Settings/><small>控制台</small></Link>}<button type="button" aria-label="切换全屏" onClick={fullscreen}><Maximize/><small>全屏</small></button><button ref={settingsButton} type="button" title={mode === "watch" ? "声音与观看设置" : room.can_control ? "暂停、继续或提前结束比赛" : "退出页面与设备状态"} aria-label={settingsLabel} aria-controls="stage-settings-dialog" aria-expanded={showSettings} onClick={() => setShowSettings((value) => !value)}><Settings/><small>{mode === "watch" ? "设置" : room.can_control ? "控制" : "更多"}</small></button></div>
       </footer>
-      {(room.failure_reason || disconnectGraceActive || (connectionError && !connected)) && <div className="stage-notice-stack">
+      {(room.failure_reason || participantStartTimeoutPaused || disconnectGraceActive || (connectionError && !connected)) && <div className="stage-notice-stack">
         {serviceFailurePaused && <div className="stage-failure-warning" role="alert" aria-live="assertive"><AlertTriangle size={18}/><span><strong>{participantDisconnectAndFailurePaused ? "比赛同时遇到服务异常和真人断线。" : "比赛因临时服务异常暂停。"}</strong><small>{recoveryBlockedByDisconnect ? `请先等待 ${disconnectedHumanNames} 重新连接，人员齐全后再重试当前步骤。` : mode === "debate" && room.can_control ? "比赛进度已保存，确认后可重试当前步骤。" : "比赛进度已保存，请等待房主在比赛控制页处理；恢复后页面会自动同步。"}</small>{retryFailureError && <small className="stage-failure-error">{retryFailureError}</small>}</span>{mode === "debate" && room.can_control && <button type="button" aria-busy={retryingFailure} disabled={retryingFailure || hasLocalSpeechWork || recoveryBlockedByDisconnect} title={hasLocalSpeechWork ? "请先处理本页保留的发言文字" : recoveryBlockedByDisconnect ? "等待全部真人重新连接" : undefined} onClick={requestRetry}><RotateCcw size={15}/>{retryingFailure ? "正在重试…" : recoveryBlockedByDisconnect ? "等待真人重连" : "重试异常步骤"}</button>}</div>}
+        {participantStartTimeoutPaused && <div className="stage-failure-warning" role="status" aria-live="polite"><Clock3 size={18}/><span><strong>真人长时间未开始发言，比赛已安全暂停。</strong><small>发言时间尚未消耗；请确认当前辩手和麦克风均已准备，再由房主继续比赛。</small></span></div>}
         {participantDisconnectPaused && <div className="stage-failure-warning" role="status" aria-live="polite"><Clock3 size={18}/><span><strong>真人断线超过 60 秒，比赛已自动暂停。</strong><small>{disconnectedHumans.length ? `仍在等待 ${disconnectedHumanNames} 重新连接；真人席位和身份保持不变。` : "全部真人已重新连接；确认现场就绪后，由房主继续比赛。"}</small></span></div>}
         {disconnectGraceActive && <div className="stage-failure-warning" role="status" aria-live="polite"><Clock3 size={18}/><span><strong>{disconnectedHumanNames}已断线，真人席位保持不变。</strong><small>{disconnectPauseTiming}；辩手返回后可继续当前流程。</small></span></div>}
         {connectionError && !connected && <div className={`stage-connection-warning ${connectionBlockedReason ? "blocked" : ""}`} role="alert"><WifiOff size={16}/><span>{connectionError}{connectionBlockedReason === "capacity_full" ? " 当前连接不会自动重试，请稍后刷新页面。" : ""}</span>{onReconnect && !connectionBlockedReason && <button type="button" onClick={onReconnect}>立即重连</button>}{connectionBlockedReason === "capacity_full" && <Link href="/">返回赛事大厅</Link>}</div>}

@@ -123,7 +123,8 @@
             <li>真人发言必须同时满足：比赛运行、轮到本席位、没有其他活跃发言、控制租约有效。</li>
             <li>登录会话只证明用户身份，不能证明设备控制权。只有完全相同的高熵设备租约可以自动恢复；不同租约即使共享同一登录 Cookie，也必须显式确认接管，真人发言进行中禁止接管。</li>
             <li>自由辩论单轮最多 30 秒并按真实发言时间计时；真人等待开始、AI 准备和换边申请窗口不消耗总时长或单轮时长。</li>
-            <li>阶段提示音缺失或文件无效时，Engine 可以直接进入该阶段，但仍必须初始化自由辩论总时钟与单轮时钟，不能把第一轮结束误判为整段自由辩论结束。</li>
+            <li>真人获得固定阶段或自由辩论发言权后有 120 秒开口准备时间；仍未开始时整场安全暂停。恢复后继续原席位、原阵营和原轮次，绝不由 AI 接管。</li>
+            <li>所有系统提示音必须由管理员提前制作并在比赛间复用。开赛所需提示音缺失、停用或文件无效时阻止开赛或安全暂停，不在比赛中临时合成另一种音色。</li>
             <li>每次状态变化写入追加式 MatchEvent；重复请求通过幂等键和事务锁防止重复执行。</li>
             <li>外部服务连续失败时安全暂停，已有发言、计时和事件不得丢失。</li>
           </ul>
@@ -254,13 +255,14 @@ sudo ./deploy/verify-data-volume-backup.sh
             <li><strong>确认唯一状态</strong>以房间 REST snapshot、最新 MatchEvent 和 Engine 日志判断是 preparing、running、paused、judging 还是 terminal；页面文案不能互相矛盾。</li>
             <li><strong>安全暂停</strong>若当前音频、Agent、ASR 或计时不可控，由房主/管理员在控制台暂停。保留阶段、剩余时间、当前 speech 和事件。</li>
             <li><strong>定位单一链路</strong>按“连接 → Agent 正文 → MOSS 连续 PCM → LiveKit 发布 → 浏览器可听”或“麦克风 → AudioWorklet PCM → ASR WS → transcript”逐段核对，不同时修改多个变量。</li>
-            <li><strong>原房间恢复</strong>优先 retry / resume；真人持续断线达到 60 秒时冻结计时并暂停整场，保留真人席位。全部真人重新连接后再由房主或管理员继续；只有数据已无法一致恢复时才终止。</li>
+            <li><strong>原房间恢复</strong>服务失败使用 retry，人员暂停使用 resume。真人持续断线达到 60 秒，或获得发言权后 120 秒仍未开始时，冻结计时并暂停整场，保留真人席位与原轮次。条件恢复后再由房主或管理员继续；只有数据已无法一致恢复时才终止。</li>
             <li><strong>完成后复盘</strong>导出房间事件、相关日志、语音性能遥测和浏览器诊断，建立可重复测试；修复后用同一场景回归。</li>
           </ol>
           <div class="table-wrap"><table><thead><tr><th>现象</th><th>先检查</th><th>安全动作</th></tr></thead><tbody>
             <tr><td>AI 长时间无声</td><td>Agent 正文、MOSS 首帧、audio.rtc.started、LiveKit 订阅</td><td>暂停；清空当前 generation 和未播放队列后重置本次发言</td></tr>
             <tr><td>现场卡顿/撕裂</td><td>生成 RTF、发布起点、丢包、concealed samples、浏览器缓冲</td><td>暂停并重置本次发言；不得临时切换 WAV 或其他播放器</td></tr>
             <tr><td>真人按钮一直禁用</td><td>比赛状态、当前席位、在线状态、active speech、控制设备租约</td><td>刷新 snapshot；确认所有真人已返回，必要时结束残留 speech 后恢复比赛</td></tr>
+            <tr><td>等待真人开始超过 120 秒</td><td>当前席位、设备控制权、麦克风权限和选手准备状态</td><td>系统安全暂停；确认原辩手准备后使用 resume，不能 retry 或让 AI 接管</td></tr>
             <tr><td>字幕不更新</td><td>麦克风授权、AudioWorklet、ASR 鉴权、单流租约</td><td>保留已识别片段，重建本次 ASR 连接</td></tr>
             <tr><td>“服务异常，已暂停”</td><td>最新 provider.failed / engine.quarantined 事件及 provider health</td><td>修复依赖后 retry，再 resume；不要跳过关键评分</td></tr>
             <tr><td>观众反复重连</td><td>全站 5 人租约、Redis 状态、关闭码</td><td>达到容量时停止自动重连并显示明确原因</td></tr>
